@@ -215,7 +215,7 @@ class WorkflowConfig:
 
     keep_server_running: bool = False
 
-    limit_stocks: int = 25
+    #limit_stocks: int = 25
 
     def __post_init__(
         self,

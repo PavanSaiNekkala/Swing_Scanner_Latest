@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import re
+import pandas as pd
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -54,6 +55,8 @@ DEFAULT_HOST: Final[str] = "127.0.0.1"
 DEFAULT_PORT: Final[int] = 8501
 
 SERVER_START_TIMEOUT_SECONDS: Final[int] = 90
+
+STOCK_BACKTEST_TIMEOUT_SECONDS: Final[int] = 60
 
 DEFAULT_SCAN_TIMEOUT_SECONDS: Final[int] = 30 * 60
 
@@ -530,7 +533,7 @@ def set_stock_limit(
 ) -> None:
     """
     Configure the Streamlit 'Limit stocks this run' slider
-    and verify that the requested value was applied.
+    through Playwright and verify the requested value.
     """
 
     if limit_stocks is None:
@@ -608,19 +611,18 @@ def set_stock_limit(
         maximum_value,
     )
 
-    current_value = slider.input_value()
+    current_value = int(
+        float(
+            slider.input_value()
+        )
+    )
 
     logger.info(
         "Current stock limit: %s.",
         current_value,
     )
 
-    if (
-        int(
-            float(current_value)
-        )
-        == limit_stocks
-    ):
+    if current_value == limit_stocks:
 
         logger.info(
             "Stock limit is already set to %s.",
@@ -629,47 +631,27 @@ def set_stock_limit(
 
         return
 
-    slider.evaluate(
-        """
-        (element, value) => {
+    slider.focus()
 
-            const setter =
-                Object.getOwnPropertyDescriptor(
-                    HTMLInputElement.prototype,
-                    "value"
-                ).set;
-
-            setter.call(
-                element,
-                String(value)
-            );
-
-            element.dispatchEvent(
-                new Event(
-                    "input",
-                    {
-                        bubbles: true,
-                    }
-                )
-            );
-
-            element.dispatchEvent(
-                new Event(
-                    "change",
-                    {
-                        bubbles: true,
-                    }
-                )
-            );
-
-        }
-        """,
-        limit_stocks,
+    slider.press(
+        "Home"
     )
 
+    page.wait_for_timeout(
+        200
+    )
+
+    for _ in range(
+        limit_stocks - minimum_value
+    ):
+
+        slider.press(
+            "ArrowRight"
+        )
+
     logger.info(
-        "Stock limit update event dispatched: %s.",
-        limit_stocks,
+        "Stock limit adjustment completed "
+        "through Playwright keyboard events."
     )
 
     page.wait_for_timeout(
@@ -681,6 +663,11 @@ def set_stock_limit(
     ).filter(
         has_text="Limit stocks this run"
     ).first
+
+    slider_container.wait_for(
+        state="visible",
+        timeout=PAGE_TIMEOUT_MS,
+    )
 
     slider = slider_container.get_by_role(
         "slider"
@@ -1140,313 +1127,981 @@ def get_signalled_stock_table(
 
 def get_signalled_stock_symbols(
     page: Page,
+    output_path: Path,
 ) -> list[str]:
     """
-    Read all final signalled stock symbols from the
-    completed Streamlit results page.
+    Download the completed backtest track record and return only
+    stocks that have a valid Signals today value.
     """
 
     logger.info(
-        "Detecting final signalled stocks."
+        "Downloading completed backtest track record "
+        "to identify today's signalled stocks."
     )
 
-    selector = (
-        get_workflow_signalled_stock_selector(
-            page
+    download_backtest_track_record(
+        page,
+        output_path=output_path,
+    )
+
+    if not output_path.exists():
+
+        raise RuntimeError(
+            "Backtest track record was not downloaded: "
+            f"{output_path}"
         )
+
+    dataframe = pd.read_csv(
+        output_path
     )
 
-    selector.click(
-        timeout=PAGE_TIMEOUT_MS,
-    )
+    if dataframe.empty:
 
-    page.wait_for_timeout(
-        500
-    )
-
-    options = page.get_by_role(
-        "option"
-    )
-
-    option_count = (
-        options.count()
-    )
+        raise RuntimeError(
+            "The downloaded backtest track record "
+            "contains no rows."
+        )
 
     logger.info(
-        "Found %s option(s) in the "
-        "signalled-stock selector.",
-        option_count,
+        "Backtest track record loaded | "
+        "Rows=%s | Columns=%s",
+        len(dataframe),
+        list(dataframe.columns),
     )
 
-    symbols: list[str] = []
+    normalized_columns = {
+        str(column)
+        .strip()
+        .casefold(): column
+        for column in dataframe.columns
+    }
 
-    for index in range(
-        option_count
+    signal_today_column = None
+
+    for candidate in (
+        "signal today",
+        "signals today",
     ):
 
-        option = options.nth(
-            index
-        )
+        if candidate in normalized_columns:
 
-        try:
-
-            if not option.is_visible():
-
-                continue
-
-            symbol = (
-                option.inner_text()
-                .strip()
+            signal_today_column = (
+                normalized_columns[candidate]
             )
 
-        except PlaywrightError:
+            break
 
-            continue
+    if signal_today_column is None:
 
-        if not symbol:
-
-            continue
-
-        normalized_symbol = (
-            symbol.strip()
+        raise RuntimeError(
+            "Could not find the 'Signal Today' or "
+            "'Signals today' column in the backtest "
+            "track record. "
+            f"Available columns: {list(dataframe.columns)}"
         )
 
-        if (
-            normalized_symbol.lower()
-            in {
-                "select",
-                "select stock",
-                "select a stock",
-                "select a signalled stock",
-            }
-        ):
+    symbol_column = None
 
-            continue
+    for candidate in (
+        "stock",
+        "symbol",
+        "ticker",
+    ):
 
-        if (
-            normalized_symbol
-            not in symbols
-        ):
+        if candidate in normalized_columns:
 
-            symbols.append(
-                normalized_symbol
+            symbol_column = (
+                normalized_columns[candidate]
             )
 
-    page.keyboard.press(
-        "Escape"
+            break
+
+    if symbol_column is None:
+
+        raise RuntimeError(
+            "Could not identify the stock symbol column "
+            "in the backtest track record. "
+            f"Available columns: {list(dataframe.columns)}"
+        )
+
+    signal_series = (
+        dataframe[signal_today_column]
+        .fillna("")
+        .astype(str)
+        .str.strip()
     )
 
-    if not symbols:
+    invalid_signals = {
+        "",
+        "nan",
+        "none",
+        "null",
+        "false",
+        "0",
+        "no",
+        "no signal",
+        "-",
+    }
+
+    signalled_dataframe = dataframe.loc[
+        ~signal_series.str.casefold().isin(
+            invalid_signals
+        )
+    ].copy()
+
+    signalled_symbols = (
+        signalled_dataframe[symbol_column]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    signalled_symbols = [
+        symbol
+        for symbol in signalled_symbols
+        if symbol
+    ]
+
+    signalled_symbols = list(
+        dict.fromkeys(
+            signalled_symbols
+        )
+    )
+
+    if not signalled_symbols:
 
         raise RuntimeError(
             "The scan completed successfully, but no "
-            "final signalled stocks were detected from "
-            "the results selector."
+            "stocks had a valid 'Signals today' value."
         )
 
     logger.info(
-        "Detected %s final signalled stock(s): %s",
-        len(symbols),
-        symbols,
+        "Detected %s Signals today stock(s): %s",
+        len(signalled_symbols),
+        signalled_symbols,
     )
 
-    return symbols
+    return signalled_symbols
 
 
-def get_workflow_signalled_stock_selector(
+def get_backtest_track_record_table(
     page: Page,
 ) -> Locator:
     """
-    Return the Streamlit selectbox used to choose
-    an individual final signalled stock.
+    Locate the Streamlit Backtest Track Record dataframe.
+
+    The table is identified by its schema, never by the
+    currently rendered stock symbols, because st.dataframe
+    virtualizes rows.
     """
 
-    selectboxes = page.locator(
-        '[data-testid="stSelectbox"]'
+    logger.info(
+        "Locating Backtest Track Record table by schema."
     )
 
-    selectbox_count = (
-        selectboxes.count()
+    candidate_selectors = (
+        '[data-testid="stDataFrame"]',
+        '[role="grid"]',
     )
 
-    if selectbox_count == 0:
+    required_columns = (
+        "Stock",
+        "Signals today",
+        "Trades",
+        "Win%",
+        "Target #",
+        "Stop #",
+        "Expectancy%",
+    )
 
-        raise RuntimeError(
-            "No Streamlit selectbox controls were "
-            "found on the completed results page."
+    seen_handles: set[str] = set()
+
+    for selector in candidate_selectors:
+
+        candidates = page.locator(
+            selector,
         )
 
-    for index in range(
-        selectbox_count
-    ):
+        candidate_count = candidates.count()
 
-        selectbox = selectboxes.nth(
-            index
+        logger.info(
+            "Checking %d candidate(s) using selector %s.",
+            candidate_count,
+            selector,
+        )
+
+        for index in range(
+            candidate_count,
+        ):
+
+            candidate = candidates.nth(
+                index,
+            )
+
+            try:
+
+                if not candidate.is_visible():
+
+                    continue
+
+                candidate_id = candidate.evaluate(
+                    """
+                    element => {
+                        if (!element.dataset.workflowLocatorId) {
+                            element.dataset.workflowLocatorId =
+                                Math.random()
+                                .toString(36)
+                                .slice(2);
+                        }
+
+                        return element.dataset.workflowLocatorId;
+                    }
+                    """
+                )
+
+                if candidate_id in seen_handles:
+
+                    continue
+
+                seen_handles.add(
+                    candidate_id
+                )
+
+                text = (
+                    candidate.inner_text(
+                        timeout=5_000,
+                    )
+                    .strip()
+                )
+
+            except PlaywrightError:
+
+                continue
+
+            normalized_text = (
+                text.casefold()
+            )
+
+            matched_columns = sum(
+                column.casefold()
+                in normalized_text
+                for column in required_columns
+            )
+
+            logger.info(
+                "Table candidate inspected | "
+                "Selector=%s | Index=%d | "
+                "Schema matches=%d/%d",
+                selector,
+                index,
+                matched_columns,
+                len(
+                    required_columns
+                ),
+            )
+
+            if (
+                matched_columns
+                >= 5
+            ):
+
+                logger.info(
+                    "Backtest Track Record table identified | "
+                    "Selector=%s | Index=%d",
+                    selector,
+                    index,
+                )
+
+                candidate.scroll_into_view_if_needed(
+                    timeout=PAGE_TIMEOUT_MS,
+                )
+
+                return candidate
+
+    save_debug_screenshot(
+        page,
+        "backtest_table_schema_not_found",
+    )
+
+    raise RuntimeError(
+        "Could not identify the Backtest Track Record "
+        "table by its schema."
+    )
+
+
+def clear_backtest_track_record_selection(
+    page: Page,
+    *,
+    keep_symbol: str | None = None,
+) -> None:
+    """
+    Best-effort clearing of previously selected rows from
+    the Backtest Track Record.
+
+    Failure to locate the table is not fatal because the
+    next stock can still be selected directly by symbol.
+    """
+
+    try:
+
+        results_table = (
+            get_backtest_track_record_table(
+                page,
+            )
+        )
+
+    except RuntimeError:
+
+        logger.warning(
+            "Could not reliably locate the Backtest Track "
+            "Record for clearing previous selections. "
+            "Continuing with direct symbol selection."
+        )
+
+        return
+
+    rows = results_table.locator(
+        '[role="row"]'
+    )
+
+    row_count = rows.count()
+
+    for index in range(row_count):
+
+        row = rows.nth(
+            index,
         )
 
         try:
 
-            if not selectbox.is_visible():
-
-                continue
-
-            combobox = selectbox.get_by_role(
-                "combobox"
-            ).first
-
-            if not combobox.is_visible():
-
-                continue
-
-            current_text = (
-                selectbox.inner_text()
-                .strip()
-                .lower()
-            )
-
-            logger.info(
-                "Inspecting selectbox %s: %s",
-                index,
-                current_text,
-            )
-
-            if (
-                "stock" in current_text
-                or "signal" in current_text
-                or "symbol" in current_text
-            ):
-
-                logger.info(
-                    "Using signalled-stock selector "
-                    "from selectbox %s.",
-                    index,
+            text = (
+                row.inner_text(
+                    timeout=2_000,
                 )
-
-                return combobox
+                .strip()
+            )
 
         except PlaywrightError:
 
             continue
 
-    raise RuntimeError(
-        "Could not identify the signalled-stock "
-        "selector from the completed results page."
+        normalized_text = (
+            text.casefold()
+        )
+
+        if (
+            keep_symbol is not None
+            and keep_symbol.casefold()
+            in normalized_text
+        ):
+
+            continue
+
+        checkboxes = row.get_by_role(
+            "checkbox"
+        )
+
+        if checkboxes.count() == 0:
+
+            continue
+
+        checkbox = checkboxes.first
+
+        try:
+
+            if checkbox.is_checked():
+
+                checkbox.uncheck(
+                    timeout=PAGE_TIMEOUT_MS,
+                )
+
+                logger.info(
+                    "Cleared previous Backtest Track Record "
+                    "selection | Row=%s",
+                    index,
+                )
+
+        except PlaywrightError:
+
+            continue
+
+
+def get_backtest_scroll_container(
+    table: Locator,
+) -> Locator:
+    """
+    Return the internal scrollable container used by the
+    virtualized Streamlit dataframe.
+    """
+
+    candidates = table.locator(
+        """
+        [data-testid="stDataFrameResizable"],
+        [data-testid="stDataFrame"] > div,
+        [role="grid"],
+        .ReactVirtualized__Grid,
+        .ReactVirtualized__Grid__innerScrollContainer,
+        [style*="overflow"]
+        """
     )
+
+    candidate_count = candidates.count()
+
+    for index in range(
+        candidate_count,
+    ):
+
+        candidate = candidates.nth(
+            index,
+        )
+
+        try:
+
+            is_scrollable = candidate.evaluate(
+                """
+                element => (
+                    element.scrollHeight
+                    > element.clientHeight + 5
+                )
+                """
+            )
+
+        except PlaywrightError:
+
+            continue
+
+        if is_scrollable:
+
+            logger.info(
+                "Backtest scroll container identified | "
+                "Candidate=%d",
+                index,
+            )
+
+            return candidate
+
+    logger.warning(
+        "No dedicated internal scroll container was found. "
+        "Using the Backtest Track Record table itself."
+    )
+
+    return table
+
 
 
 def select_signalled_stock(
     page: Page,
+    *,
     symbol: str,
 ) -> None:
     """
-    Select one final signalled stock through the dedicated
-    automation selector.
+    Select a signalled stock exclusively from the Backtest
+    Track Record.
+
+    The dataframe is virtualized, so the function progressively
+    scrolls the dataframe until the requested symbol is rendered.
     """
 
+    symbol = str(
+        symbol,
+    ).strip()
+
+    if not symbol:
+
+        raise ValueError(
+            "Stock symbol cannot be empty."
+        )
+
+    symbol_normalized = (
+        symbol.casefold()
+    )
+
     logger.info(
-        "Selecting signalled stock: %s",
+        "Selecting symbol from Backtest Track Record ONLY | "
+        "Stock=%s",
         symbol,
     )
 
-    selector = (
-        get_workflow_signalled_stock_selector(
-            page
+    backtest_table = (
+        get_backtest_track_record_table(
+            page,
         )
     )
 
-    selector.click(
+    backtest_table.scroll_into_view_if_needed(
         timeout=PAGE_TIMEOUT_MS,
     )
 
-    option = page.get_by_role(
-        "option",
-        name=symbol,
-        exact=True,
+    scroll_container = (
+        get_backtest_scroll_container(
+            backtest_table,
+        )
     )
 
-    option.wait_for(
-        state="visible",
-        timeout=PAGE_TIMEOUT_MS,
-    )
+    try:
 
-    option.click(
-        timeout=PAGE_TIMEOUT_MS,
-    )
+        scroll_container.evaluate(
+            """
+            element => {
+                element.scrollTop = 0;
+            }
+            """
+        )
+
+    except PlaywrightError:
+
+        pass
 
     page.wait_for_timeout(
-        500
+        500,
     )
 
-    logger.info(
-        "Signalled stock selected: %s",
-        symbol,
-    )
+    visited_scroll_positions: set[int] = set()
 
+    for attempt in range(
+        100,
+    ):
 
-def get_stock_backtest_download_control(
-    page: Page,
-    symbol: str,
-) -> Locator:
-    """
-    Return the individual full-backtest download control
-    generated after selecting one signalled stock.
-
-    This intentionally does not match the consolidated
-    'Download backtest track record' button.
-    """
-
-    return page.locator(
-        '[data-testid="stDownloadButton"]'
-    ).filter(
-        has_text=re.compile(
-            rf"Download\s+{re.escape(symbol)}\s+full\s+backtest",
-            re.IGNORECASE,
+        rows = backtest_table.locator(
+            '[role="row"]',
         )
-    ).first
+
+        row_count = rows.count()
+
+        logger.info(
+            "Searching rendered Backtest Track Record rows | "
+            "Attempt=%d | Rows=%d | Stock=%s",
+            attempt + 1,
+            row_count,
+            symbol,
+        )
+
+        for row_index in range(
+            row_count,
+        ):
+
+            row = rows.nth(
+                row_index,
+            )
+
+            try:
+
+                if not row.is_visible():
+
+                    continue
+
+                row_text = (
+                    row.inner_text(
+                        timeout=2_000,
+                    )
+                    .strip()
+                )
+
+            except PlaywrightError:
+
+                continue
+
+            if (
+                symbol_normalized
+                not in row_text.casefold()
+            ):
+
+                continue
+
+            logger.info(
+                "Matched Backtest Track Record row | "
+                "Rendered row=%d | Stock=%s | Text=%r",
+                row_index,
+                symbol,
+                row_text,
+            )
+
+            row.scroll_into_view_if_needed(
+                timeout=PAGE_TIMEOUT_MS,
+            )
+
+            checkbox = row.get_by_role(
+                "checkbox",
+            ).first
+
+            try:
+
+                if (
+                    checkbox.count() > 0
+                    and checkbox.is_visible()
+                ):
+
+                    if not checkbox.is_checked():
+
+                        checkbox.check(
+                            timeout=PAGE_TIMEOUT_MS,
+                        )
+
+                        logger.info(
+                            "Selected Backtest Track Record "
+                            "checkbox | Stock=%s",
+                            symbol,
+                        )
+
+                    else:
+
+                        logger.info(
+                            "Backtest Track Record checkbox "
+                            "already selected | Stock=%s",
+                            symbol,
+                        )
+
+                else:
+
+                    exact_symbol_cell = (
+                        row.get_by_text(
+                            re.compile(
+                                rf"^\s*{re.escape(symbol)}\s*$",
+                                re.IGNORECASE,
+                            ),
+                        ).first
+                    )
+
+                    exact_symbol_cell.click(
+                        timeout=PAGE_TIMEOUT_MS,
+                        force=True,
+                    )
+
+                    logger.info(
+                        "Selected Backtest Track Record "
+                        "symbol cell | Stock=%s",
+                        symbol,
+                    )
+
+            except PlaywrightError:
+
+                row.click(
+                    timeout=PAGE_TIMEOUT_MS,
+                    force=True,
+                )
+
+                logger.info(
+                    "Selected Backtest Track Record row "
+                    "directly | Stock=%s",
+                    symbol,
+                )
+
+            page.wait_for_timeout(
+                1_500,
+            )
+
+            save_debug_screenshot(
+                page,
+                f"stock_selected_from_backtest_{symbol}",
+            )
+
+            logger.info(
+                "Signalled stock selected successfully | "
+                "Stock=%s",
+                symbol,
+            )
+
+            return
+
+        try:
+
+            scroll_state = (
+                scroll_container.evaluate(
+                    """
+                    element => ({
+                        scrollTop: Math.round(
+                            element.scrollTop
+                        ),
+                        clientHeight: Math.round(
+                            element.clientHeight
+                        ),
+                        scrollHeight: Math.round(
+                            element.scrollHeight
+                        ),
+                    })
+                    """
+                )
+            )
+
+        except PlaywrightError:
+
+            break
+
+        current_scroll_top = int(
+            scroll_state["scrollTop"]
+        )
+
+        client_height = int(
+            scroll_state["clientHeight"]
+        )
+
+        scroll_height = int(
+            scroll_state["scrollHeight"]
+        )
+
+        logger.info(
+            "Backtest virtual scroll state | "
+            "Attempt=%d | Top=%d | Viewport=%d | Height=%d",
+            attempt + 1,
+            current_scroll_top,
+            client_height,
+            scroll_height,
+        )
+
+        if current_scroll_top in visited_scroll_positions:
+
+            logger.info(
+                "Backtest scroll position repeated. "
+                "Stopping virtualized row search."
+            )
+
+            break
+
+        visited_scroll_positions.add(
+            current_scroll_top
+        )
+
+        if (
+            current_scroll_top
+            >= scroll_height - client_height - 5
+        ):
+
+            logger.info(
+                "Reached end of Backtest Track Record."
+            )
+
+            break
+
+        next_scroll_top = min(
+            current_scroll_top
+            + max(
+                200,
+                int(
+                    client_height * 0.80
+                ),
+            ),
+            max(
+                0,
+                scroll_height - client_height,
+            ),
+        )
+
+        try:
+
+            scroll_container.evaluate(
+                """
+                (element, nextScrollTop) => {
+                    element.scrollTop =
+                        nextScrollTop;
+                }
+                """,
+                next_scroll_top,
+            )
+
+        except PlaywrightError:
+
+            break
+
+        page.wait_for_timeout(
+            750,
+        )
+
+    save_debug_screenshot(
+        page,
+        f"backtest_symbol_not_found_{symbol}",
+    )
+
+    raise RuntimeError(
+        "Could not find stock "
+        f"{symbol} inside the virtualized Backtest "
+        "Track Record table after scanning all available "
+        "rendered rows."
+    )
+
 
 
 def wait_for_stock_backtest(
     page: Page,
     symbol: str,
+    *,
+    timeout_seconds: int = 60,
 ) -> None:
     """
-    Wait until the selected stock's individual backtest
-    drill-down has completed rendering.
+    Wait for the selected stock's individual backtest.
+
+    The page is progressively scrolled to the bottom because
+    Streamlit renders the stock-specific full-backtest section
+    below the Backtest Track Record.
     """
 
     logger.info(
-        "Waiting for %s individual backtest.",
+        "Waiting for %s individual backtest and scrolling "
+        "towards the bottom of the page.",
         symbol,
     )
 
-    heading = page.get_by_text(
-        re.compile(
-            rf"Every backtest trade for\s+{re.escape(symbol)}",
-            re.IGNORECASE,
-        ),
-    ).first
-
-    heading.wait_for(
-        state="visible",
-        timeout=PAGE_TIMEOUT_MS,
+    deadline = (
+        time.monotonic()
+        + timeout_seconds
     )
 
-    download_control = (
-        get_stock_backtest_download_control(
-            page,
-            symbol,
+    last_wait_log = -5
+    stable_bottom_checks = 0
+
+    while time.monotonic() < deadline:
+
+        try:
+
+            button = (
+                find_stock_backtest_download_button(
+                    page,
+                    symbol,
+                )
+            )
+
+            if button.is_visible():
+
+                button.scroll_into_view_if_needed(
+                    timeout=PAGE_TIMEOUT_MS,
+                )
+
+                page.wait_for_timeout(
+                    500,
+                )
+
+                logger.info(
+                    "%s individual full-backtest button "
+                    "is ready.",
+                    symbol,
+                )
+
+                save_debug_screenshot(
+                    page,
+                    f"stock_backtest_ready_{symbol}",
+                )
+
+                return
+
+        except (
+            RuntimeError,
+            PlaywrightError,
+        ):
+
+            pass
+
+        try:
+
+            scroll_state = page.evaluate(
+                """
+                () => ({
+                    y: window.scrollY,
+                    viewport: window.innerHeight,
+                    height: document.documentElement.scrollHeight,
+                })
+                """
+            )
+
+            current_y = int(
+                scroll_state["y"]
+            )
+
+            viewport_height = int(
+                scroll_state["viewport"]
+            )
+
+            page_height = int(
+                scroll_state["height"]
+            )
+
+            bottom_y = max(
+                0,
+                page_height
+                - viewport_height,
+            )
+
+            next_y = min(
+                bottom_y,
+                current_y
+                + max(
+                    400,
+                    int(
+                        viewport_height * 0.80
+                    ),
+                ),
+            )
+
+            if next_y == current_y:
+
+                stable_bottom_checks += 1
+
+            else:
+
+                stable_bottom_checks = 0
+
+                page.evaluate(
+                    """
+                    nextY => window.scrollTo({
+                        top: nextY,
+                        behavior: "auto",
+                    })
+                    """,
+                    next_y,
+                )
+
+            logger.debug(
+                "Page scroll progress | "
+                "Current=%d | Next=%d | Bottom=%d | "
+                "Stable=%d",
+                current_y,
+                next_y,
+                bottom_y,
+                stable_bottom_checks,
+            )
+
+        except PlaywrightError:
+
+            pass
+
+        elapsed_seconds = int(
+            timeout_seconds
+            - max(
+                0,
+                deadline - time.monotonic(),
+            )
         )
+
+        if (
+            elapsed_seconds
+            - last_wait_log
+            >= 5
+        ):
+
+            logger.info(
+                "Still waiting for %s stock-specific "
+                "full-backtest button and scrolling page... "
+                "%d/%d seconds",
+                symbol,
+                elapsed_seconds,
+                timeout_seconds,
+            )
+
+            last_wait_log = elapsed_seconds
+
+        page.wait_for_timeout(
+            1_000,
+        )
+
+    save_debug_screenshot(
+        page,
+        f"stock_backtest_timeout_{symbol}",
     )
 
-    download_control.wait_for(
-        state="visible",
-        timeout=PAGE_TIMEOUT_MS,
+    raise PlaywrightTimeoutError(
+        "Timed out waiting for the stock-specific full "
+        f"backtest download button for {symbol} after "
+        f"{timeout_seconds} seconds."
     )
 
-    logger.info(
-        "%s individual backtest is ready.",
-        symbol,
-    )
 
 
 def get_stock_download_path(
@@ -1485,15 +2140,64 @@ def get_stock_download_path(
     )
 
 
+def find_stock_backtest_download_button(
+    page: Page,
+    symbol: str,
+) -> Locator:
+    """
+    Locate ONLY the exact stock-specific full-backtest
+    download button.
+
+    Aggregate Backtest Track Record download controls are
+    intentionally excluded.
+    """
+
+    symbol = str(
+        symbol,
+    ).strip()
+
+    exact_button_pattern = re.compile(
+        rf"^\s*Download\s+{re.escape(symbol)}\s+"
+        r"full\s+backtest\s*$",
+        re.IGNORECASE,
+    )
+
+    candidates = [
+        page.get_by_role(
+            "button",
+            name=exact_button_pattern,
+        ).first,
+        page.get_by_text(
+            exact_button_pattern,
+        ).first,
+    ]
+
+    for candidate in candidates:
+
+        try:
+
+            if candidate.count() > 0:
+
+                return candidate
+
+        except PlaywrightError:
+
+            continue
+
+    raise RuntimeError(
+        "Could not locate the exact individual "
+        f"'Download {symbol} full backtest' control."
+    )
+
+
 def download_stock_backtest(
     page: Page,
-    *,
     symbol: str,
     output_path: Path,
-) -> Path:
+) -> None:
     """
-    Download the full historical backtest for one selected
-    signalled stock only.
+    Download the full historical backtest for the
+    currently selected signalled stock only.
     """
 
     logger.info(
@@ -1501,35 +2205,27 @@ def download_stock_backtest(
         symbol,
     )
 
-    download_control = (
-        get_stock_backtest_download_control(
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    download_button = (
+        find_stock_backtest_download_button(
             page,
             symbol,
         )
     )
 
-    download_control.wait_for(
-        state="visible",
-        timeout=PAGE_TIMEOUT_MS,
-    )
-
-    download_control.scroll_into_view_if_needed()
-
     with page.expect_download(
         timeout=PAGE_TIMEOUT_MS,
     ) as download_info:
 
-        download_control.click(
+        download_button.click(
             timeout=PAGE_TIMEOUT_MS,
         )
 
-    download: Download = (
-        download_info.value
-    )
-
-    download.save_as(
-        str(output_path)
-    )
+    download = download_info.value
 
     failure = download.failure()
 
@@ -1539,6 +2235,10 @@ def download_stock_backtest(
             f"{symbol} backtest download failed: "
             f"{failure}"
         )
+
+    download.save_as(
+        str(output_path)
+    )
 
     if (
         not output_path.exists()
@@ -1550,12 +2250,11 @@ def download_stock_backtest(
         )
 
     logger.info(
-        "%s backtest saved successfully: %s",
+        "Individual backtest downloaded successfully | "
+        "Stock=%s | File=%s",
         symbol,
         output_path,
     )
-
-    return output_path
 
 
 def validate_stock_backtest_csv(
@@ -2007,107 +2706,152 @@ def run_workflow(
                 page
             )
 
+            manifest_path = get_download_path(
+                segment=config.segment,
+                suggested_only=False,
+            )
+
             signalled_symbols = (
                 get_signalled_stock_symbols(
-                    page
+                    page,
+                    output_path=manifest_path,
                 )
             )
 
-        if not signalled_symbols:
+            if not signalled_symbols:
 
-            raise RuntimeError(
-                "Scan completed, but no signalled stocks "
-                "were found in the scanner results."
+                raise RuntimeError(
+                    "Scan completed, but no signalled stocks "
+                    "were found in the scanner results."
+                )
+
+            logger.info(
+                "Found %s signalled stock(s): %s",
+                len(signalled_symbols),
+                signalled_symbols,
             )
 
-        logger.info(
-            "Found %s signalled stock(s): %s",
-            len(signalled_symbols),
-            signalled_symbols,
-        )
+            # =================================================
+            # INDIVIDUAL SIGNALLED-STOCK BACKTEST DOWNLOADS
+            #
+            # IMPORTANT:
+            # This entire section MUST remain inside
+            # `with sync_playwright() as playwright:`
+            # =================================================
+            
+            downloaded_paths: list[Path] = []
 
-        downloaded_paths = []
+            for row_index, symbol in enumerate(
+                signalled_symbols,
+            ):
 
-        for symbol in signalled_symbols:
+                try:
 
-            try:
+                    symbol = str(
+                        symbol
+                    ).strip()
 
-                select_signalled_stock(
-                    page,
-                    symbol,
-                )
+                    if not symbol:
 
-                wait_for_stock_backtest(
-                    page,
-                    symbol,
-                )
+                        raise ValueError(
+                            "Encountered an empty signalled stock symbol."
+                        )
 
-                output_path = (
-                    get_stock_download_path(
-                        segment=config.segment,
+                    logger.info(
+                        "Processing signalled stock | "
+                        "Workflow row=%d | Stock=%s",
+                        row_index,
+                        symbol,
+                    )
+
+                    select_signalled_stock(
+                        page=page,
                         symbol=symbol,
                     )
-                )
 
-                download_stock_backtest(
-                    page,
-                    symbol=symbol,
-                    output_path=output_path,
-                )
+                    wait_for_stock_backtest(
+                        page,
+                        symbol,
+                    )
 
-                row_count = (
-                    validate_stock_backtest_csv(
+                    output_path = (
+                        get_stock_download_path(
+                            segment=config.segment,
+                            symbol=symbol,
+                        )
+                    )
+
+                    download_stock_backtest(
+                        page,
+                        symbol=symbol,
+                        output_path=output_path,
+                    )
+
+                    row_count = (
+                        validate_stock_backtest_csv(
+                            output_path,
+                            expected_symbol=symbol,
+                        )
+                    )
+
+                    logger.info(
+                        "Signalled stock completed | "
+                        "Workflow row=%d | "
+                        "Stock=%s | "
+                        "Backtest rows=%s | "
+                        "File=%s",
+                        row_index,
+                        symbol,
+                        row_count,
+                        output_path,
+                    )
+
+                    downloaded_paths.append(
                         output_path
                     )
+
+                except (
+                    PlaywrightError,
+                    PlaywrightTimeoutError,
+                    RuntimeError,
+                    ValueError,
+                ):
+
+                    logger.exception(
+                        "Failed to download individual "
+                        "backtest for signalled stock | "
+                        "Row=%d | Stock=%s",
+                        row_index,
+                        symbol,
+                    )
+
+                    continue
+
+            # =============================================
+            # These blocks are OUTSIDE the for-loop.
+            # They are executed only after every signalled
+            # stock has been attempted.
+            # =============================================
+
+            if not downloaded_paths:
+
+                raise RuntimeError(
+                    "The scan completed, but no individual "
+                    "signalled-stock backtests could be "
+                    "downloaded."
                 )
 
-                logger.info(
-                    "Signalled stock completed | "
-                    "Stock=%s | "
-                    "Backtest rows=%s | "
-                    "File=%s",
-                    symbol,
-                    row_count,
-                    output_path,
-                )
-
-                downloaded_paths.append(
-                    output_path
-                )
-
-            except (
-                PlaywrightError,
-                PlaywrightTimeoutError,
-                RuntimeError,
-                ValueError,
-            ) as error:
-
-                logger.exception(
-                    "Failed to download individual "
-                    "backtest for signalled stock: %s",
-                    symbol,
-                )
-
-                continue
-
-        if not downloaded_paths:
-
-            raise RuntimeError(
-                "The scan completed, but no individual "
-                "signalled-stock backtests could be downloaded."
+            logger.info(
+                "WORKFLOW COMPLETED SUCCESSFULLY | "
+                "Segment=%s | "
+                "Signalled stocks=%s | "
+                "Downloaded backtests=%s",
+                config.segment,
+                len(signalled_symbols),
+                len(downloaded_paths),
             )
 
-        logger.info(
-            "WORKFLOW COMPLETED SUCCESSFULLY | "
-            "Segment=%s | "
-            "Signalled stocks=%s | "
-            "Downloaded backtests=%s",
-            config.segment,
-            len(signalled_symbols),
-            len(downloaded_paths),
-        )
-
-        return downloaded_paths[0]
+            return downloaded_paths
 
     finally:
 
@@ -2136,8 +2880,7 @@ def run_workflow(
             stop_streamlit_server(
                 process
             )
-
-
+            
 # =============================================================================
 # CLI
 # =============================================================================

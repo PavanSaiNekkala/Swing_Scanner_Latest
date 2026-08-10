@@ -215,7 +215,7 @@ class WorkflowConfig:
 
     keep_server_running: bool = False
 
-    #limit_stocks: int = 25
+    limit_stocks: int = 25
 
     def __post_init__(
         self,
@@ -2470,6 +2470,49 @@ def set_stock_limit(
     )
 
 
+
+def set_stock_limit_to_maximum(
+    page: Page,
+) -> int:
+    """
+    Set the stock limit to the maximum value currently supported
+    by the scanner UI.
+
+    The maximum is read dynamically from the slider after the
+    selected market segment has been configured.
+    """
+
+    slider = get_stock_limit_slider(
+        page
+    )
+
+    minimum_value, maximum_value = (
+        get_slider_bounds(
+            slider
+        )
+    )
+
+    logger.info(
+        "Detected stock-limit range | "
+        "Minimum=%d | Maximum=%d",
+        minimum_value,
+        maximum_value,
+    )
+
+    set_stock_limit(
+        page,
+        limit=maximum_value,
+    )
+
+    logger.info(
+        "Stock limit configured to maximum | "
+        "Maximum=%d",
+        maximum_value,
+    )
+
+    return maximum_value
+
+
 def wait_for_stock_limit(
     page: Page,
     *,
@@ -2773,17 +2816,19 @@ def configure_scanner(
         segment=config.segment,
     )
 
-    set_stock_limit(
-        page,
-        limit=config.limit_stocks,
+    maximum_stock_limit = (
+        set_stock_limit_to_maximum(
+            page
+        )
     )
 
     logger.info(
         "Scanner configuration completed | "
-        "Segment=%s | StockLimit=%d",
+        "Segment=%s | MaximumStockLimit=%d",
         config.segment,
-        config.limit_stocks,
+        maximum_stock_limit,
     )
+
 
 
 # ============================================================
@@ -4237,14 +4282,12 @@ def run_scan_workflow(
     logger.info(
         "Workflow configuration | "
         "Segment=%s | "
-        "StockLimit=%d | "
         "ScanTimeout=%d | "
         "Host=%s | "
         "Port=%d | "
         "Headless=%s | "
         "KeepServerRunning=%s",
         config.segment,
-        config.limit_stocks,
         config.scan_timeout_seconds,
         config.host,
         config.port,
@@ -4736,7 +4779,7 @@ def build_workflow_config_from_arguments(
 
     return WorkflowConfig(
         segment=arguments.segment,
-        #limit_stocks=arguments.limit_stocks,
+        limit_stocks=arguments.limit_stocks,
         scan_timeout_seconds=(
             arguments.scan_timeout_seconds
         ),

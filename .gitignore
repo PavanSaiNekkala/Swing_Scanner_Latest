@@ -1,0 +1,40 @@
+# Runtime
+logs/
+*.log
+
+# Data
+data/raw/
+data/cache/
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# yfinance cache
+cache/
+*.db
+*.db-shm
+*.db-wal
+
+# generated data
+data/*.csv
+data/*.xlsx
+data/duckdb/
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+

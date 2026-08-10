@@ -4736,7 +4736,7 @@ def build_workflow_config_from_arguments(
 
     return WorkflowConfig(
         segment=arguments.segment,
-        limit_stocks=arguments.limit_stocks,
+        #limit_stocks=arguments.limit_stocks,
         scan_timeout_seconds=(
             arguments.scan_timeout_seconds
         ),

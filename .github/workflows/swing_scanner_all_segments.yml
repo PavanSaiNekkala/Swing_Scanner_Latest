@@ -27,9 +27,13 @@ on:
 
   schedule:
 
-    # Daily at 4:00 PM IST
+    # --------------------------------------------------
+    # DAILY AT 4:00 PM IST
+    #
     # GitHub Actions cron uses UTC.
+    #
     # 4:00 PM IST = 10:30 AM UTC.
+    # --------------------------------------------------
 
     - cron: "30 10 * * *"
 
@@ -48,6 +52,10 @@ concurrency:
 
 jobs:
 
+  # ==================================================
+  # SCAN JOB
+  # ==================================================
+
   scan:
 
     name: Scan - ${{ matrix.segment }}
@@ -61,9 +69,16 @@ jobs:
 
       fail-fast: false
 
-      # Run one segment at a time so Git commits
-      # do not conflict when history workbooks are updated.
+      # ------------------------------------------------
+      # IMPORTANT:
+      #
+      # Run one segment at a time because each segment
+      # updates the same Excel history directory and
+      # pushes changes to main.
+      # ------------------------------------------------
+
       max-parallel: 1
+
 
       matrix:
 
@@ -76,9 +91,9 @@ jobs:
 
     steps:
 
-      # --------------------------------------------------
+      # ==================================================
       # CHECKOUT MAIN BRANCH
-      # --------------------------------------------------
+      # ==================================================
 
       - name: Checkout main branch
 
@@ -91,9 +106,9 @@ jobs:
           fetch-depth: 0
 
 
-      # --------------------------------------------------
+      # ==================================================
       # CHECK WHETHER MATRIX SEGMENT SHOULD RUN
-      # --------------------------------------------------
+      # ==================================================
 
       - name: Check selected segment
 
@@ -103,22 +118,40 @@ jobs:
 
         run: |
 
-          # Scheduled workflow:
-          # Always run all segments.
+          set -euo pipefail
+
+
+          # ------------------------------------------------
+          # SCHEDULED RUN
+          #
+          # Scheduled execution always runs all segments.
+          # ------------------------------------------------
 
           if [ "${{ github.event_name }}" = "schedule" ]; then
 
             echo "run_segment=true" >> "$GITHUB_OUTPUT"
+
+            echo "Scheduled execution detected."
+
+            echo "Running segment: ${{ matrix.segment }}"
 
             exit 0
 
           fi
 
 
-          # Manual workflow:
+          # ------------------------------------------------
+          # MANUAL RUN
+          #
           # Run ALL or only the selected segment.
+          # ------------------------------------------------
 
           SELECTED_SEGMENT="${{ inputs.segment }}"
+
+
+          echo "Selected segment: ${SELECTED_SEGMENT}"
+
+          echo "Matrix segment: ${{ matrix.segment }}"
 
 
           if [ "$SELECTED_SEGMENT" = "ALL" ] || \
@@ -126,16 +159,20 @@ jobs:
 
             echo "run_segment=true" >> "$GITHUB_OUTPUT"
 
+            echo "Segment will run."
+
           else
 
             echo "run_segment=false" >> "$GITHUB_OUTPUT"
 
+            echo "Segment will be skipped."
+
           fi
 
 
-      # --------------------------------------------------
+      # ==================================================
       # SET UP PYTHON
-      # --------------------------------------------------
+      # ==================================================
 
       - name: Set up Python
 
@@ -148,9 +185,9 @@ jobs:
           python-version: "3.12"
 
 
-      # --------------------------------------------------
-      # CACHE PIP DEPENDENCIES
-      # --------------------------------------------------
+      # ==================================================
+      # CACHE PYTHON DEPENDENCIES
+      # ==================================================
 
       - name: Cache Python dependencies
 
@@ -170,43 +207,58 @@ jobs:
             ${{ runner.os }}-python-3.12-
 
 
-      # --------------------------------------------------
+      # ==================================================
       # INSTALL PROJECT DEPENDENCIES
-      # --------------------------------------------------
+      # ==================================================
 
       - name: Install dependencies
 
         if: steps.selection.outputs.run_segment == 'true'
 
+        shell: bash
+
         run: |
+
+          set -euo pipefail
+
 
           python -m pip install --upgrade pip
 
           pip install -r requirements.txt
 
 
-      # --------------------------------------------------
+      # ==================================================
       # INSTALL PLAYWRIGHT CHROMIUM
-      # --------------------------------------------------
+      # ==================================================
 
       - name: Install Playwright Chromium
 
         if: steps.selection.outputs.run_segment == 'true'
 
+        shell: bash
+
         run: |
+
+          set -euo pipefail
+
 
           python -m playwright install --with-deps chromium
 
 
-      # --------------------------------------------------
+      # ==================================================
       # CREATE REQUIRED DIRECTORIES
-      # --------------------------------------------------
+      # ==================================================
 
       - name: Create workflow directories
 
         if: steps.selection.outputs.run_segment == 'true'
 
+        shell: bash
+
         run: |
+
+          set -euo pipefail
+
 
           mkdir -p downloads/history
 
@@ -215,12 +267,15 @@ jobs:
           mkdir -p workflow_debug
 
 
-      # --------------------------------------------------
+      # ==================================================
       # RUN SWING SCANNER
       #
-      # Stock limit is automatically set to the maximum
-      # available for the selected segment by Python.
-      # --------------------------------------------------
+      # The Python workflow automatically sets the stock
+      # limit to the maximum available for the selected
+      # segment.
+      #
+      # No --limit argument is passed.
+      # ==================================================
 
       - name: Run Swing Scanner
 
@@ -230,15 +285,31 @@ jobs:
 
           PYTHONUNBUFFERED: "1"
 
+        shell: bash
+
         run: |
+
+          set -euo pipefail
+
+
+          echo "=========================================="
+
+          echo "Starting Swing Scanner"
+
+          echo "Segment: ${{ matrix.segment }}"
+
+          echo "Stock limit: Maximum available"
+
+          echo "=========================================="
+
 
           python scan_workflow_monitor.py \
             --segment "${{ matrix.segment }}"
 
 
-      # --------------------------------------------------
-      # CHECK EXCEL RESULTS
-      # --------------------------------------------------
+      # ==================================================
+      # VERIFY EXCEL RESULTS
+      # ==================================================
 
       - name: Verify Excel history workbook
 
@@ -248,18 +319,36 @@ jobs:
 
         run: |
 
+          set -euo pipefail
+
+
+          echo "=========================================="
+
           echo "History workbooks created:"
+
+          echo "=========================================="
+
 
           ls -lah downloads/history/
 
-          WORKBOOK_COUNT="$(find downloads/history \
-            -maxdepth 1 \
-            -type f \
-            -name '*.xlsx' \
-            | wc -l)"
+
+          WORKBOOK_COUNT="$(
+            find downloads/history \
+              -maxdepth 1 \
+              -type f \
+              -name '*.xlsx' \
+              | wc -l
+          )"
+
+
+          echo ""
+
+          echo "Workbook count: ${WORKBOOK_COUNT}"
 
 
           if [ "$WORKBOOK_COUNT" -eq 0 ]; then
+
+            echo ""
 
             echo "ERROR: No Excel history workbook was created."
 
@@ -268,9 +357,90 @@ jobs:
           fi
 
 
-      # --------------------------------------------------
+          echo ""
+
+          echo "Excel history workbook verification passed."
+
+
+      # ==================================================
+      # DIAGNOSE GIT WORKTREE
+      #
+      # This helps identify unexpected changes produced
+      # by the scanner before the Git commit.
+      # ==================================================
+
+      - name: Diagnose Git worktree
+
+        if: success() && steps.selection.outputs.run_segment == 'true'
+
+        shell: bash
+
+        run: |
+
+          set -euo pipefail
+
+
+          echo "=========================================="
+
+          echo "GIT WORKTREE DIAGNOSTICS"
+
+          echo "=========================================="
+
+
+          echo ""
+
+          echo "Current branch:"
+
+          git branch --show-current
+
+
+          echo ""
+
+          echo "Current commit:"
+
+          git rev-parse HEAD
+
+
+          echo ""
+
+          echo "Remote main:"
+
+          git ls-remote origin refs/heads/main
+
+
+          echo ""
+
+          echo "Git status:"
+
+          git status --short
+
+
+          echo ""
+
+          echo "Modified tracked files:"
+
+          git diff --name-only || true
+
+
+          echo ""
+
+          echo "Staged files:"
+
+          git diff --cached --name-only || true
+
+
+          echo ""
+
+          echo "Untracked files:"
+
+          git ls-files \
+            --others \
+            --exclude-standard || true
+
+
+      # ==================================================
       # COMMIT SUCCESSFUL RESULTS TO MAIN
-      # --------------------------------------------------
+      # ==================================================
 
       - name: Commit Excel history to main
 
@@ -280,6 +450,22 @@ jobs:
 
         run: |
 
+          set -euo pipefail
+
+
+          echo "=========================================="
+
+          echo "Preparing Git commit"
+
+          echo "Segment: ${{ matrix.segment }}"
+
+          echo "=========================================="
+
+
+          # ------------------------------------------------
+          # CONFIGURE GIT IDENTITY
+          # ------------------------------------------------
+
           git config user.name \
             "github-actions[bot]"
 
@@ -287,10 +473,53 @@ jobs:
             "41898282+github-actions[bot]@users.noreply.github.com"
 
 
+          # ------------------------------------------------
+          # SHOW WORKTREE BEFORE STAGING
+          # ------------------------------------------------
+
+          echo ""
+
+          echo "Git status BEFORE staging:"
+
+          git status --short
+
+
+          # ------------------------------------------------
+          # FETCH LATEST MAIN
+          # ------------------------------------------------
+
+          echo ""
+
+          echo "Fetching latest main..."
+
+          git fetch origin main
+
+
+          # ------------------------------------------------
+          # STAGE ONLY EXCEL HISTORY WORKBOOKS
+          # ------------------------------------------------
+
+          echo ""
+
+          echo "Staging Excel history workbooks..."
+
           git add downloads/history/*.xlsx
 
 
+          echo ""
+
+          echo "Staged files:"
+
+          git diff --cached --name-only
+
+
+          # ------------------------------------------------
+          # CHECK FOR CHANGES
+          # ------------------------------------------------
+
           if git diff --cached --quiet; then
+
+            echo ""
 
             echo "No Excel history changes to commit."
 
@@ -299,24 +528,92 @@ jobs:
           fi
 
 
+          # ------------------------------------------------
+          # PROTECT UNSTAGED / UNTRACKED FILES
+          #
+          # The scanner may create temporary/debug files or
+          # modify tracked files outside downloads/history.
+          #
+          # Keep the Excel files staged while stashing
+          # everything else.
+          # ------------------------------------------------
+
+          echo ""
+
+          echo "Protecting non-Excel working-tree changes..."
+
+
+          if ! git diff --quiet || \
+             [ -n "$(git ls-files --others --exclude-standard)" ]; then
+
+            git stash push \
+              --include-untracked \
+              --keep-index \
+              -m "scanner-workflow-${{ matrix.segment }}-${{ github.run_id }}"
+
+          else
+
+            echo "No non-staged changes detected."
+
+          fi
+
+
+          # ------------------------------------------------
+          # COMMIT EXCEL HISTORY
+          # ------------------------------------------------
+
+          echo ""
+
+          echo "Creating Excel history commit..."
+
+
           git commit \
             -m "chore(scanner): update ${{ matrix.segment }} history [skip ci]"
 
 
-          # Ensure the local branch contains the latest
-          # main branch before pushing.
+          # ------------------------------------------------
+          # REBASE AGAINST LATEST MAIN
+          # ------------------------------------------------
+
+          echo ""
+
+          echo "Rebasing against latest main..."
+
 
           git pull \
             --rebase \
             origin main
 
 
+          # ------------------------------------------------
+          # PUSH TO MAIN
+          # ------------------------------------------------
+
+          echo ""
+
+          echo "Pushing Excel history to main..."
+
+
           git push origin HEAD:main
 
 
-      # --------------------------------------------------
+          echo ""
+
+          echo "=========================================="
+
+          echo "Git update completed successfully"
+
+          echo "Segment: ${{ matrix.segment }}"
+
+          echo "=========================================="
+
+
+      # ==================================================
       # UPLOAD EXCEL RESULTS AS ARTIFACT
-      # --------------------------------------------------
+      #
+      # always() ensures the generated workbook is
+      # preserved even if the Git commit/push fails.
+      # ==================================================
 
       - name: Upload Excel history workbook
 
@@ -338,9 +635,9 @@ jobs:
           retention-days: 30
 
 
-      # --------------------------------------------------
+      # ==================================================
       # UPLOAD DEBUG FILES ONLY ON FAILURE
-      # --------------------------------------------------
+      # ==================================================
 
       - name: Upload debug artifacts
 

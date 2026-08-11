@@ -211,7 +211,7 @@ class WorkflowConfig:
 
     headless: bool = True
 
-    scan_timeout_seconds: int = 1800
+    scan_timeout_seconds: int = 3600
 
     keep_server_running: bool = False
 
@@ -4720,7 +4720,7 @@ def parse_arguments(
         "--timeout",
         dest="scan_timeout_seconds",
         type=int,
-        default=1800,
+        default=3600,
         help=(
             "Maximum seconds to wait for scan completion."
         ),

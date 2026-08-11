@@ -240,7 +240,7 @@ jobs:
 
         run: |
 
-          python -m scripts.build_institutional_metrics.py
+          python -m scripts.build_institutional_metrics
 
 
       # ======================================================

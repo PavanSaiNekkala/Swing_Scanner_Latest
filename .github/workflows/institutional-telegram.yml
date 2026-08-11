@@ -452,7 +452,7 @@ jobs:
 
         run: |
 
-          python scripts/send_institutional_telegram.py
+          python -m scripts.send_institutional_telegram
 
 
       # ======================================================

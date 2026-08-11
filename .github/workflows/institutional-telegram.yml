@@ -1,0 +1,478 @@
+name: Institutional Metrics + Telegram
+
+on:
+
+  # ==========================================================
+  # TRIGGER ONLY AFTER SCANNER WORKFLOW COMPLETES
+  # ==========================================================
+
+  workflow_run:
+
+    workflows:
+      - "Swing Scanner - All Segments"
+
+    types:
+      - completed
+
+    branches:
+      - main
+
+  # ==========================================================
+  # MANUAL EXECUTION
+  # ==========================================================
+
+  workflow_dispatch:
+
+
+# ============================================================
+# PERMISSIONS
+# ============================================================
+
+permissions:
+
+  contents: write
+
+
+# ============================================================
+# CONCURRENCY
+# ============================================================
+
+concurrency:
+
+  group: institutional-metrics-telegram
+
+  cancel-in-progress: false
+
+
+# ============================================================
+# JOB
+# ============================================================
+
+jobs:
+
+  institutional:
+
+    name: Build Institutional Ranking + Send Telegram
+
+    # --------------------------------------------------------
+    # CRITICAL:
+    # Run after successful scanner workflow only.
+    #
+    # Manual execution is always allowed.
+    # --------------------------------------------------------
+
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main'
+      )
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 30
+
+
+    steps:
+
+      # ======================================================
+      # CHECKOUT LATEST MAIN
+      # ======================================================
+
+      - name: Checkout latest main
+
+        uses: actions/checkout@v4
+
+        with:
+
+          ref: main
+
+          fetch-depth: 0
+
+
+      # ======================================================
+      # DISPLAY WORKFLOW INFORMATION
+      # ======================================================
+
+      - name: Display workflow information
+
+        shell: bash
+
+        run: |
+
+          echo "=================================================="
+
+          echo "Institutional Metrics Pipeline"
+
+          echo "=================================================="
+
+          echo "Trigger event : ${{ github.event_name }}"
+
+          echo "Repository    : ${{ github.repository }}"
+
+          echo "Branch        : main"
+
+
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+
+            echo "Scanner run ID : ${{ github.event.workflow_run.id }}"
+
+            echo "Scanner run #  : ${{ github.event.workflow_run.run_number }}"
+
+            echo "Scanner result : ${{ github.event.workflow_run.conclusion }}"
+
+            echo "Scanner branch : ${{ github.event.workflow_run.head_branch }}"
+
+          fi
+
+
+      # ======================================================
+      # SET UP PYTHON
+      # ======================================================
+
+      - name: Set up Python
+
+        uses: actions/setup-python@v5
+
+        with:
+
+          python-version: "3.12"
+
+
+      # ======================================================
+      # CACHE PYTHON DEPENDENCIES
+      # ======================================================
+
+      - name: Cache Python dependencies
+
+        uses: actions/cache@v4
+
+        with:
+
+          path: ~/.cache/pip
+
+          key: >-
+
+            ${{ runner.os }}-python-3.12-
+
+            ${{ hashFiles('requirements.txt') }}
+
+          restore-keys: |
+
+            ${{ runner.os }}-python-3.12-
+
+
+      # ======================================================
+      # INSTALL DEPENDENCIES
+      # ======================================================
+
+      - name: Install dependencies
+
+        run: |
+
+          python -m pip install --upgrade pip
+
+          pip install -r requirements.txt
+
+
+      # ======================================================
+      # VERIFY SCANNER HISTORY
+      # ======================================================
+
+      - name: Verify scanner history
+
+        shell: bash
+
+        run: |
+
+          echo "=================================================="
+
+          echo "Scanner History Workbooks"
+
+          echo "=================================================="
+
+
+          REQUIRED_WORKBOOKS=(
+
+            "downloads/history/swing_scanner_largecap_history.xlsx"
+
+            "downloads/history/swing_scanner_midcap_history.xlsx"
+
+            "downloads/history/swing_scanner_smallcap_history.xlsx"
+
+            "downloads/history/swing_scanner_nifty500_history.xlsx"
+
+          )
+
+
+          for workbook in "${REQUIRED_WORKBOOKS[@]}"; do
+
+            if [ ! -f "$workbook" ]; then
+
+              echo "ERROR: Missing workbook: $workbook"
+
+              exit 1
+
+            fi
+
+            echo "FOUND: $workbook"
+
+          done
+
+
+          echo ""
+
+          echo "Scanner history verification successful."
+
+
+      # ======================================================
+      # BUILD INSTITUTIONAL METRICS
+      # ======================================================
+
+      - name: Build Institutional Metrics
+
+        env:
+
+          PYTHONUNBUFFERED: "1"
+
+        run: |
+
+          python scripts/build_institutional_metrics.py
+
+
+      # ======================================================
+      # VERIFY INSTITUTIONAL OUTPUT
+      # ======================================================
+
+      - name: Verify Institutional Output
+
+        shell: bash
+
+        run: |
+
+          echo "=================================================="
+
+          echo "Institutional Metrics Output"
+
+          echo "=================================================="
+
+
+          WORKBOOK="downloads/institutional_metrics/institutional_metrics.xlsx"
+
+          CSV_FILE="downloads/institutional_metrics/institutional_metrics.csv"
+
+
+          if [ ! -f "$WORKBOOK" ]; then
+
+            echo "ERROR: Institutional Excel workbook was not created."
+
+            exit 1
+
+          fi
+
+
+          if [ ! -s "$WORKBOOK" ]; then
+
+            echo "ERROR: Institutional Excel workbook is empty."
+
+            exit 1
+
+          fi
+
+
+          if [ ! -f "$CSV_FILE" ]; then
+
+            echo "ERROR: Institutional CSV file was not created."
+
+            exit 1
+
+          fi
+
+
+          if [ ! -s "$CSV_FILE" ]; then
+
+            echo "ERROR: Institutional CSV file is empty."
+
+            exit 1
+
+          fi
+
+
+          ls -lh downloads/institutional_metrics/
+
+
+          echo ""
+
+          echo "Institutional output verification successful."
+
+
+      # ======================================================
+      # VERIFY INSTITUTIONAL RANKING SHEET
+      # ======================================================
+
+      - name: Verify Institutional Ranking sheet
+
+        shell: bash
+
+        run: |
+
+          python - <<'PY'
+
+          from pathlib import Path
+
+          import pandas as pd
+
+
+          workbook = Path(
+              "downloads/institutional_metrics/"
+              "institutional_metrics.xlsx"
+          )
+
+
+          ranking = pd.read_excel(
+              workbook,
+              sheet_name="Institutional_Ranking",
+              engine="openpyxl",
+          )
+
+
+          required_columns = {
+              "Stock",
+              "Institutional Score",
+              "Institutional Eligible",
+              "Institutional Rank",
+              "Institutional Rating",
+              "Institutional Decision",
+          }
+
+
+          missing = (
+              required_columns
+              - set(ranking.columns)
+          )
+
+
+          if missing:
+
+              raise SystemExit(
+                  "Missing Institutional_Ranking columns: "
+                  f"{sorted(missing)}"
+              )
+
+
+          if ranking.empty:
+
+              raise SystemExit(
+                  "Institutional_Ranking sheet is empty."
+              )
+
+
+          print(
+              "Institutional_Ranking verified:"
+          )
+
+          print(
+              f"Rows    : {len(ranking)}"
+          )
+
+          print(
+              f"Columns : {len(ranking.columns)}"
+          )
+
+          print(
+              "Required ranking fields are present."
+          )
+
+          PY
+
+
+      # ======================================================
+      # COMMIT INSTITUTIONAL RESULTS
+      # ======================================================
+
+      - name: Commit Institutional Results
+
+        shell: bash
+
+        run: |
+
+          git config user.name \
+            "github-actions[bot]"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+          git add \
+            downloads/institutional_metrics/*.xlsx \
+            downloads/institutional_metrics/*.csv
+
+
+          if git diff --cached --quiet; then
+
+            echo "No Institutional Metrics changes to commit."
+
+            exit 0
+
+          fi
+
+
+          git commit \
+            -m "chore(institutional): update daily ranking [skip ci]"
+
+
+          # --------------------------------------------------
+          # Synchronize with latest main before pushing.
+          # --------------------------------------------------
+
+          git fetch origin main
+
+          git rebase origin/main
+
+
+          git push origin HEAD:main
+
+
+      # ======================================================
+      # SEND TOP 5 TO TELEGRAM
+      # ======================================================
+
+      - name: Send Top 5 Institutional Stocks
+
+        env:
+
+          PYTHONUNBUFFERED: "1"
+
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+        run: |
+
+          python scripts/send_institutional_telegram.py
+
+
+      # ======================================================
+      # UPLOAD INSTITUTIONAL RESULTS
+      # ======================================================
+
+      - name: Upload Institutional Results
+
+        if: always()
+
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: institutional-metrics-${{ github.run_number }}
+
+          path: |
+
+            downloads/institutional_metrics/*.xlsx
+
+            downloads/institutional_metrics/*.csv
+
+          if-no-files-found: warn
+
+          retention-days: 30

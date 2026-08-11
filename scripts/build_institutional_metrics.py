@@ -4,7 +4,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from institutional_metrics import (
+from institutional_metrics.engine import (
     InstitutionalMetricsEngine,
 )
 

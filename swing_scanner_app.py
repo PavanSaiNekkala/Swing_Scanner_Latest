@@ -81,6 +81,8 @@ from fundamental_screen import (
     summarize_results as fs_summarize,
     rejects_to_dataframe as fs_rejects_df,
     DEFAULT_FUNDA_CONFIG,
+    clear_fundamentals_cache as fs_clear_cache,
+    _weekly_cache_bucket as fs_weekly_bucket,
 )
 
 # --- News & Event risk (Aug-2026) ---
@@ -166,6 +168,33 @@ def apply_sector_caps(cand: pd.DataFrame, max_per_sector: int) -> tuple:
         else:
             dropped[sec] = dropped.get(sec, 0) + 1
     return cand.loc[kept_idx], dropped
+
+
+def _build_category_map(buckets: dict) -> dict:
+    """Build {bare_ticker: 'LargeCap'|'MidCap'|'SmallCap'|'Unknown'} using
+    SEBI's official 3-way market-cap classification. Every NSE-listed EQ/BE
+    stock lands in exactly one bucket:
+
+        LargeCap  = in Nifty 100                (top 100 by market cap)
+        MidCap    = in Nifty Midcap 150         (ranks 101–250)
+        SmallCap  = anything else in AllNSE     (SEBI: ranks 251+ = small)
+        Unknown   = not present in AllNSE at all (delisted / typo / new)
+
+    Mirrors `wishlist_app._derive_category` — same rules, computed here
+    once per scan run and passed to scan_one so every result row carries a
+    'category' field ready for display."""
+    largecap = set(buckets.get("LargeCap", []))
+    midcap   = set(buckets.get("MidCap", []))
+    allnse   = set(buckets.get("AllNSE", []))
+    out = {}
+    for t in allnse:
+        if t in largecap:
+            out[t] = "LargeCap"
+        elif t in midcap:
+            out[t] = "MidCap"
+        else:
+            out[t] = "SmallCap"
+    return out
 
 
 def load_universe():
@@ -418,7 +447,8 @@ def composite_gate(regime: dict, segments: dict, breadth: dict) -> dict:
 
 
 def scan_one(ticker, start, end, strategy, p, bt_kwargs, idx_ret_window=0.0,
-             sector_map=None, require_confirmation: bool = False,
+             sector_map=None, category_map=None,
+             require_confirmation: bool = False,
              bench_close=None, block_risk_off: bool = False) -> dict:
     try:
         raw = fetch_one(ticker, start, end)
@@ -592,6 +622,7 @@ def scan_one(ticker, start, end, strategy, p, bt_kwargs, idx_ret_window=0.0,
     return {
         "ticker": ticker.replace(".NS", "").replace(".BO", ""), "yahoo": ticker, "status": "ok",
         "sector": (sector_map or {}).get(ticker.replace(".NS", "").replace(".BO", "").upper(), "UNKNOWN"),
+        "category": (category_map or {}).get(ticker.replace(".NS", "").replace(".BO", "").upper(), "Unknown"),
         "signals_today": signals_today, "regime_today": regime_today,
         "cooldown_blocked": cooldown_blocked, "cooldown_reason": cooldown_reason,
         "rank_score_raw": rank_score_raw,               # Change #6: pre-penalty for audit
@@ -786,6 +817,35 @@ def body():
             help="Hard-rejects structurally broken / governance-risky stocks "
                  "before they even reach the technical backtest. Missing data "
                  "passes with a warning (unless strict mode).")
+
+        # -----------------------------------------------------------------
+        # Force-refresh fundamentals (Aug-2026)
+        # -----------------------------------------------------------------
+        # Fundamentals are normally cached weekly — the key rotates every
+        # Saturday (see fundamental_screen._weekly_cache_bucket). This button
+        # bypasses that cache for one scan, useful right after a quarterly
+        # results announcement when you want fresh numbers immediately
+        # instead of waiting until Saturday's automatic refresh.
+        # -----------------------------------------------------------------
+        _bucket = fs_weekly_bucket()
+        _cache_cleared_flag = "_funda_cache_cleared_at"
+        _cleared_at = st.session_state.get(_cache_cleared_flag)
+        st.caption(f"📅 Weekly cache key: **{_bucket}** "
+                   f"(auto-refresh next Saturday)"
+                   + (f" · manually cleared **{_cleared_at}**"
+                      if _cleared_at else ""))
+        if st.button("🔄 Force refresh fundamentals now",
+                     help="Clears the fundamentals cache so the next scan "
+                          "re-fetches from yfinance + Screener.in. Use after "
+                          "quarterly results season when many stocks just "
+                          "updated their financials. Adds ~1-2 sec per stock "
+                          "to the next scan (still ~24h cached for reruns "
+                          "within the same session after that)."):
+            fs_clear_cache()
+            st.session_state[_cache_cleared_flag] = dt.datetime.now().strftime(
+                "%d %b %Y, %H:%M")
+            st.success("✅ Fundamentals cache cleared. "
+                       "The next scan will re-fetch fresh data.")
         with st.expander("Fundamentals — thresholds & pillars"):
             funda_valuation  = st.checkbox("Valuation pillar",  value=False,
                 help="OFF by default — momentum swings can carry rich P/E.")
@@ -1240,6 +1300,11 @@ def body():
         idx_ret_window = regime.get("idx_ret_window", 0.0)
         segments = fetch_segments(start, end)
         sector_map = fetch_sector_map()
+        # Market-cap category per SEBI (LargeCap / MidCap / SmallCap). Computed
+        # once from the same universe bundle the scan is running against, so a
+        # ticker whose bucket membership just changed at NSE month-end still
+        # gets the freshest classification.
+        category_map = _build_category_map(universe)
         if not sector_map:
             st.warning("⚠️ Sector data unavailable (NSE unreachable) — sector caps cannot be applied "
                        "this run. All stocks will show sector UNKNOWN.")
@@ -1310,8 +1375,9 @@ def body():
                     "min_sma200_slope_%":     slope_min,
                     "min_avg_turnover_cr":    turn_min,
                 }
-            st.info("🧾 Running fundamentals no-trade screen "
-                    "(24h cached — reruns are instant)...")
+            st.info(f"🧾 Running fundamentals no-trade screen "
+                    f"(weekly cached — refresh key {fs_weekly_bucket()}; "
+                    f"reruns until next Saturday are instant)...")
             tickers_yahoo = [to_yahoo(s) for s in tickers[:max_n]]
             f_prog = st.progress(0.0); f_stat = st.empty()
 
@@ -1369,7 +1435,7 @@ def body():
             """Wrap scan_one so we can uniformly capture exceptions + failures."""
             try:
                 row = scan_one(to_yahoo(sym), start, end, strategy, p, bt_kwargs,
-                                idx_ret_window, sector_map,
+                                idx_ret_window, sector_map, category_map,
                                 require_confirmation=require_confirmation,
                                 bench_close=(idx_df["Close"] if not idx_df.empty else None),
                                 block_risk_off=block_risk_off)
@@ -1849,13 +1915,18 @@ def render_results():
                                f"{top_pre.iloc[0]} of {len(pre_cap)} names "
                                f"({100*top_pre.iloc[0]/len(pre_cap):.0f}%). "
                                f"After cap: {len(cand)} names across {cand['sector'].nunique()} sector(s).")
-            # Include news_score column when the news tilt is populated
-            has_news = ("news_score" in cand.columns) and (cand["news_score"].abs().sum() > 0
-                                                            or (cand.get("news_n", pd.Series([0]*len(cand))).sum() > 0))
+            # Always show the news column whenever news data exists on the
+            # DataFrame at all. `news_score` is populated with 0.0 defaults
+            # for every row after the news pass (see the setdefault loop
+            # above), so this condition is True whenever a scan ran with
+            # the news module importable — the column will no longer vanish
+            # on a quiet-news day, and the user can see at-a-glance that
+            # the news pass ran and simply found nothing material.
+            has_news = "news_score" in cand.columns
             # Change #6 audit column — only show when at least one candidate has a penalty
             has_penalty = ("ranking_penalty_reason" in cand.columns) and \
                           cand["ranking_penalty_reason"].astype(str).str.len().gt(0).any()
-            base_cols = ["ticker", "sector", "regime_today", "rank_score", "confidence", "rel_strength"]
+            base_cols = ["ticker", "category", "sector", "regime_today", "rank_score", "confidence", "rel_strength"]
             if has_news:
                 base_cols += ["news_score"]
             if has_penalty:
@@ -1865,7 +1936,7 @@ def render_results():
             inv = cand[base_cols].copy()
             _em = S.get("entry_mode", "Market open")
             _entry_label = "BUY limit ₹" if _em == "Limit" else "Entry (open)"
-            new_cols = ["Stock", "Sector", "Signal", "Rank", "Conf(/day)", "RS%"]
+            new_cols = ["Stock", "Cap", "Sector", "Signal", "Rank", "Conf(/day)", "RS%"]
             if has_news:
                 new_cols += ["News"]
             if has_penalty:
@@ -1899,7 +1970,7 @@ def render_results():
         # ======= TABLE 2: BACKTEST TRACK RECORD (evidence) =======
         st.subheader("📊 Backtest Track Record  —  historical proof behind each stock")
         bt = ok.sort_values("rank_score", ascending=False).reset_index(drop=True)
-        rec = bt[["ticker", "signals_today", "rank_score", "exp_per_day_%", "rel_strength", "hist_trades", "win_%",
+        rec = bt[["ticker", "category", "sector", "signals_today", "rank_score", "exp_per_day_%", "rel_strength", "hist_trades", "win_%",
                   "target_hits", "target_%", "trail_exits", "trail_%", "stop_hits", "stop_hit_%",
                   "time_exits", "time_%", "time_win", "time_loss",
                   "mom_exits", "mom_%", "decay_exits", "decay_%", "staircase_partials",
@@ -1907,7 +1978,7 @@ def render_results():
                   "total_return_sum_%", "cagr_%", "max_drawdown_%", "profit_factor",
                   "recovery_factor", "max_consecutive_losses", "seq_trades",
                   "bt_from", "bt_to", "years", "remark"]].copy()
-        rec.columns = ["Stock", "Signals today", "Rank", "Exp/DAY%", "RS%", "Trades", "Win%",
+        rec.columns = ["Stock", "Cap", "Sector", "Signals today", "Rank", "Exp/DAY%", "RS%", "Trades", "Win%",
                        "Target #", "Target %", "Trail #", "Trail %", "Stop #", "Stop %",
                        "Time #", "Time %", "Time-win", "Time-loss",
                        "MomExit #", "MomExit %", "Decay #", "Decay %", "Staircase #",

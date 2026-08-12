@@ -23,7 +23,9 @@ Data sources (priority order):
 
 Public API:
     load_overrides(path)              -> dict of manual data
-    fetch_fundamentals(ticker)        -> raw fields for one stock (cached 24h)
+    fetch_fundamentals(ticker)        -> raw fields for one stock
+                                          (cached weekly — refresh key
+                                          rotates every Saturday; 7d TTL)
     screen_universe(tickers, secmap, config, cb) -> (results, sector_medians)
     screen_fundamentals(bare, sector, fund, medians, ov, cfg) -> single-stock verdict
 """
@@ -32,6 +34,7 @@ import os
 import io
 import re
 import time
+import datetime as dt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -343,16 +346,69 @@ def _pct_str_to_float(s: str) -> float:
         return np.nan
 
 
-@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
-def fetch_screener_fundamentals(ticker_bare: str) -> dict:
-    """Fetch fundamentals from Screener.in for one stock. Returns:
-       {"de": float, "roe": float, "roce": float,        (quality)
-        "pe": float, "pb": float, "book_value": float,   (valuation)
-        "yoy_rev_growth": list, "yoy_pat_growth": list,  (growth — last 4 Q)
-        "ttm_sales": float, "ttm_pat": float,
-        "src": "screener_consol" | "screener_std" | ...}
-       Empty {} on any failure — caller falls back to yfinance.
+# ======================================================================================
+#  WEEKLY CACHE BUCKET  (Aug-2026 — user request)
+# --------------------------------------------------------------------------------------
+# Fundamentals only move on quarterly SEBI filings (Quality: ROE/ROCE/D/E/IC/CR;
+# Growth: revenue/PAT YoY) and quarterly shareholding disclosures (Governance:
+# pledge, holding, FII/DII/MF delta). Refreshing daily is wasted network work.
+#
+# We now anchor the fundamentals cache to the most-recent Saturday: the bucket
+# string changes on Saturdays, so Streamlit's cache key silently invalidates
+# once a week. Rest of the week reads instantly from cache regardless of how
+# many times the user re-runs the scanner.
+#
+# This mirrors the 4-hour cache-bucket pattern used by the stock-price fetcher
+# (swing_scanner_app.py:_cache_bucket) — same idea, weekly cadence instead of
+# 4-hourly. Belt-and-suspenders: TTL is also bumped to 7 days so a scanner
+# process left running for weeks still refreshes at the weekly boundary.
+# ======================================================================================
+def _weekly_cache_bucket() -> str:
+    """Returns a string that changes only on Saturdays — the most-recent
+    Saturday on-or-before today, as an ISO date string. Passed as a
+    positional arg to the impl functions below so it participates in
+    Streamlit's cache key.
+
+    Timeline:
+      Mon 20 Oct → last Saturday = 18 Oct → bucket "2026-10-18"
+      Sat 25 Oct → last Saturday = 25 Oct → bucket "2026-10-25" (NEW — refresh)
+      Sun 26 Oct → last Saturday = 25 Oct → bucket "2026-10-25" (cache hit)
+      Fri 31 Oct → last Saturday = 25 Oct → bucket "2026-10-25" (cache hit)
+      Sat  1 Nov → last Saturday =  1 Nov → bucket "2026-11-01" (NEW — refresh)
     """
+    today = dt.date.today()
+    # Python's date.weekday(): Mon=0, Sat=5, Sun=6.
+    # Days since most-recent Saturday (0 if today IS Saturday):
+    days_since_sat = (today.weekday() - 5) % 7
+    return (today - dt.timedelta(days=days_since_sat)).isoformat()
+
+
+def clear_fundamentals_cache() -> None:
+    """Force the next fundamentals fetch to hit the network, bypassing both
+    the Streamlit in-memory cache AND the weekly cache bucket. Use when
+    quarterly results have just been announced and you want fresh numbers
+    immediately — don't wait until Saturday's automatic refresh.
+
+    Called by the scanner sidebar's "🔄 Force refresh fundamentals" button.
+    Safe to call from any context; silently no-ops if the caches don't
+    exist yet (fresh Streamlit session).
+    """
+    try:
+        _fetch_fundamentals_impl.clear()
+    except Exception:
+        pass
+    try:
+        _fetch_screener_fundamentals_impl.clear()
+    except Exception:
+        pass
+
+
+# 7-day TTL + weekly cache bucket → guaranteed weekly refresh anchored to Saturday.
+@st.cache_data(ttl=60 * 60 * 24 * 7, show_spinner=False)
+def _fetch_screener_fundamentals_impl(ticker_bare: str, cache_bucket: str) -> dict:
+    """Cached implementation — `cache_bucket` is a versioning string (see
+    _weekly_cache_bucket) that rotates every Saturday and participates in the
+    cache key. Never call directly; use `fetch_screener_fundamentals()`."""
     if not HAVE_SCREENER:
         return {}
     session = _get_screener_session()
@@ -399,6 +455,13 @@ def fetch_screener_fundamentals(ticker_bare: str) -> dict:
                 "src": src_tag,
             }
     return {}
+
+
+def fetch_screener_fundamentals(ticker_bare: str) -> dict:
+    """Public wrapper for Screener.in fundamentals fetch. Backwards-compatible
+    signature — internally injects the weekly cache bucket so callers get
+    weekly-refresh semantics for free."""
+    return _fetch_screener_fundamentals_impl(ticker_bare, _weekly_cache_bucket())
 
 
 # ======================================================================================
@@ -608,14 +671,14 @@ def _metrics_from_bs_ann(t, info: dict, ticker_bare: str = "") -> dict:
             "data_stale": data_stale}
 
 
-@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)  # 24h — fundamentals don't move intraday
-def fetch_fundamentals(ticker_yahoo: str, include_trend: bool = True) -> dict:
-    """Pull the raw fundamental fields we need for the gate. Never raises;
-    on failure returns {'_error': ...}. Missing fields are np.nan.
-
-    Note: yfinance ROE is decimal form (0.15 = 15%); D/E is percent form
-    (128 = 1.28). We normalise both to human-readable units below.
-    """
+# 7-day TTL + weekly cache bucket → refresh key rotates every Saturday.
+# See _weekly_cache_bucket() above for why fundamentals don't need daily reruns.
+@st.cache_data(ttl=60 * 60 * 24 * 7, show_spinner=False)
+def _fetch_fundamentals_impl(ticker_yahoo: str, include_trend: bool,
+                              cache_bucket: str) -> dict:
+    """Cached implementation — `cache_bucket` is a versioning string (see
+    _weekly_cache_bucket) that rotates every Saturday and participates in the
+    cache key. Never call directly; use `fetch_fundamentals()` instead."""
     if yf is None:
         return {"_error": "yfinance unavailable"}
     out = {}
@@ -846,6 +909,25 @@ def fetch_fundamentals(ticker_yahoo: str, include_trend: bool = True) -> dict:
             pass
 
     return out
+
+
+def fetch_fundamentals(ticker_yahoo: str, include_trend: bool = True) -> dict:
+    """Public wrapper for yfinance+Screener fundamentals fetch. Backwards-
+    compatible signature — internally injects the weekly cache bucket so
+    every caller (including `screen_universe` in the scanner) automatically
+    gets Saturday-anchored weekly-refresh semantics.
+
+    Why weekly and not daily:
+      * Quality metrics (ROE/ROCE/D/E/interest-cover/current-ratio)   → quarterly
+      * Growth metrics (revenue/PAT YoY)                              → quarterly
+      * Governance (pledge / promoter holding / FII/DII/MF delta)     → quarterly
+      * Auditor qualifications / RPT flags                            → annual
+    None of the ACTIVE parameters change intraday. Even Valuation (PE/PB/EV)
+    which technically drift with price only shift a few % across a week, well
+    inside the lenient absolute caps used by the NO-TRADE gate.
+    """
+    return _fetch_fundamentals_impl(ticker_yahoo, include_trend,
+                                     _weekly_cache_bucket())
 
 
 # ======================================================================================

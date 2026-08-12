@@ -51,6 +51,10 @@ _POSITIVE = {
     # Broker actions
     r"\bupgrade[sd]?\b": 3, r"\btarget (raised?|hiked?|increased?)\b": 3,
     r"\b(buy call|buy rating)\b": 2, r"\boutperform\b": 2, r"\boverweight\b": 2,
+    r"\b(motilal|clsa|hsbc|jefferies|morgan|goldman|nomura|bernstein|bofa|kotak|"
+    r"axis|elara) (upgrade|initiate|buy|outperform|target)\b": 3,
+    r"\bbrokerage (upgrade|buy)\b": 2,
+    r"\binitiate coverage\b": 2,
     # Results / operations
     r"\bbeats? (estimates?|expectations?|forecasts?|view|street|analysts?)\b": 4,
     r"\btops? (estimates?|expectations?|forecasts?|view|street)\b": 3,
@@ -58,25 +62,47 @@ _POSITIVE = {
     r"\bprofit (surge|jump|rise|growth|rises?|jumps?|climbs?)\b": 3,
     r"\brecord (high|profit|revenue|quarter)\b": 3,
     r"\b(revenue|profit) (up|jumps?|rises?|surges?) \d+\s*%\b": 3,
+    r"\bearnings? beat\b": 4,
+    # Indian-market phrasings (Aug-2026 addition — catches headlines like
+    # "M&M's July sales rose 24%" that the older lexicon missed)
+    r"\b(sales|revenue|volumes?|deliveries?|dispatches?|shipments?|production) "
+    r"(rose|grew|jumped|surged|climbed|increased|expanded) (by )?\d+"
+    r"(\.\d+)?\s*%": 3,
+    r"\b(sales|revenue|volumes?|profit) (rise|jump|surge|climb|growth|increase)\s+"
+    r"\d+(\.\d+)?\s*%": 3,
+    r"\bmarket share (leads?|gains?|rises?|expands?)\b": 2,
+    r"\bmarket leader\b": 1,
+    r"\bindex (inclusion|entry|addition)\b": 3,
+    r"\breplace[sd]? \w+ in nifty\b": 3,
+    r"\bnifty (inclusion|entry)\b": 3,
+    r"\bindependent director\b": 0,       # neutral admin
     # Deals / orders
     r"\bwins? (order|contract|deal|tender)\b": 4,
     r"\bbags? (order|contract)\b": 4,
     r"\bawarded (contract|order)\b": 4,
     r"\b(joint venture|strategic partnership|acquisition)\b": 2,
+    r"\bMoU\b": 1, r"\btie.?up\b": 1,
     # Capital returns
     r"\bbuyback\b": 3, r"\bbonus (issue|share)\b": 2,
-    r"\bdividend (hike|increased?|higher)\b": 2,
+    r"\bdividend (hike|increased?|higher|announced?)\b": 2,
+    r"\brights (issue|offering)\b": 1,
+    r"\bstock split\b": 2,
     # Expansion / momentum
-    r"\bexpansion\b": 1, r"\bnew (plant|facility|capacity)\b": 2,
+    r"\bexpansion\b": 1, r"\bnew (plant|facility|capacity|hub)\b": 2,
     r"\blaunch(es|ed)?\b": 1,
-    r"\b(all.?time|52.?week) high\b": 2,
+    r"\b(all.?time|52.?week|record|life.?time) high\b": 2,
     r"\bhits? upper circuit\b": 3, r"\bsurge[sd]?\b": 2, r"\bralli(es|ed)\b": 1,
+    r"\bmulti[- ]?bagger\b": 2,
+    # Legal wins
+    r"\b(court|judge) (clears?|dismisses?|drops?|acquits?)\b": 3,
+    r"\bcharges? (dismissed?|dropped?|cleared?)\b": 4,
 }
 
 _NEGATIVE = {
     # Broker actions
     r"\bdowngrade[sd]?\b": -3, r"\btarget (cut|lowered?|reduced?)\b": -3,
     r"\b(sell call|sell rating)\b": -2, r"\bunderperform\b": -2,
+    r"\bcautious\b": -1,
     # Regulatory / legal (BIG signals — most predictive of crash)
     r"\bSEBI (probe|order|penalty|action|investigation)\b": -5,
     r"\b(income tax|IT department) (raid|search|notice)\b": -5,
@@ -94,12 +120,25 @@ _NEGATIVE = {
     r"\b(profit|earnings) (falls?|declines?|drops?|plunges?)\b": -3,
     r"\bdefault(s|ed)?\b": -4, r"\binsolvency\b": -4, r"\bbankruptcy\b": -5,
     r"\b(NPA|non.?performing)\b": -2, r"\brestructure[dr]?\b": -2,
+    # Indian-market phrasings (negative)
+    r"\b(sales|revenue|volumes?|deliveries?|dispatches?|shipments?|production) "
+    r"(fell|declined|dropped|slumped|plunged) (by )?\d+"
+    r"(\.\d+)?\s*%": -3,
+    r"\bindex (exclusion|removal|deletion)\b": -3,
+    r"\bremoved from nifty\b": -3,
     # Sentiment
     r"\btumble[sd]?\b": -2, r"\bplunge[sd]?\b": -2, r"\bslump[sd]?\b": -2,
     r"\bhits? lower circuit\b": -3, r"\bcrash(es|ed)?\b": -3,
+    r"\b(52.?week|record) low\b": -3,
+    r"\boutflows?\b": -1,
+    r"\bstake sale\b": -1,
+    r"\bdivest(ment|iture)?\b": -1,
     # Deal breakdowns
     r"\b(deal|merger|acquisition) (fails?|falls? through|terminated?)\b": -3,
     r"\bfraud\b": -5, r"\bscandal\b": -4,
+    # Legal escalations
+    r"\b(indictment|charged|lawsuit|litigation)\b": -3,
+    r"\b(criminal|bribery|corruption) (charges?|case|probe)\b": -4,
 }
 
 
@@ -198,53 +237,198 @@ def _fetch_google_news(query: str, max_items: int = 10, days: int = 3) -> list:
 
 
 # ======================================================================================
+#  COMPANY NAME RESOLUTION (Aug-2026)
+# ======================================================================================
+# Without the actual company name, Google searches for "M&M stock NSE" return
+# M&M's candy or unrelated content. Fetching yfinance.Ticker.info["longName"]
+# gives us "Mahindra & Mahindra Limited" — dramatically better search results
+# AND a wider relevance filter.
+_NAME_CACHE = {}   # in-process cache (ticker -> longName)
+
+def _resolve_company_name(ticker_yahoo: str) -> str:
+    """Return the stock's full company name (e.g. 'Mahindra & Mahindra Limited').
+    Cached per process; falls back to '' if yfinance is unavailable."""
+    if ticker_yahoo in _NAME_CACHE:
+        return _NAME_CACHE[ticker_yahoo]
+    name = ""
+    if yf is not None:
+        try:
+            info = yf.Ticker(ticker_yahoo).info or {}
+            name = (info.get("longName") or info.get("shortName") or "").strip()
+        except Exception:
+            name = ""
+    _NAME_CACHE[ticker_yahoo] = name
+    return name
+
+
+_NAME_STOP = {"ltd", "ltd.", "limited", "company", "co.", "co", "corp",
+              "corporation", "the", "and", "of", "in", "&", "india",
+              "indian", "group", "grp", "inc", "pvt", "private", "public"}
+
+# ------------------------------------------------------------------
+# CONFUSABLES — same brand family, different listed company.
+# When we search for one ticker's news, exclude articles about its
+# similarly-named siblings so the sentiment score isn't polluted.
+# ------------------------------------------------------------------
+_CONFUSABLES = {
+    # Mahindra & Mahindra (M&M) vs everything else in the Mahindra group
+    "M&M":         ["tech mahindra", "mahindra financial", "mahindra holidays",
+                    "mahindra lifespace", "mahindra cie", "mahindra epc",
+                    "mahindra logistics"],
+    # Bajaj family — Finance vs Auto vs Finserv vs Holdings
+    "BAJFINANCE":  ["bajaj auto", "bajaj holdings", "bajaj finserv",
+                    "bajaj hindusthan", "bajaj electricals"],
+    "BAJAJFINSV":  ["bajaj auto", "bajaj holdings", "bajaj finance",
+                    "bajaj hindusthan", "bajaj electricals"],
+    "BAJAJ-AUTO":  ["bajaj finance", "bajaj finserv", "bajaj holdings"],
+    # Adani group — many listed entities
+    "ADANIGREEN":  ["adani ports", "adani total", "adani wilmar", "adani power",
+                    "adani transmission", "adani energy solutions"],
+    "ADANIENT":    ["adani green", "adani ports", "adani total", "adani wilmar",
+                    "adani power", "adani transmission", "adani energy"],
+    "ADANIPORTS":  ["adani green", "adani total", "adani wilmar", "adani power",
+                    "adani transmission", "adani enterprises"],
+    "ADANIPOWER":  ["adani green", "adani ports", "adani total", "adani wilmar",
+                    "adani transmission", "adani enterprises"],
+    # Tata family
+    "TATAMOTORS":  ["tata power", "tata steel", "tata consultancy", "tata chemicals",
+                    "tata elxsi", "tata communications", "tata investment",
+                    "tata coffee", "tata consumer", "tcs", "tata technologies",
+                    "titan"],
+    "TATASTEEL":   ["tata power", "tata motors", "tata consultancy", "tata chemicals",
+                    "tcs", "tata technologies"],
+    "TATAPOWER":   ["tata steel", "tata motors", "tata consultancy",
+                    "tcs", "tata chemicals"],
+    "TCS":         ["tata power", "tata motors", "tata steel", "tata chemicals",
+                    "tata elxsi"],
+    "TATATECH":    ["tata power", "tata motors", "tata steel", "tata consultancy",
+                    "tcs", "tata chemicals"],
+    "TATACONSUM":  ["tata power", "tata motors", "tata steel", "tata consultancy",
+                    "tcs", "tata chemicals"],
+    # TVS family
+    "TVSMOTOR":    ["tvs supply chain", "tvs srichakra", "tvs electronics",
+                    "tvs holdings"],
+    # Reliance family
+    "RELIANCE":    ["reliance power", "reliance infra", "reliance capital",
+                    "reliance nippon", "reliance communications"],
+    # Godrej family
+    "GODREJCP":    ["godrej properties", "godrej industries", "godrej agrovet"],
+    "GODREJPROP":  ["godrej consumer", "godrej industries", "godrej agrovet"],
+    # HDFC family
+    "HDFCBANK":    ["hdfc life", "hdfc amc", "hdfc securities"],
+    "HDFCLIFE":    ["hdfc bank", "hdfc amc"],
+    "HDFCAMC":     ["hdfc bank", "hdfc life"],
+    # Aditya Birla family
+    "ULTRACEMCO":  ["aditya birla capital", "aditya birla fashion", "grasim"],
+    "GRASIM":      ["aditya birla capital", "aditya birla fashion", "ultratech"],
+    "ABCAPITAL":   ["aditya birla fashion", "ultratech", "grasim"],
+}
+
+
+def _keywords_from_name(name: str) -> list:
+    """Extract meaningful search terms from a company name.
+    E.g. 'Mahindra & Mahindra Limited' -> ['mahindra']
+         'Bajaj Finance Limited'       -> ['bajaj', 'finance']
+         'Adani Green Energy Ltd'      -> ['adani', 'green', 'energy']
+    """
+    if not name: return []
+    out = []
+    for w in name.split():
+        wl = w.lower().strip(",.()'-\"")
+        if wl and len(wl) >= 3 and wl not in _NAME_STOP and wl not in out:
+            out.append(wl)
+    return out
+
+
+def _build_search_queries(bare_ticker: str, company_name: str) -> list:
+    """Build a small set of complementary Google News queries. Fewer than 4
+    to keep rate-limit pressure manageable."""
+    queries = []
+    if company_name:
+        # Strip trailing 'Limited/Ltd' — usually noise in queries
+        clean = company_name
+        for suf in (" Limited", " Ltd.", " Ltd", " Corporation", " Corp"):
+            if clean.endswith(suf):
+                clean = clean[:-len(suf)]
+        clean = clean.strip()
+        queries.append(clean)                               # e.g. "Mahindra & Mahindra"
+        queries.append(f"{clean} share price")              # results/earnings coverage
+        queries.append(f"{clean} nse")                      # NSE-specific
+    # Fall back to ticker-based query too, especially for stocks with unusual names
+    if bare_ticker:
+        queries.append(f"{bare_ticker} stock nse")
+    # De-dupe while preserving order
+    seen, out = set(), []
+    for q in queries:
+        if q and q.lower() not in seen:
+            seen.add(q.lower())
+            out.append(q)
+    return out
+
+
+def _fetch_google_news_multi(queries: list, days: int = 7,
+                              per_query: int = 15) -> list:
+    """Fetch news across MULTIPLE Google News queries and dedupe by title."""
+    seen_titles = set()
+    all_items = []
+    for q in queries[:4]:               # cap at 4 queries
+        items = _fetch_google_news(q, max_items=per_query, days=days)
+        for it in items:
+            t = (it.get("title") or "").strip().lower()
+            if t and t not in seen_titles:
+                seen_titles.add(t)
+                all_items.append(it)
+    return all_items
+
+
+# ======================================================================================
 #  PUBLIC API
 # ======================================================================================
 def fetch_news_score(ticker_yahoo: str, company_name: str = None,
-                     lookback_days: int = 3) -> dict:
+                     lookback_days: int = 7) -> dict:
     """Fetch news for a ticker and compute a sentiment score.
+
+    v2 (Aug-2026) — auto-resolves the company name from yfinance if not
+    provided, builds a multi-query Google News search, and applies a loosened
+    relevance filter that matches ANY meaningful word from the company name.
+    Fixes the M&M/BAJFINANCE/ADANIGREEN/TVSMOTOR "no news found" problem
+    where headlines used the FULL company name (e.g. 'Mahindra') but the
+    filter only accepted the ticker string (e.g. 'M&M').
 
     Args:
         ticker_yahoo: e.g. "RELIANCE.NS"
-        company_name: optional — improves Google News query. If None, uses bare ticker.
-        lookback_days: only headlines within this many days count for the score
-
-    Returns:
-        {"score": float in [-1, +1],
-         "n_articles": int,
-         "top_headline": str,   # most-impact headline in the window
-         "top_impact": float,   # its individual score
-         "matched_terms": list, # keywords that fired
-         "sources": {"yfinance": n, "google": n},
-         "all_headlines": list}  # for display (title, date, source, score)
+        company_name: optional — auto-resolved from yfinance.Ticker.info if None
+        lookback_days: only headlines within this many days count (default 7)
     """
     bare = ticker_yahoo.replace(".NS", "").replace(".BO", "").upper()
-    query = f"{bare} stock NSE" if not company_name else f"{company_name} stock NSE"
+
+    # Auto-resolve company name if not supplied (biggest single fix)
+    if not company_name:
+        company_name = _resolve_company_name(ticker_yahoo)
+
+    # Extract keywords for relevance filter — union of bare ticker + name-words
+    keywords = [bare.lower()]
+    keywords.extend(_keywords_from_name(company_name))
 
     yf_news = _fetch_yfinance_news(ticker_yahoo)
-    # Pass lookback_days to Google — it filters at query time (fresher results)
-    gn_news = _fetch_google_news(query, days=lookback_days)
 
-    # RELEVANCE FILTER (Aug-2026): Google News's `when:3d` operator gives us
-    # fresh results but the freshness comes at a relevance cost — many recent
-    # items are generic aggregator pages ("HCL Tech Share Price Today") that
-    # happen to match search terms. Filter: an article is relevant only if
-    # its TITLE contains the bare ticker OR the company name (case-insensitive).
-    # yfinance results are already ticker-targeted so we don't filter them.
-    _keywords = [bare.lower()]
-    if company_name:
-        # Add each word of the company name (excluding common noise like Ltd, Company)
-        _stop = {"ltd", "ltd.", "limited", "company", "co.", "co", "corp",
-                 "corporation", "the", "and", "of", "in", "&"}
-        for w in company_name.split():
-            wl = w.lower().strip(",.()")
-            if wl and wl not in _stop and len(wl) >= 3:
-                _keywords.append(wl)
+    # Build a MULTI-QUERY Google News search (covers name + ticker variants)
+    queries = _build_search_queries(bare, company_name)
+    gn_news = _fetch_google_news_multi(queries, days=lookback_days, per_query=15)
+
+    # LOOSENED relevance filter — matches ANY meaningful company-name word
+    # OR the bare ticker. AND checks the CONFUSABLES exclusion list so we
+    # don't grab "Tech Mahindra" articles when searching for M&M.
+    confusable_phrases = _CONFUSABLES.get(bare, [])
     def _is_relevant(title: str) -> bool:
-        if not title:
-            return False
+        if not title: return False
         tl = title.lower()
-        return any(k in tl for k in _keywords)
+        # Reject if title matches a known confusable (sibling company)
+        for cp in confusable_phrases:
+            if cp in tl:
+                return False
+        # Accept if any keyword matches
+        return any(k in tl for k in keywords)
     gn_news = [it for it in gn_news if _is_relevant(it["title"])]
 
     cutoff = dt.datetime.now() - dt.timedelta(days=lookback_days)

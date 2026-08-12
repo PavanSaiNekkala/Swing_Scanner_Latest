@@ -1,261 +1,1040 @@
 """
+================================================================================
 nse_events.py
-=============
-NSE corporate-events fetcher for the swing scanner's news pillar.
 
-Pulls upcoming corporate events (board meetings for results, dividend ex-dates,
-splits, bonuses, AGMs) directly from NSE's public APIs. Detects whether a stock
-has a scheduled event in the next N trading sessions — if so, the scanner blocks
-the trade to prevent event-driven blowups (results-gap risk).
+Institutional Grade NSE Corporate Event Engine
+Version : 2.0
+Python  : 3.11+
 
-Uses the same curl_cffi impersonated session as governance_fetcher — reuses its
-session helpers, no extra dependencies.
+Public API (implemented in later layers)
 
-Endpoints used (both public, no auth):
-  /api/corporate-announcements  — board meetings, results notices, AGM intimations
-  /api/corporates-corporateActions — dividends, splits, bonuses (with ex-dates)
+    fetch_upcoming_events(...)
+    event_risk(...)
 
-Public API:
-    fetch_upcoming_events(ticker) -> list[dict]
-    event_risk(ticker, next_sessions=5) -> dict
+================================================================================
 """
 
-import io
-import json
-import time
+from __future__ import annotations
+
 import datetime as dt
+import json
+import logging
+import random
 import re
+import threading
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Final
 
 try:
-    from curl_cffi import requests as _curl
-    HAVE_CURL_CFFI = True
+    from curl_cffi import requests as curl_requests
+
+    HAVE_CURL = True
 except Exception:
-    HAVE_CURL_CFFI = False
+    HAVE_CURL = False
 
 try:
     import streamlit as st
 except Exception:
     st = None
 
-# Reuse the NSE session primer from governance_fetcher (already primes cookies etc.)
 try:
-    from governance_fetcher import _make_session as _sess, _prime_nse as _prime
-    HAVE_HELPERS = True
+    from governance_fetcher import (
+        _make_session,
+        _prime_nse,
+    )
+
+    HAVE_GOV_HELPERS = True
 except Exception:
-    HAVE_HELPERS = False
+    HAVE_GOV_HELPERS = False
+
+################################################################################
+# Logging
+################################################################################
+
+LOGGER_NAME: Final = "nse_events"
+
+logger = logging.getLogger(LOGGER_NAME)
+
+if not logger.handlers:
+    handler = logging.StreamHandler()
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    )
+
+    handler.setFormatter(formatter)
+
+    logger.addHandler(handler)
+
+logger.setLevel(logging.INFO)
+
+################################################################################
+# Configuration
+################################################################################
 
 
-# ======================================================================================
-#  Session singleton (lazy-init, primed once)
-# ======================================================================================
-_session = None
-_primed = False
+@dataclass(slots=True, frozen=True)
+class Config:
+    """Runtime configuration."""
+
+    BASE_URL: str = "https://www.nseindia.com"
+
+    ANNOUNCEMENT_API: str = (
+        "https://www.nseindia.com/api/corporate-announcements"
+    )
+
+    CORPORATE_ACTION_API: str = (
+        "https://www.nseindia.com/api/corporates-corporateActions"
+    )
+
+    HTTP_TIMEOUT: int = 15
+
+    MAX_RETRIES: int = 4
+
+    RETRY_BACKOFF: float = 1.50
+
+    CACHE_TTL: int = 1800
+
+    LOOKBACK_DAYS: int = 14
+
+    LOOKAHEAD_DAYS: int = 30
+
+    DEFAULT_SESSION_WINDOW: int = 5
 
 
-def _get_session():
-    global _session, _primed
-    if not HAVE_HELPERS or not HAVE_CURL_CFFI:
-        return None
-    if _session is None:
-        _session = _sess()
-    if _session is not None and not _primed:
-        _prime(_session)
-        _primed = True
-    return _session
+CONFIG = Config()
+
+################################################################################
+# Event Types
+################################################################################
 
 
-# ======================================================================================
-#  EVENT-KEYWORD CLASSIFICATION
-# ======================================================================================
-# Priority order matters — a "board meeting for results" is a HIGHER-risk event than
-# a plain "board meeting" or "dividend record date". The classifier picks the FIRST
-# match, so keep the highest-impact keywords at the top.
-_EVENT_PATTERNS = [
-    ("RESULTS",    re.compile(r"\b(quarterly results|financial results|q[1-4] fy|q[1-4] results|annual results|earnings)\b", re.I)),
-    ("BOARD_MTG",  re.compile(r"\b(board meeting|meeting of the board|board of directors)\b", re.I)),
-    ("AGM",        re.compile(r"\b(annual general meeting|AGM|EGM|extra.?ordinary general meeting)\b", re.I)),
-    ("DIVIDEND",   re.compile(r"\b(dividend|interim dividend|final dividend|record date.*dividend)\b", re.I)),
-    ("SPLIT",      re.compile(r"\b(stock split|share split|face value split|sub.?division)\b", re.I)),
-    ("BONUS",      re.compile(r"\b(bonus (issue|share)|bonus of|bonus 1:)\b", re.I)),
-    ("BUYBACK",    re.compile(r"\bbuy.?back\b", re.I)),
-    ("RIGHTS",     re.compile(r"\brights (issue|entitlement)\b", re.I)),
-    ("SCHEME",     re.compile(r"\b(scheme of arrangement|amalgamation|demerger|merger)\b", re.I)),
+class EventType(str, Enum):
+    RESULTS = "RESULTS"
+
+    BOARD_MTG = "BOARD_MTG"
+
+    AGM = "AGM"
+
+    DIVIDEND = "DIVIDEND"
+
+    SPLIT = "SPLIT"
+
+    BONUS = "BONUS"
+
+    BUYBACK = "BUYBACK"
+
+    RIGHTS = "RIGHTS"
+
+    SCHEME = "SCHEME"
+
+    OTHER = "OTHER"
+
+
+################################################################################
+# Risk Levels
+################################################################################
+
+
+class RiskLevel(str, Enum):
+    LOW = "LOW"
+
+    MEDIUM = "MEDIUM"
+
+    HIGH = "HIGH"
+
+    BLOCK = "BLOCK"
+
+
+################################################################################
+# Data Models
+################################################################################
+
+
+@dataclass(slots=True)
+class CorporateEvent:
+    symbol: str
+
+    event_type: EventType
+
+    date: dt.date
+
+    subject: str
+
+    source: str
+
+    risk: RiskLevel = RiskLevel.LOW
+
+
+@dataclass(slots=True)
+class EventRiskResult:
+    blocked: bool
+
+    event_type: EventType | None
+
+    days_until: int | None
+
+    subject: str | None
+
+    upcoming: list[CorporateEvent] = field(default_factory=list)
+
+
+################################################################################
+# Exception Hierarchy
+################################################################################
+
+
+class NSEEventsError(Exception):
+    """Base exception."""
+
+
+class SessionError(NSEEventsError):
+    """Session creation failed."""
+
+
+class RequestError(NSEEventsError):
+    """HTTP request failed."""
+
+
+class InvalidResponse(NSEEventsError):
+    """Unexpected payload."""
+
+
+################################################################################
+# Thread-safe Singleton Session Manager
+################################################################################
+
+
+class SessionManager:
+    """
+    Thread-safe lazy singleton.
+
+    Reuses the governance_fetcher session.
+    """
+
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+
+        if cls._instance is None:
+
+            with cls._lock:
+
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._session = None
+                    cls._instance._primed = False
+
+        return cls._instance
+
+    def session(self):
+
+        if not HAVE_CURL:
+            raise SessionError("curl_cffi not installed")
+
+        if not HAVE_GOV_HELPERS:
+            raise SessionError("governance_fetcher unavailable")
+
+        if self._session is None:
+
+            self._session = _make_session()
+
+        if not self._primed:
+
+            _prime_nse(self._session)
+
+            self._primed = True
+
+        return self._session
+
+
+################################################################################
+# Retry Decorator
+################################################################################
+
+
+def retry(func):
+    """
+    Exponential backoff retry decorator.
+    """
+
+    def wrapper(*args, **kwargs):
+
+        last_exception = None
+
+        for attempt in range(CONFIG.MAX_RETRIES):
+
+            try:
+
+                return func(*args, **kwargs)
+
+            except Exception as exc:
+
+                last_exception = exc
+
+                delay = (
+                    CONFIG.RETRY_BACKOFF**attempt
+                ) + random.uniform(0.0, 0.30)
+
+                logger.warning(
+                    "%s failed (%s/%s). Retrying in %.2fs",
+                    func.__name__,
+                    attempt + 1,
+                    CONFIG.MAX_RETRIES,
+                    delay,
+                )
+
+                time.sleep(delay)
+
+        raise RequestError(str(last_exception))
+
+    return wrapper
+
+
+################################################################################
+# Regex Classifier
+################################################################################
+
+EVENT_PATTERNS: Final = [
+    (
+        EventType.RESULTS,
+        re.compile(
+            r"\b("
+            r"quarterly results|"
+            r"financial results|"
+            r"annual results|"
+            r"earnings|"
+            r"q[1-4]\s*results"
+            r")\b",
+            re.I,
+        ),
+    ),
+    (
+        EventType.BOARD_MTG,
+        re.compile(
+            r"\b(board meeting|meeting of the board)\b",
+            re.I,
+        ),
+    ),
+    (
+        EventType.AGM,
+        re.compile(
+            r"\b(agm|annual general meeting|egm)\b",
+            re.I,
+        ),
+    ),
+    (
+        EventType.DIVIDEND,
+        re.compile(r"\b(dividend)\b", re.I),
+    ),
+    (
+        EventType.SPLIT,
+        re.compile(r"\b(stock split|share split)\b", re.I),
+    ),
+    (
+        EventType.BONUS,
+        re.compile(r"\bbonus\b", re.I),
+    ),
+    (
+        EventType.BUYBACK,
+        re.compile(r"\bbuy.?back\b", re.I),
+    ),
+    (
+        EventType.RIGHTS,
+        re.compile(r"\brights issue\b", re.I),
+    ),
+    (
+        EventType.SCHEME,
+        re.compile(
+            r"\b("
+            r"merger|"
+            r"demerger|"
+            r"scheme of arrangement|"
+            r"amalgamation"
+            r")\b",
+            re.I,
+        ),
+    ),
 ]
 
-# Which event types are HARD-BLOCK (skip the trade) vs SOFT-WARN (still trade,
-# but flag). Results and board meetings can produce 5-20% gap-moves overnight —
-# hard block. Corporate actions (dividend / split / bonus) also cause ex-date
-# price adjustments — hard block within 3 sessions.
-_HARD_BLOCK_TYPES = {"RESULTS", "BOARD_MTG", "AGM", "DIVIDEND", "SPLIT", "BONUS", "BUYBACK", "RIGHTS", "SCHEME"}
+HARD_BLOCK_EVENTS: Final = frozenset(
+    {
+        EventType.RESULTS,
+        EventType.BOARD_MTG,
+        EventType.AGM,
+        EventType.DIVIDEND,
+        EventType.SPLIT,
+        EventType.BONUS,
+        EventType.BUYBACK,
+        EventType.RIGHTS,
+        EventType.SCHEME,
+    }
+)
+
+################################################################################
+# Utility Functions
+################################################################################
 
 
-def _classify(text: str) -> str:
-    """Classify an announcement text → event type ('OTHER' if no keyword match)."""
+def parse_nse_date(value: str | None) -> dt.date | None:
+    """
+    Parse NSE date formats.
+
+    Supported:
+
+        24-Jul-2026
+
+        24-Jul-2026 13:40:11
+    """
+
+    if not value:
+        return None
+
+    try:
+        return dt.datetime.strptime(
+            value.split()[0],
+            "%d-%b-%Y",
+        ).date()
+
+    except Exception:
+
+        return None
+
+
+def classify_event(text: str) -> EventType:
+    """
+    Determine event type from announcement text.
+    """
+
     if not text:
-        return "OTHER"
-    for tag, rx in _EVENT_PATTERNS:
-        if rx.search(text):
-            return tag
-    return "OTHER"
+        return EventType.OTHER
+
+    for event_type, pattern in EVENT_PATTERNS:
+
+        if pattern.search(text):
+            return event_type
+
+    return EventType.OTHER
 
 
-def _parse_nse_date(s: str) -> dt.date:
-    """Parse '25-Jul-2026' or '25-Jul-2026 14:37:56' → date. None on failure."""
-    if not s or s in ("-", "--"):
-        return None
-    try:
-        return dt.datetime.strptime(s.split()[0], "%d-%b-%Y").date()
-    except Exception:
-        return None
+################################################################################
+# END OF FOUNDATION LAYER
+################################################################################
+
+################################################################################
+# HTTP ENGINE
+################################################################################
+
+_json_cache: dict[str, tuple[float, Any]] = {}
+_cache_lock = threading.RLock()
 
 
-# ======================================================================================
-#  FETCHERS
-# ======================================================================================
-def _fetch_json(url: str) -> object:
-    """GET url, return parsed JSON or None on any failure."""
-    s = _get_session()
-    if s is None:
-        return None
-    try:
-        r = s.get(url, timeout=15)
-    except Exception:
-        return None
-    if r.status_code != 200:
-        return None
-    ct = r.headers.get("content-type", "").lower()
-    if "json" not in ct:
-        return None
-    try:
-        return r.json()
-    except Exception:
-        try:
-            return json.loads(r.text)
-        except Exception:
+def _cache_get(key: str) -> Any | None:
+    """
+    Thread-safe TTL cache lookup.
+    """
+    now = time.time()
+
+    with _cache_lock:
+
+        item = _json_cache.get(key)
+
+        if item is None:
             return None
 
+        expires, value = item
 
-def _fetch_announcements(ticker: str, lookback_days: int = 14) -> list:
-    """Fetch corporate announcements for `ticker` over the last `lookback_days`.
-    Returns list of {date, subject, type} sorted newest-first."""
-    to_dt = dt.date.today()
-    from_dt = to_dt - dt.timedelta(days=lookback_days)
-    from_s = from_dt.strftime("%d-%m-%Y")
-    to_s = to_dt.strftime("%d-%m-%Y")
-    url = (f"https://www.nseindia.com/api/corporate-announcements?"
-           f"index=equities&symbol={ticker}&from_date={from_s}&to_date={to_s}")
-    data = _fetch_json(url)
-    if not isinstance(data, list):
-        return []
-    out = []
-    for row in data:
-        d = _parse_nse_date(row.get("an_dt", ""))
-        if d is None:
-            continue
-        subject = str(row.get("desc") or "") + " | " + str(row.get("attchmntText") or "")
-        etype = _classify(subject)
-        out.append({"date": d, "subject": subject.strip()[:200], "type": etype})
-    return sorted(out, key=lambda r: r["date"], reverse=True)
+        if expires < now:
+            _json_cache.pop(key, None)
+            return None
+
+        return value
 
 
-def _fetch_corporate_actions(ticker: str) -> list:
-    """Fetch upcoming and recent corporate actions (dividend/split/bonus).
-    Returns list of {date, subject, type} — 'date' is the ex-date."""
-    url = f"https://www.nseindia.com/api/corporates-corporateActions?index=equities&symbol={ticker}"
-    data = _fetch_json(url)
-    if not isinstance(data, list):
-        return []
-    out = []
-    for row in data:
-        ex = _parse_nse_date(row.get("exDate", "")) or _parse_nse_date(row.get("recDate", ""))
-        if ex is None:
-            continue
-        subject = str(row.get("subject", "")).strip()
-        etype = _classify(subject)
-        out.append({"date": ex, "subject": subject[:200], "type": etype})
-    return sorted(out, key=lambda r: r["date"])
-
-
-# ======================================================================================
-#  PUBLIC API
-# ======================================================================================
-def fetch_upcoming_events(ticker: str, lookback_days: int = 14,
-                          lookahead_days: int = 30) -> list:
-    """Combined feed: announcements + corporate actions, deduplicated by date + type.
-
-    Args:
-        ticker: bare NSE symbol (no .NS suffix)
-        lookback_days: how far back to look at announcements (default 14)
-        lookahead_days: how far forward to keep (default 30)
-
-    Returns list of {date, subject, type} sorted by date ascending.
+def _cache_put(key: str, value: Any) -> None:
     """
+    Store object in TTL cache.
+    """
+    with _cache_lock:
+
+        _json_cache[key] = (
+            time.time() + CONFIG.CACHE_TTL,
+            value,
+        )
+
+
+################################################################################
+# Request Helpers
+################################################################################
+
+
+def _build_headers() -> dict[str, str]:
+    """
+    Common headers.
+
+    curl_cffi already impersonates Chrome, but explicit Accept headers
+    improve reliability when NSE changes edge filtering.
+    """
+
+    return {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-IN,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Referer": "https://www.nseindia.com/",
+    }
+
+
+@retry
+def _http_get_json(url: str) -> Any:
+    """
+    Production HTTP GET.
+
+    Features
+
+    - retry
+    - validation
+    - structured logging
+    - TTL cache
+    """
+
+    cached = _cache_get(url)
+
+    if cached is not None:
+        logger.debug("Cache hit: %s", url)
+        return cached
+
+    session = SessionManager().session()
+
+    start = time.perf_counter()
+
+    response = session.get(
+        url,
+        timeout=CONFIG.HTTP_TIMEOUT,
+        headers=_build_headers(),
+    )
+
+    latency = (time.perf_counter() - start) * 1000
+
+    logger.info(
+        "GET %s status=%s latency=%.0fms",
+        url,
+        response.status_code,
+        latency,
+    )
+
+    if response.status_code != 200:
+        raise RequestError(
+            f"HTTP {response.status_code}"
+        )
+
+    content_type = response.headers.get(
+        "content-type",
+        "",
+    ).lower()
+
+    if "json" not in content_type:
+        raise InvalidResponse(
+            f"Unexpected content-type {content_type}"
+        )
+
+    try:
+        payload = response.json()
+
+    except Exception:
+
+        try:
+            payload = json.loads(response.text)
+
+        except Exception as exc:
+            raise InvalidResponse(
+                "Unable to decode JSON"
+            ) from exc
+
+    _cache_put(url, payload)
+
+    return payload
+
+
+################################################################################
+# URL Builders
+################################################################################
+
+
+def _announcement_url(
+    ticker: str,
+    lookback_days: int,
+) -> str:
+
     today = dt.date.today()
+
+    start = (
+        today - dt.timedelta(days=lookback_days)
+    ).strftime("%d-%m-%Y")
+
+    end = today.strftime("%d-%m-%Y")
+
+    return (
+        f"{CONFIG.ANNOUNCEMENT_API}"
+        f"?index=equities"
+        f"&symbol={ticker}"
+        f"&from_date={start}"
+        f"&to_date={end}"
+    )
+
+
+def _corporate_action_url(
+    ticker: str,
+) -> str:
+
+    return (
+        f"{CONFIG.CORPORATE_ACTION_API}"
+        f"?index=equities"
+        f"&symbol={ticker}"
+    )
+
+
+################################################################################
+# Payload Parsing
+################################################################################
+
+
+def _parse_announcements(
+    ticker: str,
+    payload: Any,
+) -> list[CorporateEvent]:
+    """
+    Convert announcement payload into CorporateEvent objects.
+    """
+
+    if not isinstance(payload, list):
+        return []
+
+    events: list[CorporateEvent] = []
+
+    for row in payload:
+
+        if not isinstance(row, dict):
+            continue
+
+        event_date = parse_nse_date(
+            row.get("an_dt")
+        )
+
+        if event_date is None:
+            continue
+
+        subject = (
+            f"{row.get('desc','')} | "
+            f"{row.get('attchmntText','')}"
+        ).strip()
+
+        event_type = classify_event(subject)
+
+        events.append(
+            CorporateEvent(
+                symbol=ticker.upper(),
+                event_type=event_type,
+                date=event_date,
+                subject=subject[:250],
+                source="ANNOUNCEMENT",
+                risk=(
+                    RiskLevel.BLOCK
+                    if event_type in HARD_BLOCK_EVENTS
+                    else RiskLevel.LOW
+                ),
+            )
+        )
+
+    events.sort(key=lambda x: x.date)
+
+    return events
+
+
+def _parse_corporate_actions(
+    ticker: str,
+    payload: Any,
+) -> list[CorporateEvent]:
+
+    if not isinstance(payload, list):
+        return []
+
+    events: list[CorporateEvent] = []
+
+    for row in payload:
+
+        if not isinstance(row, dict):
+            continue
+
+        event_date = (
+            parse_nse_date(row.get("exDate"))
+            or parse_nse_date(row.get("recDate"))
+        )
+
+        if event_date is None:
+            continue
+
+        subject = (
+            str(row.get("subject") or "")
+            .strip()
+        )
+
+        event_type = classify_event(subject)
+
+        events.append(
+            CorporateEvent(
+                symbol=ticker.upper(),
+                event_type=event_type,
+                date=event_date,
+                subject=subject[:250],
+                source="CORPORATE_ACTION",
+                risk=(
+                    RiskLevel.BLOCK
+                    if event_type in HARD_BLOCK_EVENTS
+                    else RiskLevel.LOW
+                ),
+            )
+        )
+
+    events.sort(key=lambda x: x.date)
+
+    return events
+
+
+################################################################################
+# Fetch Engine
+################################################################################
+
+
+def _fetch_announcements(
+    ticker: str,
+    lookback_days: int,
+) -> list[CorporateEvent]:
+    """
+    Retrieve announcement feed.
+    """
+
+    payload = _http_get_json(
+        _announcement_url(
+            ticker,
+            lookback_days,
+        )
+    )
+
+    return _parse_announcements(
+        ticker,
+        payload,
+    )
+
+
+def _fetch_corporate_actions(
+    ticker: str,
+) -> list[CorporateEvent]:
+    """
+    Retrieve corporate actions.
+    """
+
+    payload = _http_get_json(
+        _corporate_action_url(
+            ticker,
+        )
+    )
+
+    return _parse_corporate_actions(
+        ticker,
+        payload,
+    )
+
+################################################################################
+# EVENT HELPERS
+################################################################################
+
+
+def _deduplicate_events(
+    events: list[CorporateEvent],
+) -> list[CorporateEvent]:
+    """
+    Remove duplicate events while preserving chronological order.
+
+    Duplicate key:
+        symbol + date + event_type
+    """
+
+    seen: set[tuple[str, dt.date, EventType]] = set()
+
+    unique: list[CorporateEvent] = []
+
+    for event in sorted(events, key=lambda e: e.date):
+
+        key = (
+            event.symbol,
+            event.date,
+            event.event_type,
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        unique.append(event)
+
+    return unique
+
+
+def _filter_event_window(
+    events: list[CorporateEvent],
+    lookback_days: int,
+    lookahead_days: int,
+) -> list[CorporateEvent]:
+    """
+    Keep only events inside the configured time window.
+    """
+
+    today = dt.date.today()
+
+    min_date = today - dt.timedelta(days=lookback_days)
+
     max_date = today + dt.timedelta(days=lookahead_days)
 
-    ann = _fetch_announcements(ticker, lookback_days=lookback_days)
-    ca = _fetch_corporate_actions(ticker)
-
-    all_events = ann + ca
-    # Keep only events with date in range [today - lookback, today + lookahead]
-    min_date = today - dt.timedelta(days=lookback_days)
-    filtered = [e for e in all_events if min_date <= e["date"] <= max_date]
-
-    # Deduplicate by (date, type)
-    seen = set()
-    unique = []
-    for e in filtered:
-        k = (e["date"], e["type"])
-        if k in seen:
-            continue
-        seen.add(k)
-        unique.append(e)
-    return sorted(unique, key=lambda r: r["date"])
+    return [
+        event
+        for event in events
+        if min_date <= event.date <= max_date
+    ]
 
 
-def _cached_events(ticker: str) -> list:
-    """Internal 30-min cached wrapper. Streamlit's @cache_data used if available;
-    else no cache (still one lookup per scanner run)."""
-    return fetch_upcoming_events(ticker)
+################################################################################
+# PUBLIC API
+################################################################################
 
+
+def fetch_upcoming_events(
+    ticker: str,
+    lookback_days: int = CONFIG.LOOKBACK_DAYS,
+    lookahead_days: int = CONFIG.LOOKAHEAD_DAYS,
+) -> list[dict]:
+    """
+    Fetch all relevant corporate events.
+
+    Public API remains identical to the original implementation.
+
+    Returns
+    -------
+    list[dict]
+
+    Each dictionary contains
+
+        date
+        subject
+        type
+    """
+
+    ticker = ticker.strip().upper()
+
+    if not ticker:
+        return []
+
+    logger.info(
+        "Fetching corporate events for %s",
+        ticker,
+    )
+
+    announcements = _fetch_announcements(
+        ticker,
+        lookback_days,
+    )
+
+    actions = _fetch_corporate_actions(
+        ticker,
+    )
+
+    events = announcements + actions
+
+    events = _filter_event_window(
+        events,
+        lookback_days,
+        lookahead_days,
+    )
+
+    events = _deduplicate_events(events)
+
+    return [
+        {
+            "date": event.date,
+            "subject": event.subject,
+            "type": event.event_type.value,
+        }
+        for event in events
+    ]
+
+
+################################################################################
+# STREAMLIT CACHE
+################################################################################
+
+
+_cached_events = fetch_upcoming_events
 
 if st is not None:
-    _cached_events = st.cache_data(ttl=30 * 60, show_spinner=False)(fetch_upcoming_events)
+
+    _cached_events = st.cache_data(
+        ttl=CONFIG.CACHE_TTL,
+        show_spinner=False,
+    )(fetch_upcoming_events)
 
 
-def event_risk(ticker: str, next_sessions: int = 5) -> dict:
-    """Assess event risk for `ticker` for the next N trading sessions.
+################################################################################
+# RISK ENGINE
+################################################################################
 
-    Trading-session approximation: business days × 1.4 (adjust for holidays).
-    A 5-session window ≈ 7 calendar days.
 
-    Returns:
-        {"blocked": bool,           # True if a HARD-BLOCK-TYPE event in window
-         "type": str or None,       # RESULTS / BOARD_MTG / DIVIDEND / etc.
-         "days_until": int or None, # calendar days until the earliest event
-         "subject": str or None,    # first-few-words of the announcement
-         "all_upcoming": list}      # everything in the window (for display)
+def _session_window(
+    next_sessions: int,
+) -> tuple[dt.date, dt.date]:
     """
-    try:
-        events = _cached_events(ticker)
-    except Exception:
-        events = []
+    Approximate trading sessions with calendar days.
+
+    5 sessions ≈ 7 calendar days.
+    """
+
     today = dt.date.today()
-    window_end = today + dt.timedelta(days=int(next_sessions * 1.4) + 1)
-    upcoming = [e for e in events if today <= e["date"] <= window_end]
+
+    end = today + dt.timedelta(
+        days=int(next_sessions * 1.4) + 1
+    )
+
+    return today, end
+
+
+def event_risk(
+    ticker: str,
+    next_sessions: int = CONFIG.DEFAULT_SESSION_WINDOW,
+) -> dict:
+    """
+    Evaluate upcoming corporate-event risk.
+
+    Public API intentionally matches the original module.
+
+    Returns
+
+    {
+        blocked,
+        type,
+        days_until,
+        subject,
+        all_upcoming
+    }
+    """
+
+    ticker = ticker.strip().upper()
+
+    try:
+
+        raw_events = _cached_events(ticker)
+
+    except Exception:
+
+        logger.exception(
+            "Unable to load events for %s",
+            ticker,
+        )
+
+        raw_events = []
+
+    today, window_end = _session_window(
+        next_sessions,
+    )
+
+    upcoming = []
+
+    for row in raw_events:
+
+        event_date = row["date"]
+
+        if today <= event_date <= window_end:
+
+            upcoming.append(row)
+
     if not upcoming:
-        return {"blocked": False, "type": None, "days_until": None,
-                "subject": None, "all_upcoming": []}
-    upcoming.sort(key=lambda r: r["date"])
-    hard = [e for e in upcoming if e["type"] in _HARD_BLOCK_TYPES]
-    if hard:
-        first = hard[0]
-        return {"blocked": True, "type": first["type"],
-                "days_until": (first["date"] - today).days,
-                "subject": first["subject"][:120],
-                "all_upcoming": upcoming}
+
+        return {
+            "blocked": False,
+            "type": None,
+            "days_until": None,
+            "subject": None,
+            "all_upcoming": [],
+        }
+
+    upcoming.sort(
+        key=lambda x: x["date"]
+    )
+
+    for event in upcoming:
+
+        if (
+            EventType(event["type"])
+            in HARD_BLOCK_EVENTS
+        ):
+
+            logger.info(
+                "Trade blocked: %s (%s)",
+                ticker,
+                event["type"],
+            )
+
+            return {
+                "blocked": True,
+                "type": event["type"],
+                "days_until": (
+                    event["date"] - today
+                ).days,
+                "subject": event["subject"][:120],
+                "all_upcoming": upcoming,
+            }
+
     first = upcoming[0]
-    return {"blocked": False, "type": first["type"],
-            "days_until": (first["date"] - today).days,
-            "subject": first["subject"][:120],
-            "all_upcoming": upcoming}
+
+    return {
+        "blocked": False,
+        "type": first["type"],
+        "days_until": (
+            first["date"] - today
+        ).days,
+        "subject": first["subject"][:120],
+        "all_upcoming": upcoming,
+    }
+
+
+################################################################################
+# SELF TEST
+################################################################################
+
+if __name__ == "__main__":
+
+    symbol = "RELIANCE"
+
+    print()
+
+    print("Upcoming Events")
+
+    print("----------------")
+
+    events = fetch_upcoming_events(symbol)
+
+    for item in events:
+
+        print(item)
+
+    print()
+
+    print("Risk")
+
+    print("----")
+
+    print(
+        event_risk(symbol)
+    )

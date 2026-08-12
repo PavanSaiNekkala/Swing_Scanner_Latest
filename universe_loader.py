@@ -89,10 +89,11 @@ CACHE_TTL_SEC = 24 * 60 * 60          # refresh cache every 24h
 NSE_HOSTS = ["nsearchives.nseindia.com", "archives.nseindia.com"]
 
 INDEX_CSVS = {                          # {bucket_name: path_relative_to_host}
-    "LargeCap":  "content/indices/ind_nifty100list.csv",
-    "MidCap":    "content/indices/ind_niftymidcap150list.csv",
-    "SmallCap":  "content/indices/ind_niftysmallcap250list.csv",
-    "Nifty500":  "content/indices/ind_nifty500list.csv",
+    "LargeCap":     "content/indices/ind_nifty100list.csv",
+    "NiftyNext50":  "content/indices/ind_niftynext50list.csv",   # NEW: 50 stocks ranked 101-150
+    "MidCap":       "content/indices/ind_niftymidcap150list.csv",
+    "SmallCap":     "content/indices/ind_niftysmallcap250list.csv",
+    "Nifty500":     "content/indices/ind_nifty500list.csv",
 }
 EQUITY_L_PATH = "content/equities/EQUITY_L.csv"
 
@@ -268,14 +269,18 @@ def load_full_universe(force_refresh: bool = False) -> dict:
             and cache
             and cache.get("buckets")
             and age_h * 3600 < CACHE_TTL_SEC):
+        # Self-heal old caches: compose _all buckets if the disk file was
+        # written by a version of the code that predated them.
+        cache_buckets = dict(cache["buckets"])
+        heal_notes = _compose_all_buckets(cache_buckets)
         return {
-            "buckets":    cache["buckets"],
+            "buckets":    cache_buckets,
             "sector_map": cache.get("sector_map", {}),
             "meta": {
                 "source": "local disk cache (fresh)",
                 "cache_age_hours": round(age_h, 1),
                 "notes": [f"Cached {age_h:.1f}h ago — next refresh in "
-                         f"{max(0, 24 - age_h):.1f}h"],
+                         f"{max(0, 24 - age_h):.1f}h"] + heal_notes,
                 "have_curl_cffi": HAVE_CURL_CFFI,
             },
         }
@@ -298,8 +303,10 @@ def load_full_universe(force_refresh: bool = False) -> dict:
 
     # Live failed. Fall back to STALE cache if we have one — better than nothing.
     if cache and cache.get("buckets"):
+        cache_buckets = dict(cache["buckets"])
+        _compose_all_buckets(cache_buckets)  # self-heal even on stale cache
         return {
-            "buckets":    cache["buckets"],
+            "buckets":    cache_buckets,
             "sector_map": cache.get("sector_map", {}),
             "meta": {
                 "source": f"local disk cache (STALE, {age_h:.0f}h old — NSE unreachable)",
@@ -367,7 +374,58 @@ def _attempt_live_refresh() -> tuple:
 
     if not buckets:
         return None, notes
+
+    # Compose _all buckets via the extracted helper (also used on cache-read
+    # so old caches self-heal without needing a re-fetch)
+    compose_notes = _compose_all_buckets(buckets)
+    notes.extend(compose_notes)
     return {"buckets": buckets, "sector_map": sector_map}, notes
+
+
+def _compose_all_buckets(buckets: dict) -> list:
+    """Compose LargeCap_all / MidCap_all / SmallCap_all / MicroCap in-place.
+
+    Called BOTH after a live NSE refresh AND when reading from a disk cache
+    written by an older version that lacked these composed buckets. That way
+    any bundle returned by load_full_universe has the _all buckets regardless
+    of source. Returns a list of human-readable status notes.
+
+    Definitions (adjacent-tier expansion):
+        LargeCap_all = LargeCap ∪ MidCap                → top-of-market ~250
+        MidCap_all   = MidCap ∪ SmallCap                → all non-large-cap ~400
+        MicroCap     = AllNSE − Nifty500                → long-tail ~1,871
+        SmallCap_all = SmallCap ∪ MicroCap              → SEBI small-cap ~2,121
+    """
+    notes = []
+    def _u(*names):
+        s = set()
+        for n in names:
+            s.update(buckets.get(n, []))
+        return sorted(s)
+
+    if "LargeCap" in buckets and "MidCap" in buckets and "LargeCap_all" not in buckets:
+        buckets["LargeCap_all"] = _u("LargeCap", "MidCap")
+        notes.append(f"➕ LargeCap_all: {len(buckets['LargeCap_all'])} stocks (LargeCap + MidCap)")
+    elif "LargeCap" in buckets and "LargeCap_all" not in buckets:
+        buckets["LargeCap_all"] = list(buckets["LargeCap"])
+
+    if "MidCap" in buckets and "SmallCap" in buckets and "MidCap_all" not in buckets:
+        buckets["MidCap_all"] = _u("MidCap", "SmallCap")
+        notes.append(f"➕ MidCap_all: {len(buckets['MidCap_all'])} stocks (MidCap + SmallCap)")
+    elif "MidCap" in buckets and "MidCap_all" not in buckets:
+        buckets["MidCap_all"] = list(buckets["MidCap"])
+
+    if ("SmallCap" in buckets and "AllNSE" in buckets and "Nifty500" in buckets
+            and "SmallCap_all" not in buckets):
+        allnse_set   = set(buckets["AllNSE"])
+        nifty500_set = set(buckets["Nifty500"])
+        microcap = sorted(allnse_set - nifty500_set)
+        buckets["MicroCap"]     = microcap
+        buckets["SmallCap_all"] = sorted(set(buckets["SmallCap"]) | set(microcap))
+        notes.append(f"➕ MicroCap: {len(microcap)} stocks")
+        notes.append(f"➕ SmallCap_all: {len(buckets['SmallCap_all'])} stocks "
+                     f"(SmallCap + MicroCap = SEBI-def small)")
+    return notes
 
 
 # ======================================================================================

@@ -1,0 +1,66 @@
+# --------------------------------------------------------------------------------------,,,,,,,,,,,,,,,
+# wishlist.csv  —  STOCKS YOU'RE WATCHING (not yet bought),,,,,,,,,,,,,,,
+# --------------------------------------------------------------------------------------,,,,,,,,,,,,,,,
+# See wishlist_app.py header for full schema documentation.,,,,,,,,,,,,,,,
+#,,,,,,,,,,,,,,,
+# REQUIRED : ticker, signal_date, signal_price,, target_price,,,,,,,,,,,
+# OPTIONAL : expected_days, expected_confidence, stop_price,,,,,,,,,,,,,
+#            category, strategy, regime_at_signal,, trade_type, priority,,,,,,,,,,
+#            sector, notes,,,,,,,,,,,,,,
+# All optional fields auto-derived at load time if left blank.,,,,,,,,,,,,,,,
+#,,,,,,,,,,,,,,,
+# CATEGORY (auto-derived from NSE universe buckets when blank):,,,,,,,,,,,,,,,
+#   LargeCap / MidCap / SmallCap / Nifty500 / AllNSE,,,,,,,,,,,,,,,
+#,,,,,,,,,,,,,,,
+# STRATEGY (which scanner rule fired — enables per-strategy analytics later):,,,,,,,,,,,,,,,
+#   PASS_combined / PASS_recommended / PASS_tight / PASS_balanced / PASS_reversal,,,,,,,,,,,,,,,
+#,,,,,,,,,,,,,,,
+# REGIME_AT_SIGNAL (market regime when signal fired — auto-derived from,,,,,,,,,,,,,,,
+#   Nifty 500 bench data at signal_date if blank):  RISK-ON / NEUTRAL / RISK-OFF,,,,,,,,,,,,,,,
+#,,,,,,,,,,,,,,,
+# TRADE_TYPE:  UPTREND / DOWNTREND  (default UPTREND),,,,,,,,,,,,,,,
+#,,,,,,,,,,,,,,,
+# PRIORITY (your own watch level):  high / medium / low  (default medium),,,,,,,,,,,,,,,
+# --------------------------------------------------------------------------------------,,,,,,,,,,,,,,,
+ticker,signal_date,Last close,BUY limit ?,target_price,expected_days,stop_price,expected_confidence,News Score,category,strategy,regime_at_signal,trade_type,priority,sector,notes
+HEROMOTOCO,09-08-2026,5725,5696.38,6550.84,14d,5432.32,2.57,0.555,,PASS_combined,,UPTREND,,Automobile and Auto Components,Signaled fro today after scanning the market
+LICI,09-08-2026,394,392.03,450.83,14d,372.1,0.56,0.358,,PASS_combined,,DOWNTREND,,Financial Services,Signaled fro today after scanning the market
+MOTHERSON,09-08-2026,168.5,167.66,192.81,16d,157.18,5.95,0.311,,PASS_combined,,UPTREND,,Automobile and Auto Components,Signaled fro today after scanning the market
+TRAVELFOOD,09-08-2026,1428.6,1421.46,1634.68,2d ? thin,1322.83,28.41,0,,PASS_combined,,UPTREND,,Consumer Services,Signaled fro today after scanning the market
+NEULANDLAB,09-08-2026,22855,22740.72,26151.83,13d,21034,12.2,0,,PASS_combined,,UPTREND,,Healthcare,Signaled fro today after scanning the market
+LLOYDSME,09-08-2026,2101.2,2090.69,2404.29,12d,1970.81,6.48,0,,PASS_combined,,UPTREND,,Metals & Mining,Signaled fro today after scanning the market
+MEDANTA,09-08-2026,1455.6,1448.32,1665.57,7d,1365.29,5.46,0,,PASS_combined,,UPTREND,,Healthcare,Signaled fro today after scanning the market
+CARBORUNIV,09-08-2026,1097,1091.52,1255.25,14d,1017.1,5.87,0,,PASS_combined,,UPTREND,,Capital Goods,Signaled fro today after scanning the market
+APARINDS,09-08-2026,16631,16547.85,19030.03,18d,15223.77,6.97,0,,PASS_combined,,UPTREND,,Capital Goods,Signaled fro today after scanning the market
+NETWEB,09-08-2026,4939.2,4914.5,5651.67,9d,4523.19,5.13,0,,PASS_combined,,UPTREND,,Information Technology,Signaled fro today after scanning the market
+ASTERDM,09-08-2026,869.7,865.35,995.15,13d,811.37,3.59,0,,PASS_combined,,UPTREND,,Healthcare,Signaled fro today after scanning the market
+BHARATFORG,09-08-2026,2265.2,2253.87,2591.95,13d,2153.05,2.39,0,,PASS_combined,,UPTREND,,Automobile and Auto Components,Signaled fro today after scanning the market
+WELSPUNLIV,09-08-2026,164.09,163.27,187.76,10d,151.73,1.45,0,,PASS_combined,,UPTREND,,Textiles,Signaled fro today after scanning the market
+AARTIIND,09-08-2026,502.1,499.59,574.53,12d,468.9,1.76,0,,PASS_combined,,UPTREND,,Chemicals,Signaled fro today after scanning the market
+GRASIM,09-08-2026,3323,3306.38,3802.34,16d,3160.67,1.74,0,,PASS_combined,,UPTREND,,Construction Materials,Signaled fro today after scanning the market
+ENRIN,09-08-2026,3648.8,3630.56,4175.14,11d ? thin,3349.76,1.57,0,,PASS_combined,,UPTREND,,Capital Goods,Signaled fro today after scanning the market
+AIIL,09-08-2026,596.6,593.62,682.66,14d ? thin,547.88,1.19,0,,PASS_combined,,UPTREND,,Financial Services,Signaled fro today after scanning the market
+HONASA,09-08-2026,477.6,475.21,546.49,21d,446.65,0.38,0,,PASS_combined,,UPTREND,,Fast Moving Consumer Goods,Signaled fro today after scanning the market
+PGEL,09-08-2026,630.65,627.5,721.62,8d,582.67,0,0,,PASS_combined,,UPTREND,,Consumer Durables,Signaled fro today after scanning the market
+TATATECH,09-08-2026,872.8,868.44,998.71,3d ? thin,808.01,0,0,,PASS_combined,,UPTREND,,Information Technology,Signaled fro today after scanning the market
+UNIONBANK,09-08-2026,183.6,182.68,210.08,9d,173.22,0,0,,PASS_combined,,UPTREND,,Financial Services,Signaled fro today after scanning the market
+TRAVELFOOD,09-08-2026,1428.6,1421.46,1634.68,2d ? thin,1322.83,28.41,0,,PASS_combined,,UPTREND,,Consumer Services,Signaled fro today after scanning the market
+NEULANDLAB,09-08-2026,22855,22740.72,26151.83,13d,21034,12.2,0,,PASS_combined,,UPTREND,,Healthcare,Signaled fro today after scanning the market
+CARBORUNIV,09-08-2026,1097,1091.52,1255.25,14d,1017.1,5.87,0,,PASS_combined,,UPTREND,,Capital Goods,Signaled fro today after scanning the market
+NETWEB,09-08-2026,4939.2,4914.5,5651.67,9d,4523.19,5.13,0,,PASS_combined,,UPTREND,,Information Technology,Signaled fro today after scanning the market
+ASTERDM,09-08-2026,869.7,865.35,995.15,13d,811.37,3.59,0,,PASS_combined,,UPTREND,,Healthcare,Signaled fro today after scanning the market
+WELSPUNLIV,09-08-2026,164.09,163.27,187.76,10d,151.73,1.45,0,,PASS_combined,,UPTREND,,Textiles,Signaled fro today after scanning the market
+AARTIIND,09-08-2026,502.1,499.59,574.53,12d,468.9,1.76,0,,PASS_combined,,UPTREND,,Chemicals,Signaled fro today after scanning the market
+KIMS,09-08-2026,811.1,807.04,928.1,21d,763.72,1.37,0,,PASS_combined,,UPTREND,,Healthcare,Signaled fro today after scanning the market
+BELRISE,09-08-2026,248.21,246.97,284.02,15d ? thin,233.25,0.96,0,,PASS_combined,,UPTREND,,Automobile and Auto Components,Signaled fro today after scanning the market
+HONASA,09-08-2026,477.6,475.21,546.49,21d,446.65,0.38,0,,PASS_combined,,UPTREND,,Fast Moving Consumer Goods,Signaled fro today after scanning the market
+PTCIL,09-08-2026,19076,18980.62,21827.71,8d,18019.36,0,0,,PASS_combined,,UPTREND,,Capital Goods,Signaled fro today after scanning the market
+PGEL,09-08-2026,630.65,627.5,721.62,8d,582.67,0,0,,PASS_combined,,UPTREND,,Consumer Durables,Signaled fro today after scanning the market
+TATATECH,09-08-2026,872.8,868.44,998.71,3d ? thin,808.01,0,0,,PASS_combined,,UPTREND,,Information Technology,Signaled fro today after scanning the market
+SONACOMS,09-08-2026,818.05,813.96,936.05,14d,766.8,0,0,,PASS_combined,,UPTREND,,Automobile and Auto Components,Signaled fro today after scanning the market
+EMCURE,09-08-2026,,,,,,,0.291,,,,,,Healthcare,"Only news no technical analysis: Earnings Beat: Emcure Pharmaceuticals Limited Just Beat Analyst Forecasts, And Analysts Have Been UpdatingOnly news no technical analysis:  Their Models - simplywall.st"
+NCC,09-08-2026,,,,,,,0.245,,,,,,Construction,"Only news no technical analysis:NCC shares in focus after Q1 profit rises 13%, margin improves - Moneycontrol.com"
+AFFLE,09-08-2026,,,,,,,0.185,,,,,,Information Technology,Only news no technical analysis:Affle 3i net profit rises 22% in Q1FY27 on strong revenue growth - scanx.trade
+KAYNES,09-08-2026,,,,,,,-0.245,,,,,,Capital Goods,"Only news no technical analysis: misses estimates,profit falls,strong q1"
+DELHIVERY,09-08-2026,,,,,,,-0.394,,,,,,Services,"Only news no technical analysis: profit declines,profit falls,tumbles"
+ZEEL,09-08-2026,,,,,,,-0.941,,,,,,Media Entertainment & Publication,"Only news no technical analysis: plunge,sebi order"

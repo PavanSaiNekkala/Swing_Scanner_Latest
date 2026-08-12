@@ -173,6 +173,19 @@ def load_universe():
     with 24h disk cache and graceful stale-cache fallback. Zero CSV maintenance."""
     bundle = _ul_load()
     buckets = bundle["buckets"] or BUILTIN_UNIVERSE
+
+    # Self-heal: if the Streamlit-cached bundle predates the _all bucket
+    # composition (returned by an older code version), invalidate the cache
+    # and re-fetch. Without this, users see "0 stocks in LargeCap_all" until
+    # the 1-hour Streamlit-cache TTL expires or the app is restarted.
+    if buckets and "LargeCap" in buckets and "LargeCap_all" not in buckets:
+        try:
+            _ul_load.clear()
+        except Exception:
+            pass
+        bundle = _ul_load()
+        buckets = bundle["buckets"] or BUILTIN_UNIVERSE
+
     meta = bundle["meta"]
     if bundle["meta"]["source"].startswith("built-in"):
         # Only show a warning on the absolute last-resort path; stale cache is fine silently.
@@ -693,8 +706,33 @@ def body():
 
     with st.sidebar:
         st.header("1 - Universe")
-        bucket = st.selectbox("Segment",
-                              ["LargeCap", "MidCap", "SmallCap", "Nifty500", "AllNSE", "Enter manually"])
+        bucket = st.selectbox(
+            "Segment",
+            ["LargeCap", "LargeCap_all",
+             "MidCap", "MidCap_all",
+             "SmallCap", "SmallCap_all",
+             "MicroCap",
+             "Nifty500", "AllNSE", "Enter manually"],
+            help=("Choose your scanning universe:\n\n"
+                  "**Curated NSE indices (fixed sizes):**\n"
+                  "• **LargeCap** — Nifty 100 (top 100 by mkt cap)\n"
+                  "• **MidCap** — Nifty Midcap 150 (ranks 101–250)\n"
+                  "• **SmallCap** — Nifty Smallcap 250 (ranks 251–500)\n"
+                  "• **Nifty500** — the 500-stock composite\n\n"
+                  "**Expanded 'all' variants (broader coverage):** \n"
+                  "• **LargeCap_all** — LargeCap + MidCap ≈ 250 stocks "
+                  "(matches Nifty LargeMidcap 250 — top-of-market)\n"
+                  "• **MidCap_all** — MidCap + SmallCap ≈ 400 stocks "
+                  "(all non-large-cap in Nifty 500)\n"
+                  "• **SmallCap_all** — SmallCap + MicroCap ≈ **2,100 stocks** "
+                  "(SEBI-definition small-cap universe: everything ranked 251+)\n\n"
+                  "**Standalone tiers:**\n"
+                  "• **MicroCap** — AllNSE minus Nifty500 ≈ 1,871 stocks (the long tail)\n"
+                  "• **AllNSE** — every NSE EQ/BE stock (~2,371). Slowest (~25 min).\n"
+                  "• **Enter manually** — paste your own ticker list\n\n"
+                  "Note: ~371 additional stocks (T-series / SME / illiquid "
+                  "segments) are intentionally excluded — unsuitable for swing "
+                  "trading (surveillance-flagged / thin liquidity)."))
         if bucket == "Enter manually":
             txt = st.text_area("Tickers (comma/space separated)", "HUDCO, IRFC, RVNL, BEL")
             tickers = [t for t in txt.replace(",", " ").split()]
@@ -1305,17 +1343,122 @@ def body():
             run_list = tickers[:max_n]
         # =============== END FUNDAMENTAL NO-TRADE GATE =================
 
-        rows, prog, status = [], st.progress(0.0), st.empty()
-        for k, sym in enumerate(run_list):
-            status.write(f"Scanning {sym}  ({k+1}/{len(run_list)}) ...")
-            rows.append(scan_one(to_yahoo(sym), start, end, strategy, p, bt_kwargs,
-                                 idx_ret_window, sector_map,
-                                 require_confirmation=require_confirmation,
-                                 bench_close=(idx_df["Close"] if not idx_df.empty else None),
-                                 block_risk_off=block_risk_off))
-            prog.progress((k + 1) / len(run_list))
-            time.sleep(0.05)
+        # =============================================================
+        # BATCHED SCAN with checkpoint + retry (Aug-2026)
+        # -------------------------------------------------------------
+        # Split run_list into batches of BATCH_SIZE stocks; checkpoint
+        # to disk after each batch; pause between batches to relieve
+        # Yahoo rate-limit; retry failed tickers at the end with
+        # exponential backoff.
+        # =============================================================
+        import pickle as _pickle
+        BATCH_SIZE = 100
+        BATCH_PAUSE_SEC = 3.0
+        RETRY_PAUSE_SEC = 10.0
+        CHECKPOINT_PATH = os.path.join(_here, ".scanner_checkpoint.pkl")
+
+        rows = []
+        failed_tickers = []
+        prog = st.progress(0.0)
+        status = st.empty()
+        batch_status = st.empty()
+
+        n_batches = (len(run_list) + BATCH_SIZE - 1) // BATCH_SIZE
+
+        def _scan_ticker(sym):
+            """Wrap scan_one so we can uniformly capture exceptions + failures."""
+            try:
+                row = scan_one(to_yahoo(sym), start, end, strategy, p, bt_kwargs,
+                                idx_ret_window, sector_map,
+                                require_confirmation=require_confirmation,
+                                bench_close=(idx_df["Close"] if not idx_df.empty else None),
+                                block_risk_off=block_risk_off)
+            except Exception as e:
+                return {"ticker": sym, "status": f"exception: {str(e)[:60]}"}, True
+            # Anything that isn't "ok" counts as failed for retry purposes
+            is_fail = (row.get("status") not in ("ok",)
+                       and not str(row.get("status", "")).startswith("insufficient"))
+            return row, is_fail
+
+        def _save_checkpoint(rows_so_far, batches_done, tot_batches):
+            try:
+                with open(CHECKPOINT_PATH, "wb") as f:
+                    _pickle.dump({
+                        "timestamp": dt.datetime.now().isoformat(),
+                        "bucket": bucket, "max_n": max_n,
+                        "batches_done": batches_done,
+                        "total_batches": tot_batches,
+                        "rows": rows_so_far,
+                    }, f)
+            except Exception:
+                pass  # non-critical
+
+        # ---- MAIN BATCH LOOP ----
+        for b_idx in range(n_batches):
+            bstart = b_idx * BATCH_SIZE
+            bend = min(bstart + BATCH_SIZE, len(run_list))
+            batch_syms = run_list[bstart:bend]
+            batch_status.info(f"📦 **Batch {b_idx+1}/{n_batches}** — scanning "
+                              f"stocks {bstart+1}–{bend} of {len(run_list)}")
+            batch_failed_this_run = 0
+            for k, sym in enumerate(batch_syms):
+                global_k = bstart + k
+                status.write(f"⏳ [{global_k+1}/{len(run_list)}] "
+                             f"batch {b_idx+1}/{n_batches} · stock {k+1}/{len(batch_syms)} · {sym}")
+                row, is_fail = _scan_ticker(sym)
+                rows.append(row)
+                if is_fail:
+                    failed_tickers.append(sym)
+                    batch_failed_this_run += 1
+                prog.progress((global_k + 1) / len(run_list))
+                time.sleep(0.05)
+
+            # Checkpoint after each batch
+            _save_checkpoint(rows, b_idx + 1, n_batches)
+            batch_status.success(
+                f"✅ Batch {b_idx+1}/{n_batches} complete · "
+                f"{len(rows)}/{len(run_list)} stocks scanned so far · "
+                f"{batch_failed_this_run} failures this batch (total {len(failed_tickers)})")
+
+            # Pause between batches (except after the last one)
+            if b_idx < n_batches - 1:
+                for wait_s in range(int(BATCH_PAUSE_SEC), 0, -1):
+                    status.write(f"⏸️  Cooling off {wait_s}s before next batch "
+                                 f"(reduces Yahoo rate-limit pressure)...")
+                    time.sleep(1)
+
+        # ---- RETRY FAILED TICKERS (once, with backoff) ----
+        if failed_tickers and len(failed_tickers) < len(run_list) * 0.7:
+            batch_status.warning(
+                f"🔄 Retrying **{len(failed_tickers)}** failed ticker(s) with "
+                f"{RETRY_PAUSE_SEC:.0f}s cooldown first...")
+            time.sleep(RETRY_PAUSE_SEC)
+            recovered = 0
+            still_failed = []
+            for k, sym in enumerate(failed_tickers):
+                status.write(f"🔁 Retry [{k+1}/{len(failed_tickers)}] {sym}")
+                row, is_fail = _scan_ticker(sym)
+                if not is_fail:
+                    # Replace the original failed row with the recovered one
+                    for i, r in enumerate(rows):
+                        if r.get("ticker") == sym:
+                            rows[i] = row
+                            break
+                    recovered += 1
+                else:
+                    still_failed.append(sym)
+                time.sleep(0.3)   # gentle pace on retries
+            if recovered:
+                batch_status.success(
+                    f"✅ Retry recovered **{recovered}/{len(failed_tickers)}** tickers. "
+                    f"{len(still_failed)} still failed.")
+            else:
+                batch_status.warning(
+                    f"❌ Retry recovered 0 tickers. {len(still_failed)} still failed "
+                    f"(likely delisted or persistently rate-limited).")
+
         status.empty(); prog.empty()
+        # Note: keep batch_status visible so user sees final summary.
 
         # ================== NEWS & EVENT-RISK PASS  🆕 (Aug-2026) =========
         # Fetch news/events for EVERY fundamentally-passing stock, not just

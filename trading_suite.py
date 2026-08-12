@@ -53,11 +53,14 @@ st.set_page_config(page_title="NSE Trading Suite",
 # Lazy-import the two apps AFTER set_page_config
 # (module load doesn't call their main() since imports guard __main__)
 # ------------------------------------------------------------------
-scanner = _load("_ts_scanner", "swing_scanner_app.py")
-monitor = _load("_ts_monitor", "monitor_app.py")
+scanner  = _load("_ts_scanner",  "swing_scanner_app.py")
+monitor  = _load("_ts_monitor",  "monitor_app.py")
+wishlist = _load("_ts_wishlist", "wishlist_app.py")
 
-# Sanity check — both must expose body() (added in the split refactor)
-for name, mod in (("swing_scanner_app", scanner), ("monitor_app", monitor)):
+# Sanity check — all three must expose body() (added in the split refactor)
+for name, mod in (("swing_scanner_app", scanner),
+                   ("monitor_app",      monitor),
+                   ("wishlist_app",     wishlist)):
     if not hasattr(mod, "body"):
         st.error(f"{name}.py is missing the required `body()` function. "
                  f"Update the file so main() calls body() (see docstring).")
@@ -65,10 +68,12 @@ for name, mod in (("swing_scanner_app", scanner), ("monitor_app", monitor)):
 
 
 MODES = {
-    "🔍 Daily Scanner":    ("Scan the market for new setups.  "
-                            "Runs after market close on a chosen universe."),
-    "📊 Position Monitor": ("Analyze positions you already hold.  "
-                            "Reads positions.csv and recommends hold / exit / add."),
+    "🔍 Daily Scanner":     ("Scan the market for new setups.  "
+                              "Runs after market close on a chosen universe."),
+    "📊 Position Monitor":  ("Analyze positions you already hold.  "
+                              "Reads positions.csv and recommends hold / exit / add."),
+    "🔮 Wishlist Tracker":  ("Track scanner predictions vs actual behaviour.  "
+                              "Reads wishlist.csv, logs one observation per stock per run."),
 }
 
 
@@ -89,8 +94,10 @@ def main():
     #  Each body() manages its own sidebar section and main area.
     if mode.startswith("🔍"):
         scanner.body()
-    else:
+    elif mode.startswith("📊"):
         monitor.body()
+    else:
+        wishlist.body()
 
 
 if __name__ == "__main__":

@@ -113,8 +113,12 @@ def _to_yahoo(sym: str) -> str:
     return s if s.endswith((".NS", ".BO")) else s + ".NS"
 
 
-@st.cache_data(ttl=60 * 60, show_spinner=False)
+@st.cache_data(ttl=15 * 60, show_spinner=False)   # 15 min (was 60) — fresher price
 def _fetch_stock(ticker_yahoo: str, days: int = 400) -> pd.DataFrame:
+    """SPLIT-ADJUSTED daily history (auto_adjust=True) — used for indicator
+    computation (RSI, MACD, ATR etc. need adjusted series so ratios are
+    correct across corporate actions). This is NOT the series used for
+    the 'current price' display — see `_fetch_live_price()` below."""
     if yf is None:
         return pd.DataFrame()
     end = dt.date.today() + dt.timedelta(days=1)
@@ -129,6 +133,58 @@ def _fetch_stock(ticker_yahoo: str, days: int = 400) -> pd.DataFrame:
     df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
     df.index = pd.to_datetime(df.index).tz_localize(None)
     return df.dropna()
+
+
+@st.cache_data(ttl=5 * 60, show_spinner=False)   # 5 min — live-ish price
+def _fetch_live_price(ticker_yahoo: str) -> dict:
+    """Fetch the CURRENT (or last-tick) UNADJUSTED market price.
+    This is what appears on your broker screen — it matches your buy_price
+    apples-to-apples. Falls back gracefully through:
+       1. Ticker.fast_info.last_price       (live-ish; sub-minute)
+       2. 1-minute intraday history         (most recent bar)
+       3. Daily close (unadjusted)          (yesterday's close)
+    Returns {price: float, as_of: date/datetime, source: str}.
+    """
+    if yf is None:
+        return {"price": None, "as_of": None, "source": "yfinance unavailable"}
+    try:
+        t = yf.Ticker(ticker_yahoo)
+    except Exception as e:
+        return {"price": None, "as_of": None, "source": f"error: {str(e)[:40]}"}
+
+    # 1. fast_info.last_price — the freshest source
+    try:
+        fi = t.fast_info
+        p = float(getattr(fi, "last_price", None) or fi["lastPrice"])
+        if p and p > 0:
+            return {"price": round(p, 2), "as_of": dt.datetime.now(),
+                    "source": "live (fast_info)"}
+    except Exception:
+        pass
+
+    # 2. 1-minute intraday — most recent complete bar
+    try:
+        intra = t.history(period="1d", interval="1m")
+        if intra is not None and not intra.empty:
+            last = intra.iloc[-1]
+            return {"price": round(float(last["Close"]), 2),
+                    "as_of":  intra.index[-1].to_pydatetime(),
+                    "source": "1-min intraday"}
+    except Exception:
+        pass
+
+    # 3. Daily unadjusted close — fallback
+    try:
+        daily = t.history(period="5d", interval="1d", auto_adjust=False)
+        if daily is not None and not daily.empty:
+            last = daily.iloc[-1]
+            return {"price": round(float(last["Close"]), 2),
+                    "as_of":  daily.index[-1].to_pydatetime().date(),
+                    "source": "daily close (unadjusted)"}
+    except Exception:
+        pass
+
+    return {"price": None, "as_of": None, "source": "no data"}
 
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
@@ -340,6 +396,350 @@ def _ratchet_stop(entry_price: float, pnl_pct: float, current_stop: float) -> fl
     return round(best, 2) if best is not None else None
 
 
+# ======================================================================================
+#  ADAPTIVE RATCHET  (v2, Aug-2026) — replaces the fixed ladder
+# ======================================================================================
+# The v1 fixed ladder gave uneven give-back:
+#   +5%  → floor +0%  (give-back 5pp)
+#   +10% → floor +3%  (give-back 7pp)
+#   +20% → floor +12% (give-back 8pp)
+#   +30% → floor +20% (give-back 10pp)
+# Problem: at +17%, applied the +10% rung → new floor +3% → **giving back 14pp**
+# — user's exact complaint. Also fixed give-back ignores volatility: 5pp is
+# fine for TCS (ATR 1.5%) but way too tight for ADANIENT (ATR 4%+).
+#
+# v2 adaptive give-back:
+#   give_back = clamp(ATR% × 2, 3, 8)         # 3-8pp, scaled to volatility
+#   new_floor = pnl_pct - give_back
+# So +17% on a 2.5% ATR stock → give-back 5pp → new floor +12%
+# And  +17% on a 4.5% ATR stock → give-back 8pp → new floor +9%
+# — matches what the volatility actually justifies.
+def _adaptive_ratchet(entry_price: float, pnl_pct: float,
+                       current_stop: float, atr_pct: float,
+                       min_gain_to_arm: float = 5.0) -> tuple:
+    """Adaptive ratchet: give-back scaled by volatility.
+    Returns (new_stop_price, give_back_pp) or (None, None) if no raise applies.
+
+    Only ARMS when pnl_pct >= min_gain_to_arm (5% by default) — below that,
+    let the original stop protect you; a 3-day trade at +2% shouldn't be
+    micro-managed.
+    """
+    if pnl_pct < min_gain_to_arm:
+        return None, None
+    # Give-back range: 3pp minimum (never tighter for very calm stocks), 8pp max
+    atr = float(atr_pct) if pd.notna(atr_pct) and atr_pct > 0 else 3.0
+    give_back = max(3.0, min(atr * 2.0, 8.0))
+    new_floor_pct = pnl_pct - give_back
+    if new_floor_pct <= 0:
+        return None, None                # not yet at break-even + give_back
+    candidate = entry_price * (1 + new_floor_pct / 100)
+    if candidate <= current_stop:
+        return None, None                # ratchet only raises, never lowers
+    return round(candidate, 2), round(give_back, 1)
+
+
+def _detect_exhaustion(ta: dict, pnl_pct: float, days_held: int) -> tuple:
+    """Detect exhaustion in a fast winner (+10-25% in ≤10 days).
+    Returns (score 0-4, list of triggered signals).
+
+    Signals (each worth 1 point):
+      A. RSI > 75  — overbought
+      B. BB %B > 95 — riding upper Bollinger band
+      C. Vol ratio < 0.9 on new highs — momentum fading (volume divergence)
+      D. Price > 8% above 20-DMA — extended, mean-reversion risk
+
+    Trigger BOOK_PARTIAL when score >= 2 AND rapid gain (+10-25% in ≤10 days).
+    """
+    triggers = []
+    def _f(k, default):
+        v = ta.get(k, default)
+        return float(v) if pd.notna(v) else default
+    if _f("rsi14", 50)      > 75: triggers.append("RSI overbought (>75)")
+    if _f("bb_pctB", 50)    > 95: triggers.append("riding upper Bollinger (%B>95)")
+    if _f("vol_ratio", 1.0) < 0.9 and pnl_pct >= 10:
+        triggers.append("volume fading on new highs")
+    if _f("pct_vs_sma20", 0) > 8:
+        triggers.append(f"price {ta['pct_vs_sma20']:+.1f}% above 20-DMA (extended)")
+    return len(triggers), triggers
+
+
+def _expected_range(entry_price: float, current_price: float,
+                     atr_pct: float, days_ahead: int = 5) -> dict:
+    """Statistical price-range projection for the next `days_ahead` sessions.
+    Uses ATR-scaled random walk: expected 1-sigma range = ATR × sqrt(days).
+    Returns {low, high, base, move_pct}."""
+    if not pd.notna(atr_pct) or atr_pct <= 0:
+        return {"low": None, "high": None, "base": current_price, "move_pct": None}
+    daily_sigma = atr_pct / 100.0
+    move = daily_sigma * (days_ahead ** 0.5)
+    return {
+        "low":  round(current_price * (1 - move), 2),
+        "high": round(current_price * (1 + move), 2),
+        "base": current_price,
+        "move_pct": round(move * 100, 1),
+    }
+
+
+# ======================================================================================
+#  TARGET-PROJECTION HELPERS (Aug-2026) — answer the "when + how far" question
+# ======================================================================================
+def _historical_target_stats(df_ind, target_pct: float = 15.0,
+                              window_days: int = 30, lookback: int = 500) -> dict:
+    """Backward-scan of price history: how OFTEN did this stock post a
+    target_pct% gain within a window_days rolling window, and how long did
+    it typically take? Uses only the last `lookback` bars (~2 years) so
+    stale eras don't dominate.
+
+    Returns {med_days, min_days, occurrences, hit_rate_%}.
+    """
+    if df_ind is None or df_ind.empty:
+        return {"med_days": None, "min_days": None, "occurrences": 0, "hit_rate": None}
+    close = df_ind["Close"].values
+    n = min(len(close), lookback)
+    close = close[-n:]
+    if n < window_days + 5:
+        return {"med_days": None, "min_days": None, "occurrences": 0, "hit_rate": None}
+    tgt_mult = 1 + target_pct / 100.0
+    days_taken = []
+    starts = 0
+    for i in range(0, n - window_days):
+        starts += 1
+        target = close[i] * tgt_mult
+        max_j = min(i + window_days, n - 1)
+        for j in range(i + 1, max_j + 1):
+            if close[j] >= target:
+                days_taken.append(j - i)
+                break
+    if not days_taken:
+        return {"med_days": None, "min_days": None,
+                "occurrences": 0, "hit_rate": 0.0}
+    return {
+        "med_days":    int(np.median(days_taken)),
+        "min_days":    int(np.min(days_taken)),
+        "occurrences": len(days_taken),
+        "hit_rate":    round(100 * len(days_taken) / starts, 1),
+    }
+
+
+def _project_days_to_target(entry: float, current: float, target_price: float,
+                              ta: dict, df_ind) -> dict:
+    """Estimate how many trading days until price reaches target_price.
+
+    Combines two methods:
+      A. Historical velocity — median time a similar % gain took on THIS stock
+      B. Current momentum   — extrapolate from recent 5-day price velocity
+    Returns dict with base, low, high days estimates + momentum_state label.
+    """
+    if not (current and target_price and target_price > current):
+        # Already at/above target — no more days needed
+        return {"days_low": 0, "days_base": 0, "days_high": 0,
+                "momentum_state": "at_target", "method": "already-there",
+                "hist_stats": None, "target_pct_from_now": 0.0}
+    pct_needed = (target_price / current - 1) * 100
+    close = df_ind["Close"].values if df_ind is not None else None
+
+    # A. Historical velocity — how long does a `pct_needed` gain typically take?
+    hist_stats = _historical_target_stats(df_ind, target_pct=pct_needed,
+                                            window_days=30, lookback=500)
+
+    # B. Current momentum — 5-day velocity
+    daily_vel = None
+    if close is not None and len(close) > 5:
+        ret_5d = (close[-1] / close[-6] - 1) * 100
+        daily_vel = ret_5d / 5.0    # % per day
+    # Trend context
+    prev_5d = None
+    if close is not None and len(close) > 10:
+        prev_5d = (close[-6] / close[-11] - 1) * 100 / 5.0
+
+    # Days estimate from velocity
+    days_velocity = None
+    if daily_vel and daily_vel > 0.1:      # meaningful upside momentum
+        days_velocity = pct_needed / daily_vel
+
+    # Blend the two — base = median of historical + velocity
+    candidates = []
+    if hist_stats["med_days"]:  candidates.append(float(hist_stats["med_days"]))
+    if days_velocity:           candidates.append(float(days_velocity))
+    if not candidates:
+        return {"days_low": None, "days_base": None, "days_high": None,
+                "momentum_state": "unknown", "method": "no data",
+                "hist_stats": hist_stats, "target_pct_from_now": round(pct_needed, 2)}
+    base = int(np.median(candidates))
+    low  = int(max(1, min(candidates) * 0.7))
+    high = int(max(base + 1, max(candidates) * 1.5))
+
+    # Momentum-state label
+    if daily_vel is None:
+        state = "unknown"
+    elif prev_5d is not None and daily_vel > prev_5d * 1.15:
+        state = "accelerating ↑"
+    elif prev_5d is not None and daily_vel < prev_5d * 0.85:
+        state = "decelerating ↓"
+    elif daily_vel > 0.2:
+        state = "steady advance"
+    elif daily_vel > 0:
+        state = "flat / slow drift"
+    else:
+        state = "declining ↓"
+
+    return {"days_low": low, "days_base": base, "days_high": high,
+            "momentum_state": state,
+            "method": "hist × velocity" if len(candidates) == 2 else
+                       ("historical" if hist_stats["med_days"] else "velocity"),
+            "hist_stats": hist_stats,
+            "current_velocity_pct_per_day": round(daily_vel, 3) if daily_vel else None,
+            "target_pct_from_now": round(pct_needed, 2)}
+
+
+def _project_price_ceiling(entry: float, current: float, ta: dict, df_ind,
+                            days_ahead: int = 30) -> dict:
+    """Estimate the realistic price ceiling over the next `days_ahead` sessions.
+
+    Layered analysis:
+      1. Immediate resistance   — 20-day high
+      2. Medium-term ceiling    — 52-week high
+      3. Statistical maximum    — current × (1 + ATR% × sqrt(days) / 100 × 1.5)
+                                  (1.5× ATR-drift = upper edge of bullish 1σ path)
+      4. If already past 52-week high, use ATR-projection alone
+    """
+    result = {
+        "immediate_resistance": None,
+        "medium_ceiling":       None,
+        "statistical_max":      None,
+        "pnl_from_entry_at_ceiling": {},
+        "notes": [],
+    }
+    if df_ind is None or df_ind.empty:
+        return result
+    high_series = df_ind["High"]
+    close = df_ind["Close"]
+    # 1. Immediate resistance = highest high in the last 20 sessions (excluding today)
+    if len(high_series) >= 21:
+        imm = float(high_series.iloc[-21:-1].max())
+        if imm > current * 1.005:            # only useful if it's ABOVE now
+            result["immediate_resistance"] = round(imm, 2)
+            result["pnl_from_entry_at_ceiling"]["immediate"] = \
+                round((imm / entry - 1) * 100, 1)
+
+    # 2. Medium ceiling = 52-week high
+    if len(high_series) >= 252:
+        wk52_high = float(high_series.iloc[-252:].max())
+    else:
+        wk52_high = float(high_series.max())
+    result["medium_ceiling"] = round(wk52_high, 2)
+    result["pnl_from_entry_at_ceiling"]["52w_high"] = \
+        round((wk52_high / entry - 1) * 100, 1)
+    if current > wk52_high * 0.99:
+        result["notes"].append(
+            "already at/near 52-week high — no historical resistance overhead")
+
+    # 3. Statistical max via ATR × sqrt(days) × 1.5 (bullish drift edge)
+    atr_pct = ta.get("atr_pct", None)
+    if pd.notna(atr_pct) and atr_pct > 0:
+        max_move_pct = atr_pct * (days_ahead ** 0.5) * 1.5
+        stat_max = current * (1 + max_move_pct / 100)
+        result["statistical_max"] = round(stat_max, 2)
+        result["pnl_from_entry_at_ceiling"]["stat_max_30d"] = \
+            round((stat_max / entry - 1) * 100, 1)
+
+    # 4. Momentum context — is this a genuinely strong trend?
+    if ta.get("adx14", 0) >= 25 and ta.get("macd_hist", 0) > 0:
+        result["notes"].append(
+            f"strong trend (ADX {ta.get('adx14',0):.0f}, MACD+) — "
+            "ceiling estimates on the higher side")
+    elif ta.get("adx14", 100) < 18:
+        result["notes"].append(
+            "weak trend (ADX < 18) — ceiling estimates on the lower side")
+
+    return result
+
+
+def _target_hit_probability(pnl_pct: float, target_pct: float, ta: dict,
+                              hist_hit_rate: float = None,
+                              days_held: int = 0, max_hold: int = 30) -> int:
+    """Rough estimate of the probability of hitting `target_pct` gain
+    within the remaining hold window. Combines:
+      - historical hit rate for this stock (from _historical_target_stats)
+      - progress-so-far (already-halfway? much more likely)
+      - momentum bonus (uptrend adds probability)
+      - time remaining (less time = lower probability)
+    Returns 0-100 integer.
+    """
+    days_left = max(1, max_hold - days_held)
+    # If already at/above target, probability is very high
+    if pnl_pct >= target_pct:
+        return 95
+    remaining_pct = target_pct - pnl_pct
+
+    base = hist_hit_rate if (hist_hit_rate is not None and hist_hit_rate > 0) else 30.0
+    # Progress bonus — halfway there is a strong signal
+    progress = pnl_pct / target_pct if target_pct > 0 else 0
+    base += max(0, progress * 30)      # +0 at 0%, +30 at 100%
+    # Momentum tilt
+    if ta.get("macd_hist", 0) > 0:  base += 5
+    if ta.get("adx14", 0) >= 25:    base += 5
+    if ta.get("rsi14", 50) > 70:    base -= 5    # overbought — less headroom
+    # Time-remaining haircut
+    time_ratio = days_left / max_hold
+    if time_ratio < 0.3:
+        base *= 0.7          # <30% time left — much harder
+    elif time_ratio < 0.5:
+        base *= 0.85
+
+    return int(max(5, min(base, 95)))
+
+
+def _compute_confidence(action: str, score: dict, ta: dict, news: dict,
+                         events: dict, urgency: str = "normal") -> int:
+    """Return a 0-100 confidence for the recommendation.
+    Higher = stronger signal alignment; lower = borderline / conflicted.
+
+    Base:
+      URGENT EXIT → 90 (stop-loss / event / severe news don't leave much room)
+      EXIT        → 65 + |score|*2 clamped [55, 85]
+      REDUCE      → 55 + |score| clamped [50, 75]
+      BOOK_PARTIAL→ 70
+      HOLD        → 50 + score*2 clamped [45, 85]
+
+    Adjustments:
+      +5 if news direction matches action (positive news + HOLD, neg news + EXIT)
+      -5 if news CONTRADICTS action (positive news + EXIT feels wrong)
+      +5 if regime supports (RISK-ON + HOLD; RISK-OFF + EXIT)
+    """
+    tot = score.get("total", 0) if score else 0
+    ns  = news.get("score", 0.0) if news else 0.0
+    nn  = news.get("n_articles", 0) if news else 0
+
+    if urgency == "URGENT":
+        base = 90
+    elif action == "EXIT":
+        base = 65 + min(abs(tot) * 2, 20)
+    elif action == "REDUCE":
+        base = 55 + min(abs(tot), 20)
+    elif action == "BOOK_PARTIAL":
+        base = 70
+    elif action == "HOLD":
+        base = 50 + max(-10, min(tot * 2, 35))
+    else:
+        base = 50
+    base = max(35, min(base, 95))
+
+    # News alignment
+    if nn >= 2:
+        if action in ("HOLD",) and ns >= 0.2:      base += 5
+        if action in ("EXIT",) and ns <= -0.2:     base += 5
+        if action in ("HOLD",) and ns <= -0.2:     base -= 5
+        if action in ("EXIT",) and ns >= 0.2:      base -= 5
+
+    # Regime alignment (via score's regime component)
+    reg = score.get("regime", 0) if score else 0
+    if action == "HOLD" and reg > 0: base += 3
+    if action == "EXIT" and reg < 0: base += 3
+
+    return int(max(30, min(base, 95)))
+
+
 def _derive_stop_loss(buy_price: float, ta_snapshot: dict,
                        max_pct: float = 10.0, atr_mult: float = 2.0) -> tuple:
     """When user leaves stop_loss blank, compute a sensible default matching
@@ -392,6 +792,24 @@ def _mk_check(category: str, name: str, value, verdict: str, note: str = "") -> 
     """Uniform check record — used for the audit table in the UI."""
     return {"category": category, "name": name, "value": value,
             "verdict": verdict, "note": note}
+
+
+def _finalize(base: dict, ta: dict, news: dict, events: dict,
+               entry: float, price: float) -> dict:
+    """Attach confidence % + expected_range to any decide() return dict.
+    Runs after the base dict is built so all decision paths get the same
+    quality of downstream info. Idempotent — safe if fields already exist."""
+    if "confidence" not in base or base["confidence"] is None:
+        base["confidence"] = _compute_confidence(
+            base.get("action", "HOLD"),
+            base.get("score", {}),
+            ta, news, events,
+            urgency=base.get("urgency", "normal"),
+        )
+    if "expected_range" not in base or base["expected_range"] is None:
+        base["expected_range"] = _expected_range(
+            entry, price, ta.get("atr_pct", 3.0), days_ahead=5)
+    return base
 
 
 def decide(position: pd.Series, ta: dict, news: dict, events: dict,
@@ -632,13 +1050,14 @@ def decide(position: pd.Series, ta: dict, news: dict, events: dict,
             f"exit at the next open regardless of other signals. Loss on this "
             f"trade: {pnl_pct:+.1f}% (₹{pnl_abs:+.0f})."
         )
-        return dict(action=action, urgency=urgency, pnl_pct=pnl_pct, pnl_abs=pnl_abs,
+        _ret = dict(action=action, urgency=urgency, pnl_pct=pnl_pct, pnl_abs=pnl_abs,
                     days_held=days_held, new_stop=None, add_qty=0,
                     reasons=[narrative[0]],
                     narrative=narrative, checks=checks,
                     score=dict(ta=ta_score, news=news_score,
                                event=event_score, regime=reg_score,
                                ratchet=0, total=ta_score+news_score+event_score+reg_score))
+        return _finalize(_ret, ta, news, events, entry, price)
 
     if ev_urgent:
         action, urgency = "EXIT", "URGENT"
@@ -647,13 +1066,14 @@ def decide(position: pd.Series, ta: dict, news: dict, events: dict,
             f"like results/AGM/split routinely produce 5-20% overnight gaps. "
             f"Exit before the event and re-evaluate on the post-event tape."
         )
-        return dict(action=action, urgency=urgency, pnl_pct=pnl_pct, pnl_abs=pnl_abs,
+        _ret = dict(action=action, urgency=urgency, pnl_pct=pnl_pct, pnl_abs=pnl_abs,
                     days_held=days_held, new_stop=None, add_qty=0,
                     reasons=[narrative[0]],
                     narrative=narrative, checks=checks,
                     score=dict(ta=ta_score, news=news_score,
                                event=event_score, regime=reg_score,
                                ratchet=0, total=ta_score+news_score+event_score+reg_score))
+        return _finalize(_ret, ta, news, events, entry, price)
 
     if ns <= -0.5 and nn >= 2:
         action, urgency = "EXIT", "URGENT"
@@ -665,13 +1085,14 @@ def decide(position: pd.Series, ta: dict, news: dict, events: dict,
             f"deliver -15 to -40% moves. Exit even if technicals still look OK."
         )
         if top: narrative.append(f'Top headline: "{top}"')
-        return dict(action=action, urgency=urgency, pnl_pct=pnl_pct, pnl_abs=pnl_abs,
+        _ret = dict(action=action, urgency=urgency, pnl_pct=pnl_pct, pnl_abs=pnl_abs,
                     days_held=days_held, new_stop=None, add_qty=0,
                     reasons=[narrative[0]],
                     narrative=narrative, checks=checks,
                     score=dict(ta=ta_score, news=news_score,
                                event=event_score, regime=reg_score,
                                ratchet=0, total=ta_score+news_score+event_score+reg_score))
+        return _finalize(_ret, ta, news, events, entry, price)
 
     # ---------- TIER 2 : EXIT (≥ 2 TA breakdowns) ----------
     if len(breakdowns) >= 2:
@@ -682,13 +1103,14 @@ def decide(position: pd.Series, ta: dict, news: dict, events: dict,
             f"justified this position is broken. Exit at open."
         )
         narrative.append(f"Broken checks → {detail}")
-        return dict(action=action, urgency=urgency, pnl_pct=pnl_pct, pnl_abs=pnl_abs,
+        _ret = dict(action=action, urgency=urgency, pnl_pct=pnl_pct, pnl_abs=pnl_abs,
                     days_held=days_held, new_stop=None, add_qty=0,
                     reasons=[narrative[0]],
                     narrative=narrative, checks=checks,
                     score=dict(ta=ta_score, news=news_score,
                                event=event_score, regime=reg_score,
                                ratchet=0, total=ta_score+news_score+event_score+reg_score))
+        return _finalize(_ret, ta, news, events, entry, price)
 
     # ---------- TIER 3 : REDUCE (book half) ----------
     if -0.3 >= ns > -0.5 and nn >= 2:
@@ -699,7 +1121,7 @@ def decide(position: pd.Series, ta: dict, news: dict, events: dict,
             f"reduce exposure. Book roughly half; reassess in 2-3 sessions."
         )
         if top: narrative.append(f'Top: "{top}"')
-        return dict(action="REDUCE", urgency="normal", pnl_pct=pnl_pct, pnl_abs=pnl_abs,
+        _ret = dict(action="REDUCE", urgency="normal", pnl_pct=pnl_pct, pnl_abs=pnl_abs,
                     days_held=days_held, new_stop=None,
                     add_qty=-int(qty // 2),
                     reasons=[narrative[0]],
@@ -707,6 +1129,7 @@ def decide(position: pd.Series, ta: dict, news: dict, events: dict,
                     score=dict(ta=ta_score, news=news_score,
                                event=event_score, regime=reg_score,
                                ratchet=0, total=ta_score+news_score+event_score+reg_score))
+        return _finalize(_ret, ta, news, events, entry, price)
 
     if len(breakdowns) == 1 and pnl_pct < 0:
         bd = breakdowns[0]
@@ -715,7 +1138,7 @@ def decide(position: pd.Series, ta: dict, news: dict, events: dict,
             f"{bd['name']} — {bd['note']}. One broken check plus red ink is "
             f"enough to trim exposure; book half and let the rest ride."
         )
-        return dict(action="REDUCE", urgency="normal", pnl_pct=pnl_pct, pnl_abs=pnl_abs,
+        _ret = dict(action="REDUCE", urgency="normal", pnl_pct=pnl_pct, pnl_abs=pnl_abs,
                     days_held=days_held, new_stop=None,
                     add_qty=-int(qty // 2),
                     reasons=[narrative[0]],
@@ -723,23 +1146,66 @@ def decide(position: pd.Series, ta: dict, news: dict, events: dict,
                     score=dict(ta=ta_score, news=news_score,
                                event=event_score, regime=reg_score,
                                ratchet=0, total=ta_score+news_score+event_score+reg_score))
+        return _finalize(_ret, ta, news, events, entry, price)
 
-    # ---------- TIER 4 : HOLD (with ratchet + optional ADD) ----------
+    # ---------- TIER 3.5 : BOOK_PARTIAL — fast winner showing exhaustion ----------
+    # Trigger conditions ALL must hold:
+    #   - Rapid gain: +10% to +25% in <=10 days (the "fast-mover" profile)
+    #   - >= 2 exhaustion signals firing on today's bar
+    #   - Not already in profit-take zone (>25% would be HOLD with adaptive ratchet)
+    if 10 <= pnl_pct <= 25 and days_held <= 10:
+        exh_score, exh_triggers = _detect_exhaustion(ta, pnl_pct, days_held)
+        if exh_score >= 2:
+            book_frac = 0.5 if exh_score >= 3 else 0.3    # 50% or 30% off
+            book_qty = max(1, int(qty * book_frac))
+            atr_pct_now = ta.get("atr_pct", 3.0)
+            new_stop_partial, give_back = _adaptive_ratchet(entry, pnl_pct, stop, atr_pct_now)
+            narrative.append(
+                f"🎯 BOOK PARTIAL — you're up {pnl_pct:+.1f}% in {days_held} days "
+                f"(annualised >{365*pnl_pct/max(days_held,1):.0f}%) and "
+                f"{exh_score} exhaustion signals are firing: "
+                f"{'; '.join(exh_triggers)}. Book {int(book_frac*100)}% "
+                f"({book_qty} shares) to lock in the fast profit; let "
+                f"{int(qty - book_qty)} shares run with a tighter stop."
+            )
+            if new_stop_partial:
+                narrative.append(
+                    f"🔒 Raise stop on the remaining {int(qty - book_qty)} shares "
+                    f"to ₹{new_stop_partial:.2f} (give-back {give_back}pp)."
+                )
+            score_dict = dict(ta=ta_score, news=news_score, event=event_score,
+                              regime=reg_score, ratchet=0, total=ta_score+news_score+event_score+reg_score)
+            conf = _compute_confidence("BOOK_PARTIAL", score_dict, ta, news, events)
+            expected = _expected_range(entry, price, ta.get("atr_pct", 3.0), days_ahead=5)
+            return dict(action="BOOK_PARTIAL", urgency="normal",
+                        pnl_pct=pnl_pct, pnl_abs=pnl_abs,
+                        days_held=days_held, new_stop=new_stop_partial,
+                        add_qty=-book_qty,
+                        confidence=conf, expected_range=expected,
+                        reasons=[narrative[0]],
+                        narrative=narrative, checks=checks,
+                        score=score_dict)
+
+    # ---------- TIER 4 : HOLD (with adaptive ratchet + optional ADD) ----------
     reasons = []
     add_qty = 0
 
-    new_stop = _ratchet_stop(entry, pnl_pct, stop)
+    # v2: adaptive ratchet — give-back scaled by volatility, capped [3, 8]pp
+    atr_pct_now = ta.get("atr_pct", 3.0)
+    new_stop, give_back = _adaptive_ratchet(entry, pnl_pct, stop, atr_pct_now)
     ratchet_score = 0
     if new_stop is not None:
         floor_pct = (new_stop / entry - 1) * 100
         reasons.append(f"🔒 Raise stop-loss to ₹{new_stop:.2f} "
-                       f"(was ₹{stop:.2f}) — protects {floor_pct:+.1f}% floor")
+                       f"(was ₹{stop:.2f}) — protects {floor_pct:+.1f}% floor "
+                       f"(give-back {give_back}pp)")
         narrative.append(
-            f"🔒 RATCHET LADDER: with {pnl_pct:+.1f}% gain, the ladder qualifies "
-            f"you for a new stop floor at +{floor_pct:.1f}% of entry. "
-            f"Raising the stop from ₹{stop:.2f} to ₹{new_stop:.2f} locks in "
-            f"₹{(new_stop-entry)*qty:+.0f} of your open profit while still "
-            f"letting the position run further."
+            f"🔒 ADAPTIVE RATCHET: with {pnl_pct:+.1f}% gain and "
+            f"{atr_pct_now:.1f}% ATR, give-back sized to {give_back}pp "
+            f"(range 3-8pp, scaled to volatility). New stop ₹{new_stop:.2f} "
+            f"locks in +{floor_pct:.1f}% floor (₹{(new_stop-entry)*qty:+.0f} of "
+            f"open profit). If price pulls back to that stop you keep the floor; "
+            f"if it continues up, the stop trails again on next scan."
         )
         ratchet_score = 2
 
@@ -794,13 +1260,17 @@ def decide(position: pd.Series, ta: dict, news: dict, events: dict,
         )
 
     total_score = ta_score + news_score + event_score + reg_score + ratchet_score
+    score_dict = dict(ta=ta_score, news=news_score, event=event_score,
+                      regime=reg_score, ratchet=ratchet_score, total=total_score)
+    conf_hold = _compute_confidence("HOLD", score_dict, ta, news, events)
+    expected = _expected_range(entry, price, ta.get("atr_pct", 3.0), days_ahead=5)
 
     return dict(action="HOLD", urgency="normal", pnl_pct=pnl_pct, pnl_abs=pnl_abs,
                 days_held=days_held, new_stop=new_stop, add_qty=add_qty,
+                confidence=conf_hold, expected_range=expected,
                 reasons=reasons,
                 narrative=narrative, checks=checks,
-                score=dict(ta=ta_score, news=news_score, event=event_score,
-                           regime=reg_score, ratchet=ratchet_score, total=total_score))
+                score=score_dict)
 
 
 # ======================================================================================
@@ -846,7 +1316,8 @@ def analyze_position(position: pd.Series, bench_close: pd.Series,
                        "stop_source": "n/a"})
         return result
 
-    # Compute indicators + signal (uses SAME engine as scanner)
+    # Compute indicators + signal (uses SAME engine as scanner).
+    # Historical data uses auto_adjust=True (necessary for indicator math).
     df_ind = engine.compute_indicators(raw)
     df_ind = engine.generate_signals(df_ind, "PASS_combined",
                                       {"regime": 8.0, "atr": 3.5, "roc": 3.0,
@@ -855,6 +1326,15 @@ def analyze_position(position: pd.Series, bench_close: pd.Series,
                                       require_confirmation=True,
                                       block_risk_off=False)
     ta = _ta_snapshot(df_ind)
+
+    # LIVE PRICE — separate fetch that returns UNADJUSTED price (matches
+    # your broker screen). If successful, replace the adjusted close in `ta`
+    # so downstream P&L / stop-comparison math uses the correct number.
+    live = _fetch_live_price(ty)
+    if live.get("price") is not None:
+        ta["close"] = live["price"]
+    result["price_asof"]  = live.get("as_of")
+    result["price_source"] = live.get("source", "n/a")
 
     # --- AUTO-DERIVE stop_loss if user left it blank ---
     user_stop = position.get("stop_loss")
@@ -892,6 +1372,35 @@ def analyze_position(position: pd.Series, bench_close: pd.Series,
     result["ta"] = ta
     result["news"] = news
     result["events"] = events
+
+    # ---- TARGET PROJECTION (Aug-2026) ----
+    # Compute "when will it hit +15%" + realistic ceiling + hit probability
+    # These are advisory — they help you decide whether to book at 15% or hold further.
+    entry_v = float(position["buy_price"])
+    current_v = float(ta.get("close", entry_v))
+    # Use scanner's default 15% target if the position has no target set
+    target_v = position.get("target")
+    if not pd.notna(target_v) or target_v <= 0:
+        target_v = entry_v * 1.15
+    target_pct = (target_v / entry_v - 1) * 100
+    result["target_projection"] = {
+        "target_price": round(float(target_v), 2),
+        "target_pct":   round(target_pct, 2),
+        "timing":       _project_days_to_target(entry_v, current_v, float(target_v),
+                                                  ta, df_ind),
+        "ceiling":      _project_price_ceiling(entry_v, current_v, ta, df_ind,
+                                                 days_ahead=30),
+    }
+    # Hit probability uses the historical rate we just computed inside timing
+    hist_stats = result["target_projection"]["timing"].get("hist_stats") or {}
+    result["target_projection"]["hit_probability"] = _target_hit_probability(
+        pnl_pct=decision.get("pnl_pct", 0),
+        target_pct=target_pct,
+        ta=ta,
+        hist_hit_rate=hist_stats.get("hit_rate"),
+        days_held=decision.get("days_held", 0),
+        max_hold=30,
+    )
     return result
 
 
@@ -899,10 +1408,11 @@ def analyze_position(position: pd.Series, bench_close: pd.Series,
 #  RENDER
 # ======================================================================================
 ACTION_STYLE = {
-    "EXIT":     ("🔴", "#dc2626"),
-    "REDUCE":   ("🟠", "#f97316"),
-    "HOLD":     ("🟢", "#16a34a"),
-    "NO_DATA":  ("⚪", "#64748b"),
+    "EXIT":         ("🔴", "#dc2626"),
+    "REDUCE":       ("🟠", "#f97316"),
+    "BOOK_PARTIAL": ("🎯", "#8b5cf6"),
+    "HOLD":         ("🟢", "#16a34a"),
+    "NO_DATA":      ("⚪", "#64748b"),
 }
 
 
@@ -918,46 +1428,56 @@ def main():
 
 
 def body():
-    """All render logic, no set_page_config (safe to call inside a larger app)."""
-    st.title("📊 Position Monitor — daily hold / exit / add decisions")
-    st.caption("Reads your open positions from **positions.csv** and applies "
-               "position-management decision logic. Run after market close. "
-               "Uses the same engine as the scanner + live news + upcoming events.")
+    """All render logic, no set_page_config (safe to call inside a larger app).
+    v3 (Aug-2026) — redesigned UI: hero + KPI dashboard + filters + tabbed drill-down.
+    Zero changes to decide()/analyze_position()/projection helpers.
+    """
+    _V_ICON = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌", "INFO": "ℹ️"}
 
+    # ================================================================
+    # SIDEBAR
+    # ================================================================
     with st.sidebar:
-        st.header("Data sources")
-        use_news   = st.checkbox("Use news sentiment (yfinance + Google News)",
-                                  value=HAVE_NEWS, disabled=not HAVE_NEWS,
-                                  help="Adds Tier-1 (severe) and Tier-3 (moderate) "
-                                       "negative-news exits.")
-        use_events = st.checkbox("Use NSE upcoming events",
-                                  value=HAVE_EVENTS, disabled=not HAVE_EVENTS,
-                                  help="Adds Tier-1 forced-exit when a scheduled "
-                                       "event (results/AGM/split/dividend) is within "
-                                       "2 sessions — prevents overnight gap-risk.")
+        st.markdown("## 📊 Position Monitor")
+        st.caption("Daily hold / exit / reduce / add decisions")
+
         st.divider()
-        st.header("File")
-        st.code(POSITIONS_CSV, language="text")
-        st.caption("Edit that file to add / update / remove positions. "
-                   "Then click **Refresh** below.")
-        if st.button("🔄 Refresh (re-fetch prices & news)", type="secondary",
-                     use_container_width=True):
+        st.markdown("**⚙️ Data sources**")
+        use_news = st.checkbox(
+            "📰 News sentiment", value=HAVE_NEWS, disabled=not HAVE_NEWS,
+            help="yfinance + Google News. Adds Tier-1 severe / Tier-3 moderate negative-news exits.")
+        use_events = st.checkbox(
+            "📅 NSE upcoming events", value=HAVE_EVENTS, disabled=not HAVE_EVENTS,
+            help="Force-exit within 2 sessions of results/AGM/split/dividend.")
+
+        st.divider()
+        st.markdown("**📁 Positions file**")
+        with st.expander("File path", expanded=False):
+            st.code(POSITIONS_CSV, language="text")
+        st.caption("Edit → save → click Refresh below.")
+
+        if st.button("🔄 Refresh (re-fetch prices & news)",
+                     type="primary", use_container_width=True):
             _fetch_stock.clear()
+            _fetch_live_price.clear()
             _fetch_bench.clear()
             st.rerun()
-        st.divider()
-        st.header("Ratchet ladder")
-        rows = "\n".join([f"| +{p:.0f}% gain | stop → +{f:.0f}% |"
-                          for p, f in RATCHET_LADDER])
-        st.markdown("| P&L | New stop floor |\n|---|---|\n" + rows)
 
-    # ---- Load positions ----
+        st.divider()
+        with st.expander("📖 Ratchet ladder reference"):
+            for peak, floor in RATCHET_LADDER:
+                st.markdown(f"- **+{peak:.0f}%** gain → stop floor +{floor:.0f}%")
+            st.caption("(v2 adaptive: actual give-back scales to ATR volatility)")
+
+    # ================================================================
+    # LOAD POSITIONS
+    # ================================================================
     positions, errors = load_positions(POSITIONS_CSV)
-    if errors:
-        for e in errors:
-            st.warning(e)
+    st.title("📊 Position Monitor")
+
     if positions.empty:
-        st.info("No open positions to analyze. Edit **positions.csv** and click Refresh.")
+        for e in errors: st.warning(e)
+        st.info("No open positions. Edit **positions.csv** and click Refresh.")
         with st.expander("Show positions.csv template"):
             try:
                 with open(POSITIONS_CSV, "r", encoding="utf-8") as f:
@@ -966,219 +1486,612 @@ def body():
                 st.error(f"Can't read template: {ex}")
         return
 
-    st.caption(f"Loaded **{len(positions)}** open positions.")
+    for e in errors:
+        if e.startswith("ℹ️"):
+            st.caption(e)
+        else:
+            st.warning(e)
 
-    # ---- Sector map + benchmark + regime ----
+    # ================================================================
+    # ANALYZE
+    # ================================================================
     sector_map = {}
     if HAVE_UNIVERSE:
-        try:
-            sector_map = _ul_load().get("sector_map", {})
-        except Exception:
-            sector_map = {}
-    with st.spinner("Fetching benchmark index for regime..."):
+        try: sector_map = _ul_load().get("sector_map", {})
+        except Exception: sector_map = {}
+
+    with st.spinner("📡 Fetching benchmark index..."):
         bench_name, bench_df = _fetch_bench()
     regime = _regime_from_bench(bench_df)
     bench_close = bench_df["Close"] if not bench_df.empty else None
 
-    regime_emoji = {"RISK-ON": "🟢", "NEUTRAL": "🟡", "RISK-OFF": "🔴",
-                    "UNKNOWN": "⚪"}
-    st.info(f"{regime_emoji.get(regime, '⚪')} **Market regime: {regime}** "
-            f"(benchmark: {bench_name or 'unavailable'})")
-
-    # ---- Analyze each position ----
     results = []
-    prog = st.progress(0.0); status = st.empty()
-    for k, (_, pos) in enumerate(positions.iterrows(), 1):
-        status.write(f"Analyzing {pos['ticker']} ({k}/{len(positions)})...")
-        r = analyze_position(pos, bench_close, regime, use_news, use_events, sector_map)
-        results.append(r)
-        prog.progress(k / len(positions))
-        time.sleep(0.1)
-    status.empty(); prog.empty()
+    prog_container = st.container()
+    with prog_container:
+        prog = st.progress(0.0); status = st.empty()
+        for k, (_, pos) in enumerate(positions.iterrows(), 1):
+            status.markdown(f"🔎 Analyzing **{pos['ticker']}** ({k}/{len(positions)})…")
+            r = analyze_position(pos, bench_close, regime, use_news, use_events, sector_map)
+            results.append(r)
+            prog.progress(k / len(positions))
+            time.sleep(0.05)
+        status.empty(); prog.empty()
 
-    # ---- Summary table ----
-    st.subheader("🎯 Tonight's action list")
-    tbl = pd.DataFrame([{
-        "Stock":    r["ticker"],
-        "Sector":   r.get("sector", "-") or "-",
-        "Action":   _style_action(r["action"]),
-        "Urgency":  r.get("urgency", "normal"),
-        "Days":     r.get("days_held", "-"),
-        "Buy ₹":    round(r["buy_price"], 2),
-        "Now ₹":    round(r.get("current_price", 0), 2) if pd.notna(r.get("current_price", np.nan)) else "-",
-        "P&L %":    f"{r.get('pnl_pct', 0):+.1f}%" if pd.notna(r.get('pnl_pct', np.nan)) else "-",
-        "P&L ₹":    f"{r.get('pnl_abs', 0):+.0f}" if pd.notna(r.get('pnl_abs', np.nan)) else "-",
-        "Stop ₹":   round(r["stop_loss"], 2),
-        "New stop ₹": (round(r["new_stop"], 2) if r.get("new_stop") else "—"),
-        "Add qty":  (r.get("add_qty", 0) if r.get("add_qty", 0) != 0 else "—"),
-        "Reason (short)": r["reasons"][0] if r.get("reasons") else "",
-    } for r in results])
+    # ================================================================
+    # HERO META RIBBON
+    # ================================================================
+    regime_emoji = {"RISK-ON": "🟢", "NEUTRAL": "🟡", "RISK-OFF": "🔴", "UNKNOWN": "⚪"}
+    reg_ico = regime_emoji.get(regime, "⚪")
 
-    # Sort urgent first, then by action severity, then by |P&L|
-    action_order = {"EXIT": 0, "REDUCE": 1, "HOLD": 2, "NO_DATA": 3}
-    urgency_order = {"URGENT": 0, "normal": 1}
-    tbl["_a"] = tbl["Action"].str.extract(r"(\w+)$")[0].map(action_order).fillna(9)
-    tbl["_u"] = tbl["Urgency"].map(urgency_order).fillna(9)
-    tbl = tbl.sort_values(["_u", "_a", "Stock"]).drop(columns=["_a", "_u"]).reset_index(drop=True)
-    st.dataframe(tbl, use_container_width=True, hide_index=True, height=min(60 + 35*len(tbl), 500))
+    asof_stamps = [r.get("price_asof") for r in results if r.get("price_asof")]
+    latest = max((a for a in asof_stamps if a is not None),
+                 default=None, key=lambda x: pd.Timestamp(str(x)))
+    latest_str = (latest.strftime("%d %b %Y, %H:%M") if hasattr(latest, "strftime")
+                  else "unknown")
 
-    # Aggregate P&L
-    c1, c2, c3, c4 = st.columns(4)
-    total_pnl = sum(r.get("pnl_abs", 0) for r in results if pd.notna(r.get("pnl_abs", np.nan)))
+    live_srcs = [r.get("price_source", "-") for r in results if r.get("price_source")]
+    n_live  = sum(1 for s in live_srcs if s.startswith("live"))
+    n_intra = sum(1 for s in live_srcs if s.startswith("1-min"))
+    n_eod   = sum(1 for s in live_srcs if s.startswith("daily"))
+
+    ribbon = st.container()
+    with ribbon:
+        rc1, rc2, rc3 = st.columns([2, 2, 3])
+        rc1.markdown(f"### 📦 **{len(results)}** positions")
+        rc2.markdown(f"### {reg_ico} Regime: **{regime}**")
+        rc3.markdown(f"### ⏱️ Prices as of **{latest_str}**")
+        rc3.caption(f"Freshness → live: {n_live} · intraday: {n_intra} · EoD: {n_eod}")
+
+    st.divider()
+
+    # ================================================================
+    # KPI DASHBOARD
+    # ================================================================
+    total_pnl = sum(r.get("pnl_abs", 0) or 0 for r in results
+                    if pd.notna(r.get("pnl_abs", np.nan)))
     total_cap = sum(r["buy_price"] * r["quantity"] for r in results)
-    total_now = sum((r.get("current_price", r["buy_price"]) or r["buy_price"]) * r["quantity"] for r in results)
-    n_exit = sum(1 for r in results if r["action"] == "EXIT")
-    n_reduce = sum(1 for r in results if r["action"] == "REDUCE")
+    total_now = sum((r.get("current_price", r["buy_price"]) or r["buy_price"])
+                    * r["quantity"] for r in results)
+    port_pct  = 100 * total_pnl / total_cap if total_cap > 0 else 0
+
+    ok_results = [r for r in results
+                  if r.get("current_price") and pd.notna(r.get("pnl_pct", np.nan))]
+    best = max(ok_results, key=lambda r: r.get("pnl_pct", 0), default=None)
+    worst = min(ok_results, key=lambda r: r.get("pnl_pct", 0), default=None)
+
+    st.markdown("### 💼 Portfolio Snapshot")
+    kpi = st.columns(5)
+    kpi[0].metric("💰 Portfolio P&L", f"₹{total_pnl:+,.0f}",
+                  f"{port_pct:+.2f}%",
+                  delta_color=("normal" if port_pct != 0 else "off"))
+    kpi[1].metric("💵 Invested", f"₹{total_cap:,.0f}")
+    kpi[2].metric("📊 Current value", f"₹{total_now:,.0f}",
+                  f"{100*(total_now-total_cap)/total_cap:+.1f}%" if total_cap else "-")
+    if best:
+        kpi[3].metric("🚀 Best", best["ticker"],
+                      f"{best.get('pnl_pct', 0):+.1f}%")
+    else:
+        kpi[3].metric("🚀 Best", "—")
+    if worst:
+        kpi[4].metric("🔻 Worst", worst["ticker"],
+                      f"{worst.get('pnl_pct', 0):+.1f}%",
+                      delta_color="inverse")
+    else:
+        kpi[4].metric("🔻 Worst", "—")
+
+    # ---- Action distribution ----
+    n_urgent   = sum(1 for r in results if r.get("urgency") == "URGENT")
+    n_exit_all = sum(1 for r in results if r["action"] == "EXIT")
+    n_exit     = n_exit_all - n_urgent
+    n_reduce   = sum(1 for r in results if r["action"] == "REDUCE")
+    n_book     = sum(1 for r in results if r["action"] == "BOOK_PARTIAL")
+    n_hold     = sum(1 for r in results if r["action"] == "HOLD")
     n_hold_add = sum(1 for r in results if r["action"] == "HOLD" and r.get("add_qty", 0) > 0)
-    c1.metric("Portfolio P&L", f"₹{total_pnl:+,.0f}",
-              f"{100*total_pnl/total_cap:+.2f}%" if total_cap > 0 else "-")
-    c2.metric("Capital deployed", f"₹{total_cap:,.0f}")
-    c3.metric("Current value", f"₹{total_now:,.0f}")
-    c4.metric("Actions", f"{n_exit} exit · {n_reduce} reduce · {n_hold_add} add-signal")
 
-    st.download_button("⬇️ Download action list",
-                        tbl.to_csv(index=False).encode(),
-                        file_name=f"monitor_actions_{dt.date.today()}.csv",
-                        mime="text/csv")
+    st.markdown("### 🎯 Recommended Actions")
+    ac = st.columns(6)
+    def _acard(col, ico, count, label):
+        col.metric(f"{ico} {label}", count)
+    _acard(ac[0], "🚨", n_urgent, "URGENT")
+    _acard(ac[1], "🔴", n_exit,   "Exit")
+    _acard(ac[2], "🟠", n_reduce, "Reduce")
+    _acard(ac[3], "🎯", n_book,   "Book partial")
+    _acard(ac[4], "🟢", n_hold,   "Hold")
+    _acard(ac[5], "➕", n_hold_add, "Add-signal")
 
-    # ---- Per-stock drill-down (full analysis) ----
-    st.subheader("🔎 Per-stock analysis  —  every check that ran")
-    st.caption("Each stock's card shows: the full TA check-list (with pass/warn/fail badges), "
-                "news headlines with scores, upcoming events, ratchet-ladder computation, "
-                "and a step-by-step narrative of why the algo landed on its recommendation.")
+    st.divider()
 
-    _V_ICON = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌", "INFO": "ℹ️"}
+    # ================================================================
+    # INTERACTIVE FILTER + MAIN TABLE
+    # ================================================================
+    st.markdown("### 📋 Action list  ·  interactive filter + sort")
+
+    fc1, fc2, fc3 = st.columns([3, 2, 3])
+    with fc1:
+        action_filter = st.multiselect(
+            "Show only actions",
+            ["EXIT", "REDUCE", "BOOK_PARTIAL", "HOLD"],
+            default=[],
+            placeholder="all actions",
+            label_visibility="collapsed",
+        )
+    with fc2:
+        sort_key = st.selectbox("Sort by",
+                                ["Urgency", "P&L %", "Confidence", "Days held",
+                                 "Hit prob %", "Alphabetical"],
+                                label_visibility="collapsed")
+    with fc3:
+        search = st.text_input("🔍 Search stock", placeholder="filter by ticker (e.g. IRFC)",
+                                label_visibility="collapsed")
+
+    def _days_to_tgt(r):
+        p = r.get("target_projection") or {}
+        t = p.get("timing") or {}
+        return t.get("days_base")
+    def _ceiling_of(r):
+        p = r.get("target_projection") or {}
+        c = p.get("ceiling") or {}
+        return c.get("statistical_max")
+    def _hit_prob(r):
+        p = r.get("target_projection") or {}
+        return p.get("hit_probability", 0) or 0
+
+    tbl_rows = []
+    for r in results:
+        act_ico = ACTION_STYLE.get(r["action"], ("•", "#374151"))[0]
+        pnl_pct = r.get("pnl_pct", 0) or 0
+        tbl_rows.append({
+            "Stock":       r["ticker"],
+            "Sector":      r.get("sector", "-") or "-",
+            "Action":      f"{act_ico} {r['action']}",
+            "_Action":     r["action"],   # for filter
+            "Urgency":     r.get("urgency", "normal"),
+            "Conf%":       int(r.get("confidence", 0) or 0),
+            "Days":        r.get("days_held", 0) or 0,
+            "Buy ₹":       float(r["buy_price"]),
+            "Now ₹":       float(r.get("current_price") or r["buy_price"]),
+            "P&L %":       pnl_pct,
+            "P&L ₹":       r.get("pnl_abs", 0) or 0,
+            "Days→+15%":   _days_to_tgt(r),
+            "Hit%":        _hit_prob(r),
+            "Ceiling ₹":   _ceiling_of(r),
+            "Stop ₹":      float(r["stop_loss"]),
+            "New stop ₹":  r.get("new_stop"),
+            "Reason":      (r["reasons"][0] if r.get("reasons") else "")[:140],
+        })
+    tbl_df = pd.DataFrame(tbl_rows)
+
+    # Apply filters
+    if action_filter:
+        tbl_df = tbl_df[tbl_df["_Action"].isin(action_filter)]
+    if search:
+        tbl_df = tbl_df[tbl_df["Stock"].str.contains(search.upper(), na=False)]
+
+    action_order = {"EXIT": 0, "REDUCE": 1, "BOOK_PARTIAL": 2, "HOLD": 3, "NO_DATA": 4}
+    urgency_order = {"URGENT": 0, "normal": 1}
+    if sort_key == "Urgency":
+        tbl_df["_a"] = tbl_df["_Action"].map(action_order).fillna(9)
+        tbl_df["_u"] = tbl_df["Urgency"].map(urgency_order).fillna(9)
+        tbl_df = tbl_df.sort_values(["_u", "_a", "Stock"]).drop(columns=["_a", "_u"])
+    elif sort_key == "P&L %":
+        tbl_df = tbl_df.sort_values("P&L %", ascending=False)
+    elif sort_key == "Confidence":
+        tbl_df = tbl_df.sort_values("Conf%", ascending=False)
+    elif sort_key == "Days held":
+        tbl_df = tbl_df.sort_values("Days", ascending=False)
+    elif sort_key == "Hit prob %":
+        tbl_df = tbl_df.sort_values("Hit%", ascending=False)
+    elif sort_key == "Alphabetical":
+        tbl_df = tbl_df.sort_values("Stock")
+    tbl_df = tbl_df.reset_index(drop=True).drop(columns=["_Action"])
+
+    if tbl_df.empty:
+        st.info("No positions match your filter.")
+    else:
+        st.dataframe(
+            tbl_df, use_container_width=True, hide_index=True,
+            height=min(60 + 35*len(tbl_df), 550),
+            column_config={
+                "Stock": st.column_config.TextColumn("Stock", width="small"),
+                "Sector": st.column_config.TextColumn("Sector", width="medium"),
+                "Action": st.column_config.TextColumn("Action", width="small"),
+                "Urgency": st.column_config.TextColumn("Urg", width="small"),
+                "Conf%": st.column_config.ProgressColumn(
+                    "Conf%", format="%d%%", min_value=0, max_value=100, width="small"),
+                "Days": st.column_config.NumberColumn("Days", width="small"),
+                "Buy ₹": st.column_config.NumberColumn("Buy ₹", format="₹%.2f", width="small"),
+                "Now ₹": st.column_config.NumberColumn("Now ₹", format="₹%.2f", width="small"),
+                "P&L %": st.column_config.NumberColumn("P&L %", format="%+.1f%%", width="small"),
+                "P&L ₹": st.column_config.NumberColumn("P&L ₹", format="₹%+,.0f", width="small"),
+                "Days→+15%": st.column_config.NumberColumn("D→+15%", format="~%dd", width="small"),
+                "Hit%": st.column_config.ProgressColumn(
+                    "Hit%", format="%d%%", min_value=0, max_value=100, width="small"),
+                "Ceiling ₹": st.column_config.NumberColumn("Ceiling", format="₹%.0f", width="small"),
+                "Stop ₹": st.column_config.NumberColumn("Stop", format="₹%.2f", width="small"),
+                "New stop ₹": st.column_config.NumberColumn("New stop", format="₹%.2f", width="small"),
+                "Reason": st.column_config.TextColumn("Reason (short)", width="large"),
+            },
+        )
+
+        st.download_button("⬇️ Download action list",
+                            tbl_df.to_csv(index=False).encode(),
+                            file_name=f"monitor_actions_{dt.date.today()}.csv",
+                            mime="text/csv")
+
+    st.divider()
+
+    # ================================================================
+    # PER-STOCK DEEP-DIVE — tabbed cards
+    # ================================================================
+    st.markdown("### 🔎 Per-stock deep-dive")
+    st.caption("Click any position to open a tabbed detail card: "
+               "Overview · Target & Ceiling · Technical · News & Events · Scenarios.")
 
     for r in results:
-        emo, colour = ACTION_STYLE.get(r["action"], ("•", "#374151"))
-        pnl = r.get("pnl_pct", 0) or 0
-        header = (f"{emo} **{r['ticker']}** ({r.get('sector','-')})  ·  "
-                  f"{r['action']}  ·  P&L {pnl:+.1f}%  ·  {r.get('days_held','-')}d held")
-        with st.expander(header):
-            # ---- Top-level position metrics ----
+        _render_stock_card(r, _V_ICON)
+
+
+def _render_stock_card(r, _V_ICON):
+    """Full per-stock analysis inside a single expander, organised in tabs."""
+    emo, _ = ACTION_STYLE.get(r["action"], ("•", "#374151"))
+    pnl = r.get("pnl_pct", 0) or 0
+    conf = r.get("confidence")
+    conf_ico = ("🟢" if (conf and conf >= 75) else
+                "🟡" if (conf and conf >= 55) else "🔴")
+
+    header = (f"{emo} **{r['ticker']}** · {r.get('sector','-') or '-'} · "
+              f"**{r['action']}** ({conf_ico} {conf or 0}% conf) · "
+              f"P&L {pnl:+.1f}% · {r.get('days_held','-')}d held")
+
+    with st.expander(header):
+        # Provenance strip
+        src_bits = []
+        if r.get("price_source"):
+            asof = r.get("price_asof")
+            asof_str = (asof.strftime("%Y-%m-%d %H:%M") if hasattr(asof, "strftime")
+                        else str(asof) if asof else "n/a")
+            src_bits.append(f"💰 {r['price_source']} ({asof_str})")
+        if r.get("stop_source"):   src_bits.append(f"🛑 {r['stop_source']}")
+        if r.get("sector_source"): src_bits.append(f"🏭 {r['sector_source']}")
+        if src_bits:
+            st.caption("Data → " + "  ·  ".join(src_bits))
+
+        tab_ov, tab_tgt, tab_tech, tab_ne, tab_scen = st.tabs([
+            "📊 Overview",
+            "🎯 Target & Ceiling",
+            "📈 Technical",
+            "📰 News & Events",
+            "📐 Scenarios",
+        ])
+
+        # ---------- TAB: OVERVIEW ----------
+        with tab_ov:
             cA, cB, cC, cD = st.columns(4)
-            cA.metric("Buy price", f"₹{r['buy_price']:.2f}",
+            cA.metric("Buy", f"₹{r['buy_price']:.2f}",
                       f"{r.get('days_held','-')}d ago")
-            cB.metric("Current", f"₹{r.get('current_price', 0):.2f}" if pd.notna(r.get('current_price', np.nan)) else "n/a",
-                      f"{pnl:+.1f}%  (₹{r.get('pnl_abs', 0):+,.0f})")
-            stop_delta = (f"→ ₹{r['new_stop']:.2f} (raise)"
-                          if r.get("new_stop") else "unchanged")
-            cC.metric("Stop-loss", f"₹{r['stop_loss']:.2f}", stop_delta,
-                      help=r.get("stop_source", ""))
+            cur = r.get("current_price") or r["buy_price"]
+            pnl_abs = r.get("pnl_abs", 0) or 0
+            cB.metric("Now", f"₹{cur:.2f}",
+                      f"{pnl:+.1f}%  (₹{pnl_abs:+,.0f})")
+            new_stop = r.get("new_stop")
+            cC.metric("Stop", f"₹{r['stop_loss']:.2f}",
+                      f"↗ ₹{new_stop:.2f}" if new_stop else "unchanged")
             tgt = r.get("target")
-            tgt_txt = f"₹{tgt:.2f}" if (tgt and pd.notna(tgt)) else "advisory / none"
-            cD.metric("Target (advisory)", tgt_txt)
+            cD.metric("Target", f"₹{tgt:.2f}" if (tgt and pd.notna(tgt)) else "—")
 
-            # ---- Provenance line ----
-            src_bits = []
-            if r.get("stop_source"): src_bits.append(f"stop: {r['stop_source']}")
-            if r.get("sector_source"): src_bits.append(f"sector: {r['sector_source']}")
-            if src_bits:
-                st.caption("Data source — " + " · ".join(src_bits))
+            st.markdown("")   # small spacer
 
-            # ---- Score contributions ----
+            # Confidence progress
+            if conf is not None:
+                st.markdown(f"**Recommendation confidence — {conf_ico} {conf}%**")
+                st.progress(min(1.0, max(0.0, conf/100.0)))
+                conf_note = ("Multiple signals aligned strongly — good conviction."
+                             if conf >= 75 else
+                             "Signals mixed or moderate — advisory, not high-conviction."
+                             if conf >= 55 else
+                             "Weak / borderline setup — use your own judgement or wait.")
+                st.caption(conf_note)
+
+            # Progress-to-target bar
+            proj = r.get("target_projection") or {}
+            tgt_price = proj.get("target_price")
+            if tgt_price and cur and tgt_price > r["buy_price"]:
+                progress = min(1.0, max(0.0,
+                    (cur - r["buy_price"]) / (tgt_price - r["buy_price"])))
+                st.markdown(f"**Progress toward target** "
+                            f"(₹{r['buy_price']:.0f} → ₹{tgt_price:.2f}): "
+                            f"**{progress*100:.0f}%**")
+                st.progress(progress)
+
+            # Reasoning
+            st.markdown("**💡 Recommendation reasoning**")
+            for reason in r.get("reasons", []):
+                st.markdown(f"- {reason}")
+
+            narrative = r.get("narrative") or []
+            if narrative:
+                with st.expander("📝 Full multi-line narrative"):
+                    for line in narrative:
+                        st.markdown(f"> {line}")
+
+            if r.get("notes"):
+                st.info(f"📝 Your notes: {r['notes']}")
+
+        # ---------- TAB: TARGET & CEILING ----------
+        with tab_tgt:
+            proj = r.get("target_projection") or {}
+            if not proj:
+                st.info("Target projection not available.")
+            else:
+                tgt_price = proj["target_price"]
+                tgt_pct   = proj["target_pct"]
+                timing    = proj.get("timing") or {}
+                ceiling   = proj.get("ceiling") or {}
+                hit_prob  = proj.get("hit_probability", 0) or 0
+                cur = r.get("current_price") or r["buy_price"]
+
+                st.markdown(f"### 🎯 Target: ₹{tgt_price:.2f} (+{tgt_pct:.1f}% from entry)")
+
+                colT1, colT2, colT3 = st.columns(3)
+                if timing.get("days_base") == 0:
+                    colT1.metric("Days to target", "already hit ✓",
+                                  f"currently {pnl:+.1f}%")
+                elif timing.get("days_base") is not None:
+                    colT1.metric("Days to target",
+                                  f"~{timing['days_base']}d",
+                                  f"range {timing['days_low']}–{timing['days_high']}d")
+                else:
+                    colT1.metric("Days to target", "unknown")
+                colT2.metric("Hit probability (30d)", f"{hit_prob}%",
+                              timing.get("momentum_state", ""))
+                vel = timing.get("current_velocity_pct_per_day")
+                colT3.metric("Current velocity",
+                              f"{vel:+.2f}%/day" if vel is not None else "—",
+                              timing.get("method", ""))
+
+                # Progress bar for hit probability
+                st.progress(min(1.0, max(0.0, hit_prob/100.0)))
+
+                # Historical base rate
+                hs = timing.get("hist_stats") or {}
+                if hs.get("occurrences"):
+                    st.caption(f"📊 **Historical base rate:** {hs['occurrences']} similar "
+                                f"moves in last ~2 yr · hit rate **{hs['hit_rate']}%** · "
+                                f"typical **{hs['med_days']}d** (fastest {hs['min_days']}d).")
+                else:
+                    st.caption("📊 No comparable historical moves — projection uses "
+                                "current-momentum extrapolation only.")
+
+                st.markdown("**📈 Realistic ceiling analysis**")
+                ceil_rows = []
+                if ceiling.get("immediate_resistance"):
+                    ceil_rows.append({
+                        "Ceiling": "🔵 Immediate resistance (20d high)",
+                        "Price":  ceiling["immediate_resistance"],
+                        "From now %": 100*(ceiling["immediate_resistance"]/(cur or 1) - 1),
+                        "From entry %": ceiling["pnl_from_entry_at_ceiling"].get("immediate", 0),
+                    })
+                if ceiling.get("medium_ceiling"):
+                    ceil_rows.append({
+                        "Ceiling": "🟡 52-week high (medium)",
+                        "Price":  ceiling["medium_ceiling"],
+                        "From now %": 100*(ceiling["medium_ceiling"]/(cur or 1) - 1),
+                        "From entry %": ceiling["pnl_from_entry_at_ceiling"].get("52w_high", 0),
+                    })
+                if ceiling.get("statistical_max"):
+                    ceil_rows.append({
+                        "Ceiling": "🟢 Statistical max (30d, 1.5σ ATR)",
+                        "Price":  ceiling["statistical_max"],
+                        "From now %": 100*(ceiling["statistical_max"]/(cur or 1) - 1),
+                        "From entry %": ceiling["pnl_from_entry_at_ceiling"].get("stat_max_30d", 0),
+                    })
+                if ceil_rows:
+                    st.dataframe(pd.DataFrame(ceil_rows), hide_index=True,
+                                  use_container_width=True,
+                                  column_config={
+                                      "Price":       st.column_config.NumberColumn("Price ₹",  format="₹%.2f"),
+                                      "From now %":  st.column_config.NumberColumn("From now",  format="%+.1f%%"),
+                                      "From entry %": st.column_config.NumberColumn("From entry", format="%+.1f%%"),
+                                  })
+                for note in ceiling.get("notes", []):
+                    st.caption(f"ℹ️ {note}")
+
+                # Interpretation
+                if timing.get("days_base") == 0 and ceiling.get("statistical_max"):
+                    upside_beyond = ((ceiling["statistical_max"] / cur - 1) * 100) if cur else 0
+                    if upside_beyond > 8:
+                        st.success(f"💡 **Target already hit** — but ceiling ₹{ceiling['statistical_max']:.2f} "
+                                    f"is {upside_beyond:+.1f}% more upside. Adaptive ratchet trails.")
+                    else:
+                        st.warning(f"💡 **Target already hit** — limited upside ({upside_beyond:+.1f}%). "
+                                    f"Consider booking at target or on weakness.")
+                elif timing.get("days_base") and hit_prob >= 60:
+                    st.success(f"💡 **High-probability setup ({hit_prob}%)** — expect target hit "
+                                f"in ~{timing['days_base']}d. Hold with adaptive ratchet stop.")
+                elif timing.get("days_base") and hit_prob < 40:
+                    st.warning(f"⚠️ **Low hit probability ({hit_prob}%)** — target may not be "
+                                f"reached in 30d. Consider tighter target / early exit.")
+
+        # ---------- TAB: TECHNICAL ----------
+        with tab_tech:
             score = r.get("score") or {}
             if score:
                 total = score.get("total", 0)
-                score_txt = (f"**Composite score = {total:+d}**  ·  "
-                             f"TA {score.get('ta',0):+d}  ·  "
-                             f"News {score.get('news',0):+d}  ·  "
-                             f"Events {score.get('event',0):+d}  ·  "
-                             f"Regime {score.get('regime',0):+d}  ·  "
-                             f"Ratchet {score.get('ratchet',0):+d}")
-                st.markdown(score_txt)
+                st.markdown(f"### 🧮 Composite score: **{total:+d}**")
+                sc = st.columns(5)
+                sc[0].metric("TA",      f"{score.get('ta',0):+d}")
+                sc[1].metric("News",    f"{score.get('news',0):+d}")
+                sc[2].metric("Events",  f"{score.get('event',0):+d}")
+                sc[3].metric("Regime",  f"{score.get('regime',0):+d}")
+                sc[4].metric("Ratchet", f"{score.get('ratchet',0):+d}")
 
-            # ---- Narrative (multi-line story) ----
-            narrative = r.get("narrative") or []
-            if narrative:
-                st.markdown("**Full reasoning:**")
-                for line in narrative:
-                    st.markdown(f"> {line}")
-
-            # ---- Checklist table ----
             checks = r.get("checks") or []
             if checks:
-                st.markdown("**Detailed check-list**")
-                check_rows = []
-                for c in checks:
-                    check_rows.append({
-                        "": _V_ICON.get(c["verdict"], "•"),
-                        "Category": c["category"].upper(),
-                        "Check": c["name"],
-                        "Value": str(c["value"]),
-                        "Verdict": c["verdict"],
-                        "Note": c["note"],
-                    })
-                cdf = pd.DataFrame(check_rows)
-                st.dataframe(cdf, use_container_width=True, hide_index=True,
-                              height=min(50 + 32*len(cdf), 400))
+                st.markdown("**📋 Every check that ran**")
+                check_rows = [{
+                    "": _V_ICON.get(c["verdict"], "•"),
+                    "Category": c["category"].upper(),
+                    "Check": c["name"],
+                    "Value": str(c["value"]),
+                    "Verdict": c["verdict"],
+                    "Note": c["note"],
+                } for c in checks]
+                st.dataframe(pd.DataFrame(check_rows), hide_index=True,
+                              use_container_width=True,
+                              height=min(50 + 32*len(check_rows), 400))
 
-            # ---- News detail ----
+            if r.get("new_stop"):
+                st.markdown("**🔒 Ratchet ladder — highlighted rung**")
+                lad_rows = []
+                for peak, floor in RATCHET_LADDER:
+                    fires = pnl >= peak
+                    lad_rows.append({
+                        "":       "🔥" if fires else "",
+                        "Gain ≥": peak,
+                        "Stop floor": floor,
+                        "Absolute ₹": r["buy_price"] * (1 + floor/100),
+                    })
+                st.dataframe(pd.DataFrame(lad_rows), hide_index=True,
+                              use_container_width=True,
+                              column_config={
+                                  "Gain ≥":     st.column_config.NumberColumn("Gain ≥",     format="+%d%%"),
+                                  "Stop floor": st.column_config.NumberColumn("Stop floor", format="+%d%% of entry"),
+                                  "Absolute ₹": st.column_config.NumberColumn("Absolute ₹", format="₹%.2f"),
+                              })
+                st.info(f"💡 Update `stop_loss` in positions.csv to **₹{r['new_stop']:.2f}** "
+                        f"to lock in the current rung.")
+
+        # ---------- TAB: NEWS & EVENTS ----------
+        with tab_ne:
             news = r.get("news") or {}
             all_h = news.get("all_headlines") or []
+            n_art = news.get("n_articles", 0)
+
+            st.markdown("#### 📰 News sentiment (last 5 sessions)")
             if all_h:
-                st.markdown(f"**📰 Headlines analysed** "
-                             f"(net score {news.get('score', 0):+.2f} across {len(all_h)})")
+                score_val = news.get("score", 0)
+                score_ico = "🟢" if score_val > 0.2 else "🔴" if score_val < -0.2 else "🟡"
+                nc1, nc2 = st.columns(2)
+                nc1.metric(f"{score_ico} Sentiment", f"{score_val:+.2f}",
+                            "positive" if score_val > 0.2 else
+                            "negative" if score_val < -0.2 else "neutral")
+                nc2.metric("Articles", n_art)
+                st.markdown("**Headlines analysed:**")
                 head_rows = []
                 for h in all_h[:15]:
                     d = h.get("date")
                     d_str = d.strftime("%Y-%m-%d") if d and hasattr(d, "strftime") else "-"
                     head_rows.append({
                         "Date":   d_str,
-                        "Score":  f"{h.get('score', 0):+.2f}",
+                        "Score":  h.get("score", 0),
                         "Source": h.get("source", "-"),
-                        "Headline": (h.get("title") or "")[:180],
+                        "Headline": (h.get("title") or "")[:200],
                     })
-                st.dataframe(pd.DataFrame(head_rows), use_container_width=True, hide_index=True,
-                              height=min(50 + 32*len(head_rows), 400))
-            elif news and news.get("n_articles", 0) > 0:
-                st.markdown(f"**News:** score **{news.get('score', 0):+.2f}** "
-                             f"({news.get('n_articles', 0)} articles)")
+                st.dataframe(pd.DataFrame(head_rows), hide_index=True,
+                              use_container_width=True,
+                              column_config={
+                                  "Score": st.column_config.NumberColumn("Score", format="%+.2f"),
+                              })
+            elif n_art > 0:
+                st.markdown(f"Score **{news.get('score', 0):+.2f}** ({n_art} articles)")
                 if news.get("top_headline"):
                     st.caption(f"Top: \"{news['top_headline']}\"")
             else:
-                st.caption("📰 No news articles found in the last 5 sessions.")
+                st.info("📰 No news articles found in the last 5 sessions.")
 
-            # ---- Events detail ----
+            st.divider()
+
+            st.markdown("#### 📅 Upcoming corporate events")
             events = r.get("events") or {}
             all_ev = events.get("all_upcoming") or []
             if all_ev:
-                st.markdown(f"**📅 Upcoming corporate events (next 30 days)**")
                 ev_rows = [{
-                    "Date":   str(e.get("date", "-")),
-                    "Type":   e.get("type", "-"),
+                    "Date": str(e.get("date", "-")),
+                    "Type": e.get("type", "-"),
                     "Subject": (e.get("subject") or "")[:200],
                 } for e in all_ev]
-                st.dataframe(pd.DataFrame(ev_rows), use_container_width=True, hide_index=True,
-                              height=min(50 + 32*len(ev_rows), 250))
-            elif events and events.get("type"):
-                st.markdown(f"**Upcoming event:** {events['type']} in "
-                             f"{events.get('days_until', '?')}d")
-                if events.get("subject"):
-                    st.caption(events["subject"][:200])
+                st.dataframe(pd.DataFrame(ev_rows), hide_index=True,
+                              use_container_width=True,
+                              height=min(50 + 32*len(ev_rows), 300))
+            elif events.get("type"):
+                st.warning(f"**{events['type']}** in {events.get('days_until','?')}d "
+                            f"— {(events.get('subject') or '')[:200]}")
             else:
-                st.caption("📅 No corporate events scheduled in the next 5 sessions.")
+                st.success("✅ No corporate events scheduled in the next 5 sessions.")
 
-            # ---- Ratchet ladder — highlight which rung applied ----
-            if r.get("new_stop"):
-                pnl_here = pnl
-                st.markdown("**🔒 Ratchet ladder (which rung fired)**")
-                lad_rows = []
-                for peak, floor in RATCHET_LADDER:
-                    fires = pnl_here >= peak
-                    lad_rows.append({
-                        " ":     "🔥" if fires else "",
-                        "Gain ≥": f"+{peak:.0f}%",
-                        "New stop floor": f"+{floor:.0f}% of entry",
-                        "Absolute stop": f"₹{r['buy_price'] * (1 + floor/100):.2f}",
+        # ---------- TAB: SCENARIOS ----------
+        with tab_scen:
+            price_now = r.get("current_price")
+            buy = r.get("buy_price")
+            stop = r.get("stop_loss")
+            new_stop = r.get("new_stop") or stop
+            qty = r.get("quantity", 0)
+            expected = r.get("expected_range") or {}
+
+            if not (price_now and buy and stop):
+                st.info("Insufficient data to project scenarios.")
+            else:
+                st.markdown("**📐 What happens if… (each scenario\'s P&L math)**")
+                stop_pct = (new_stop / buy - 1) * 100
+                stop_pnl = (new_stop - buy) * qty
+                move_to_stop = (new_stop / price_now - 1) * 100
+                base_upside = expected.get("high")
+                base_downside = expected.get("low")
+
+                scen_rows = [{
+                    "Scenario": f"🛑 Stop-loss hits (₹{new_stop:.2f})",
+                    "Move from here": move_to_stop,
+                    "P&L on trade": stop_pct,
+                    "P&L ₹": stop_pnl,
+                    "Note": "Capital protected at floor",
+                }]
+                if base_downside:
+                    scen_rows.append({
+                        "Scenario": "📉 Downside 1σ (5d, ATR)",
+                        "Move from here": (base_downside/price_now - 1)*100,
+                        "P&L on trade": (base_downside/buy - 1)*100,
+                        "P&L ₹": (base_downside - buy)*qty,
+                        "Note": f"~68% stays above ₹{base_downside:.2f}",
                     })
-                st.dataframe(pd.DataFrame(lad_rows), use_container_width=True, hide_index=True,
-                              height=min(50 + 32*len(lad_rows), 350))
-                st.caption(f"Current P&L {pnl_here:+.1f}% qualifies for the highest 🔥 rung. "
-                            f"Update `stop_loss` in positions.csv to ₹{r['new_stop']:.2f} to lock in.")
+                if base_upside:
+                    scen_rows.append({
+                        "Scenario": "📈 Upside 1σ (5d, ATR)",
+                        "Move from here": (base_upside/price_now - 1)*100,
+                        "P&L on trade": (base_upside/buy - 1)*100,
+                        "P&L ₹": (base_upside - buy)*qty,
+                        "Note": f"~68% stays below ₹{base_upside:.2f}",
+                    })
+                tgt = r.get("target")
+                if tgt and pd.notna(tgt) and tgt > price_now:
+                    scen_rows.append({
+                        "Scenario": f"🎯 Original target (₹{tgt:.2f})",
+                        "Move from here": (tgt/price_now - 1)*100,
+                        "P&L on trade": (tgt/buy - 1)*100,
+                        "P&L ₹": (tgt - buy)*qty,
+                        "Note": "Advisory only",
+                    })
+                proj = r.get("target_projection") or {}
+                ceiling = proj.get("ceiling") or {}
+                if ceiling.get("statistical_max"):
+                    smax = ceiling["statistical_max"]
+                    scen_rows.append({
+                        "Scenario": f"🚀 Statistical ceiling (₹{smax:.2f})",
+                        "Move from here": (smax/price_now - 1)*100,
+                        "P&L on trade": (smax/buy - 1)*100,
+                        "P&L ₹": (smax - buy)*qty,
+                        "Note": "30d, 1.5σ ATR — realistic best-case",
+                    })
 
-            if r.get("notes"):
-                st.caption(f"Your notes: {r['notes']}")
+                st.dataframe(pd.DataFrame(scen_rows), hide_index=True,
+                              use_container_width=True,
+                              column_config={
+                                  "Move from here": st.column_config.NumberColumn("Move from here", format="%+.1f%%"),
+                                  "P&L on trade":  st.column_config.NumberColumn("P&L on trade",  format="%+.1f%%"),
+                                  "P&L ₹":         st.column_config.NumberColumn("P&L ₹",         format="₹%+,.0f"),
+                              })
+                st.caption("ATR-scaled random-walk projection (1σ over 5 sessions). "
+                            "Real markets have fatter tails — treat as central expectation, "
+                            "not a hard bound.")
 
 
 if __name__ == "__main__":

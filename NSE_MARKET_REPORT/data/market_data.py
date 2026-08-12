@@ -28,6 +28,9 @@ class MarketData:
     def fetch_top_losers(self):
         return self.provider.fetch_top_losers()
 
+    def fetch_market_report(self):
+        return self.provider.fetch_market_report()
+
     def fetch_quotes(self):
         return self.provider.fetch_quotes()
 

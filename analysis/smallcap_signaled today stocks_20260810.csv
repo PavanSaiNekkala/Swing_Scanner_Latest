@@ -1,0 +1,15 @@
+﻿Stock,Sector,Signal,Rank,Conf(/day),RS%,News,Rank penalty,Last close,BUY limit ₹,Objective ₹,Stop ₹,Stop %,Exp. days→objective,ATR%,Remark
+TRAVELFOOD,Consumer Services,UPTREND,24.63,28.41,22.75,0,RSI 70 · +8.8% vs 20DMA · BB%B 126,1428.6,1421.46,1634.68,1322.83,-6.94,2d ⚠ thin,3.45,limited history: 1.1y (<10y) - lower confidence
+NEULANDLAB,Healthcare,UPTREND,10.58,12.2,32.09,0,RSI 78 · +18.3% vs 20DMA · BB%B 131,22855,22740.72,26151.83,21034,-7.51,13d,3.73,
+CARBORUNIV,Capital Goods,UPTREND,6.06,5.87,6.44,0,BB%B 97,1097,1091.52,1255.25,1017.1,-6.82,14d,3.39,
+NETWEB,Information Technology,UPTREND,5.56,5.13,20.48,0,+11.5% vs 20DMA · BB%B 102,4939.2,4914.5,5651.67,4523.19,-7.96,9d,3.96,limited history: 3.0y (<10y) - lower confidence
+ASTERDM,Healthcare,UPTREND,3.11,3.59,16.5,0,RSI 72 · -0.6% from 52wH · BB%B 116,869.7,865.35,995.15,811.37,-6.24,13d,3.1,limited history: 8.4y (<10y) - lower confidence
+WELSPUNLIV,Textiles,UPTREND,2.17,1.45,19.61,0,,164.09,163.27,187.76,151.73,-7.07,10d,3.52,
+AARTIIND,Chemicals,UPTREND,2.03,1.76,4.59,0,,502.1,499.59,574.53,468.9,-6.14,12d,3.06,
+KIMS,Healthcare,UPTREND,1.62,1.37,5.55,0,,811.1,807.04,928.1,763.72,-5.37,21d,2.67,limited history: 5.1y (<10y) - lower confidence
+BELRISE,Automobile and Auto Components,UPTREND,1.04,0.96,18.32,0,-1.5% from 52wH · BB%B 107,248.21,246.97,284.02,233.25,-5.55,15d ⚠ thin,2.76,limited history: 1.2y (<10y) - lower confidence
+HONASA,Fast Moving Consumer Goods,UPTREND,0.48,0.38,34.6,0,BB%B 96,477.6,475.21,546.49,446.65,-6.01,21d,2.99,limited history: 2.7y (<10y) - lower confidence
+PTCIL,Capital Goods,UPTREND,0,0,8.7,0,RSI 72 · BB%B 138,19076,18980.62,21827.71,18019.36,-5.06,8d,2.52,limited history: 3.2y (<10y) - lower confidence
+PGEL,Consumer Durables,UPTREND,0,0,25.11,0,,630.65,627.5,721.62,582.67,-7.14,8d,3.55,
+TATATECH,Information Technology,UPTREND,0,0,41.31,0,RSI 76 · +16.0% vs 20DMA · -0.8% from 52wH · BB%B 131,872.8,868.44,998.71,808.01,-6.96,3d ⚠ thin,3.46,limited history: 2.7y (<10y) - lower confidence
+SONACOMS,Automobile and Auto Components,UPTREND,0,0,37.88,0,RSI 78 · +11.4% vs 20DMA · -0.8% from 52wH · BB%B 94,818.05,813.96,936.05,766.8,-5.79,14d,2.88,limited history: 5.1y (<10y) - lower confidence

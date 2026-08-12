@@ -21,8 +21,12 @@ on:
           - ALL
           - LargeCap
           - MidCap
+          - MidCap_all
           - SmallCap
+          - SmallCap_all
+          - MicroCap
           - Nifty500
+          - AllNSE
 
 
   schedule:
@@ -85,8 +89,12 @@ jobs:
         segment:
           - LargeCap
           - MidCap
+          - MidCap_all
           - SmallCap
+          - SmallCap_all
+          - MicroCap
           - Nifty500
+          - AllNSE
 
 
     steps:

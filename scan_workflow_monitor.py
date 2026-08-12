@@ -1905,18 +1905,32 @@ def select_segment(
     The function verifies the actual control state after selection.
     """
 
-    normalized_segment = (
-        str(
-            segment
-        ).strip()
-    )
+    normalized_segment = str(segment).strip()
 
     if not normalized_segment:
 
         raise ValueError(
             "Segment cannot be empty."
         )
+    
+    SEGMENT_DISPLAY_NAMES = {
+        "LARGECAP": "LargeCap",
+        "MIDCAP": "MidCap",
+        "MIDCAP_ALL": "MidCap_all",
+        "SMALLCAP": "SmallCap",
+        "SMALLCAP_ALL": "SmallCap_all",
+        "MICROCAP": "MicroCap",
+        "NIFTY500": "Nifty500",
+        "ALLNSE": "AllNSE",
+    }
 
+    segment_key = normalized_segment.upper()
+
+    normalized_segment = SEGMENT_DISPLAY_NAMES.get(
+        segment_key,
+        normalized_segment,
+    )
+    
     logger.info(
         "Selecting market segment | Segment=%s",
         normalized_segment,

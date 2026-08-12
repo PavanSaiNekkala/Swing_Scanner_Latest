@@ -1,0 +1,22 @@
+﻿Stock,Sector,Signal,Rank,Conf(/day),RS%,News,Rank penalty,Last close,BUY limit ₹,Objective ₹,Stop ₹,Stop %,Exp. days→objective,ATR%,Remark
+HEROMOTOCO,Automobile and Auto Components,UPTREND,2.29,2.57,11.72,0.555,RSI 75 · +11.0% vs 20DMA · BB%B 96,5725,5696.38,6550.84,5432.32,-4.64,14d,2.31,
+LICI,Financial Services,DOWNTREND,0.61,0.56,0.71,0.358,,394,392.03,450.83,372.1,-5.08,14d,2.53,limited history: 4.2y (<10y) - lower confidence
+MOTHERSON,Automobile and Auto Components,UPTREND,4.66,5.95,33.26,0.311,RSI 77 · +13.7% vs 20DMA · -0.8% from 52wH · BB%B 130,168.5,167.66,192.81,157.18,-6.25,16d,3.11,
+TRAVELFOOD,Consumer Services,UPTREND,24.63,28.41,22.75,0,RSI 70 · +8.8% vs 20DMA · BB%B 126,1428.6,1421.46,1634.68,1322.83,-6.94,2d ⚠ thin,3.45,limited history: 1.1y (<10y) - lower confidence
+NEULANDLAB,Healthcare,UPTREND,10.58,12.2,32.09,0,RSI 78 · +18.3% vs 20DMA · BB%B 131,22855,22740.72,26151.83,21034,-7.51,13d,3.73,
+LLOYDSME,Metals & Mining,UPTREND,8.26,6.48,20.82,0,-0.4% from 52wH,2101.2,2090.69,2404.29,1970.81,-5.73,12d,2.85,limited history: 3.1y (<10y) - lower confidence
+MEDANTA,Healthcare,UPTREND,6.96,5.46,19.42,0,-1.9% from 52wH,1455.6,1448.32,1665.57,1365.29,-5.73,7d,2.85,limited history: 3.7y (<10y) - lower confidence
+CARBORUNIV,Capital Goods,UPTREND,6.06,5.87,6.44,0,BB%B 97,1097,1091.52,1255.25,1017.1,-6.82,14d,3.39,
+APARINDS,Capital Goods,UPTREND,6.05,6.97,30.91,0,RSI 71 · +16.2% vs 20DMA · BB%B 113,16631,16547.85,19030.03,15223.77,-8,18d,3.98,
+NETWEB,Information Technology,UPTREND,5.56,5.13,20.48,0,+11.5% vs 20DMA · BB%B 102,4939.2,4914.5,5651.67,4523.19,-7.96,9d,3.96,limited history: 3.0y (<10y) - lower confidence
+ASTERDM,Healthcare,UPTREND,3.11,3.59,16.5,0,RSI 72 · -0.6% from 52wH · BB%B 116,869.7,865.35,995.15,811.37,-6.24,13d,3.1,limited history: 8.4y (<10y) - lower confidence
+BHARATFORG,Automobile and Auto Components,UPTREND,2.59,2.39,16.19,0,-0.2% from 52wH · BB%B 106,2265.2,2253.87,2591.95,2153.05,-4.47,13d,2.23,
+WELSPUNLIV,Textiles,UPTREND,2.17,1.45,19.61,0,,164.09,163.27,187.76,151.73,-7.07,10d,3.52,
+AARTIIND,Chemicals,UPTREND,2.03,1.76,4.59,0,,502.1,499.59,574.53,468.9,-6.14,12d,3.06,
+GRASIM,Construction Materials,UPTREND,1.77,1.74,12.24,0,-0.8% from 52wH · BB%B 120,3323,3306.38,3802.34,3160.67,-4.41,16d,2.19,
+ENRIN,Capital Goods,UPTREND,1.7,1.57,16.83,0,+9.7% vs 20DMA · BB%B 116,3648.8,3630.56,4175.14,3349.76,-7.73,11d ⚠ thin,3.85,limited history: 1.1y (<10y) - lower confidence
+AIIL,Financial Services,UPTREND,1.29,1.19,22.14,0,+8.8% vs 20DMA · BB%B 99,596.6,593.62,682.66,547.88,-7.71,14d ⚠ thin,3.83,limited history: 2.3y (<10y) - lower confidence
+HONASA,Fast Moving Consumer Goods,UPTREND,0.48,0.38,34.6,0,BB%B 96,477.6,475.21,546.49,446.65,-6.01,21d,2.99,limited history: 2.7y (<10y) - lower confidence
+PGEL,Consumer Durables,UPTREND,0,0,25.11,0,,630.65,627.5,721.62,582.67,-7.14,8d,3.55,
+TATATECH,Information Technology,UPTREND,0,0,41.31,0,RSI 76 · +16.0% vs 20DMA · -0.8% from 52wH · BB%B 131,872.8,868.44,998.71,808.01,-6.96,3d ⚠ thin,3.46,limited history: 2.7y (<10y) - lower confidence
+UNIONBANK,Financial Services,UPTREND,0,0,13.96,0,BB%B 113,183.6,182.68,210.08,173.22,-5.18,9d,2.58,

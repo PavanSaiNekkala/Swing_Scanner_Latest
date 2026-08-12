@@ -1,0 +1,35 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "scanner",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "streamlit", "run", "swing_scanner_app.py", "--server.headless", "true", "--server.port", "8599", "--browser.gatherUsageStats", "false"],
+      "port": 8599
+    },
+    {
+      "name": "screener",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "streamlit", "run", "swing_screener_app.py", "--server.headless", "true", "--server.port", "8600", "--browser.gatherUsageStats", "false"],
+      "port": 8600
+    },
+    {
+      "name": "forward",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "streamlit", "run", "forward_validate_app.py", "--server.headless", "true", "--server.port", "8601", "--browser.gatherUsageStats", "false"],
+      "port": 8601
+    },
+    {
+      "name": "monitor",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "streamlit", "run", "monitor_app.py", "--server.headless", "true", "--server.port", "8602", "--browser.gatherUsageStats", "false"],
+      "port": 8602
+    },
+    {
+      "name": "suite",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "streamlit", "run", "trading_suite.py", "--server.headless", "true", "--server.port", "8603", "--browser.gatherUsageStats", "false"],
+      "port": 8603
+    }
+  ]
+}

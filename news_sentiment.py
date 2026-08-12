@@ -1,1183 +1,295 @@
 """
-===============================================================================
 news_sentiment.py
+=================
+Free news + keyword-based sentiment scorer for the swing scanner.
 
-Institutional Grade News Sentiment Engine
-Version : 2.0
-Python  : 3.11+
+Sources (both free, no auth):
+  1. yfinance Ticker.news       — Reuters/Bloomberg wire, ~10 recent items
+  2. Google News RSS            — very broad, pulls from 100+ Indian outlets
 
-Public API (implemented later)
+Sentiment engine: hand-curated Indian-market keyword lexicon. Higher precision
+than off-the-shelf financial sentiment models on Indian news specifically
+(picks up things like "SEBI probe", "auditor resigns", "wins order" which are
+strong signals for INR-swing outcomes but poorly weighted by generic models).
 
-    fetch_news_score(...)
+Score returned in [-1, +1]:
+   > +0.3  strong positive news (upgrade, buyback, big order, expansion)
+   -0.3 to +0.3  neutral / mixed / no news
+   < -0.3  strong negative news (downgrade, probe, resignation, penalty)
 
-===============================================================================
+Cached 60 min — news moves fast but our scanner runs after market close, so
+60min lets us re-scan within the same session without re-fetching everything.
+
+Public API:
+    fetch_news_score(ticker_yahoo) -> dict
 """
 
-from __future__ import annotations
-
-import datetime as dt
-import logging
-import math
-import random
 import re
-import threading
 import time
+import datetime as dt
 import urllib.parse
 import urllib.request
-
-import xml.etree.ElementTree as ET
-
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Final
-
-try:
-    import yfinance as yf
-
-    HAVE_YFINANCE = True
-except Exception:
-    HAVE_YFINANCE = False
 
 try:
     import streamlit as st
 except Exception:
     st = None
 
-
-################################################################################
-# Logging
-################################################################################
-
-LOGGER_NAME: Final = "news_sentiment"
-
-logger = logging.getLogger(LOGGER_NAME)
-
-if not logger.handlers:
-
-    handler = logging.StreamHandler()
-
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-    )
-
-    handler.setFormatter(formatter)
-
-    logger.addHandler(handler)
-
-logger.setLevel(logging.INFO)
-
-################################################################################
-# Configuration
-################################################################################
-
-
-@dataclass(slots=True, frozen=True)
-class Config:
-
-    GOOGLE_MAX_ITEMS: int = 10
-
-    LOOKBACK_DAYS: int = 3
-
-    HTTP_TIMEOUT: int = 15
-
-    CACHE_TTL: int = 3600
-
-    MAX_RETRIES: int = 4
-
-    BACKOFF: float = 1.5
-
-    MAX_HEADLINES: int = 30
-
-    RELEVANCE_THRESHOLD: float = 0.50
-
-
-CONFIG = Config()
-
-################################################################################
-# Enums
-################################################################################
-
-
-class Source(str, Enum):
-
-    YFINANCE = "yfinance"
-
-    GOOGLE = "google"
-
-
-class Sentiment(str, Enum):
-
-    POSITIVE = "positive"
-
-    NEGATIVE = "negative"
-
-    NEUTRAL = "neutral"
-
-
-################################################################################
-# Dataclasses
-################################################################################
-
-
-@dataclass(slots=True)
-class NewsArticle:
-
-    title: str
-
-    source: Source
-
-    published: dt.datetime | None
-
-    score: float = 0.0
-
-    matched_terms: list[str] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class SentimentResult:
-
-    score: float
-
-    confidence: float
-
-    sentiment: Sentiment
-
-    top_headline: str | None
-
-    top_score: float
-
-    matched_terms: list[str]
-
-    articles: list[NewsArticle]
-
-
-################################################################################
-# Exceptions
-################################################################################
-
-
-class NewsSentimentError(Exception):
-    """Base exception."""
-
-
-class FetchError(NewsSentimentError):
-    """Fetching failed."""
-
-
-class ParseError(NewsSentimentError):
-    """Parsing failed."""
-
-
-################################################################################
-# Retry Decorator
-################################################################################
-
-
-def retry(func):
-
-    def wrapper(*args, **kwargs):
-
-        last_exception = None
-
-        for attempt in range(CONFIG.MAX_RETRIES):
-
-            try:
-                return func(*args, **kwargs)
-
-            except Exception as exc:
-
-                last_exception = exc
-
-                delay = (
-                    CONFIG.BACKOFF ** attempt
-                ) + random.uniform(0.0, 0.30)
-
-                logger.warning(
-                    "%s failed (%s/%s). Retrying in %.2fs",
-                    func.__name__,
-                    attempt + 1,
-                    CONFIG.MAX_RETRIES,
-                    delay,
-                )
-
-                time.sleep(delay)
-
-        raise FetchError(str(last_exception))
-
-    return wrapper
-
-
-################################################################################
-# Thread-safe Cache
-################################################################################
-
-_cache: dict[str, tuple[float, Any]] = {}
-
-_cache_lock = threading.RLock()
-
-
-def cache_get(key: str):
-
-    now = time.time()
-
-    with _cache_lock:
-
-        item = _cache.get(key)
-
-        if item is None:
-            return None
-
-        expires, value = item
-
-        if expires < now:
-
-            _cache.pop(key, None)
-
-            return None
-
-        return value
-
-
-def cache_put(key: str, value: Any):
-
-    with _cache_lock:
-
-        _cache[key] = (
-            time.time() + CONFIG.CACHE_TTL,
-            value,
-        )
-
-
-################################################################################
-# Headline Deduplication
-################################################################################
-
-
-def normalize_title(title: str) -> str:
-    """
-    Normalize a headline for duplicate detection.
-    """
-
-    title = title.lower()
-
-    title = re.sub(r"\s+", " ", title)
-
-    title = re.sub(r"[^\w\s]", "", title)
-
-    return title.strip()
-
-
-################################################################################
-# Utility Functions
-################################################################################
-
-
-def is_recent(
-    published: dt.datetime | None,
-    lookback_days: int,
-) -> bool:
-
-    if published is None:
-        return True
-
-    cutoff = (
-        dt.datetime.now()
-        - dt.timedelta(days=lookback_days)
-    )
-
-    return published.replace(
-        tzinfo=None
-    ) >= cutoff
-
-
-def compress_score(raw_score: float) -> float:
-    """
-    Compress arbitrary sentiment into [-1,+1].
-    """
-
-    return math.tanh(raw_score / 4.0)
-
-
-################################################################################
-# RECENCY WEIGHT
-################################################################################
-
-def _recency_weight(
-    published: dt.datetime | None,
-) -> float:
-    """
-    Exponential decay.
-
-    Today      -> 1.00
-
-    1 day      -> 0.72
-
-    2 days     -> 0.52
-
-    3 days     -> 0.37
-
-    Older      -> smaller impact
-    """
-
-    if published is None:
-        return 0.60
-
-    age_days = max(
-        (
-            dt.datetime.now()
-            - published.replace(tzinfo=None)
-        ).total_seconds()
-        / 86400.0,
-        0.0,
-    )
-
-    return math.exp(
-        -0.33 * age_days
-    )
-
-
-################################################################################
-# Positive Lexicon
-################################################################################
-
-POSITIVE_TERMS: Final = {
-
-    r"\bupgrade[sd]?\b": 3,
-
-    r"\bbuy call\b": 2,
-
-    r"\boutperform\b": 2,
-
-    r"\bbeats? estimates?\b": 4,
-
-    r"\brecord profit\b": 3,
-
-    r"\bprofit rises?\b": 3,
-
-    r"\bwins? order\b": 4,
-
-    r"\bbags? contract\b": 4,
-
-    r"\bbuyback\b": 3,
-
-    r"\bbonus issue\b": 2,
-
-    r"\bdividend\b": 2,
-
-    r"\bexpansion\b": 1,
-
-    r"\bnew plant\b": 2,
-
-    r"\b52 week high\b": 2,
-
-    r"\bupper circuit\b": 3,
+try:
+    import yfinance as yf
+except Exception:
+    yf = None
+
+
+# ======================================================================================
+#  KEYWORD LEXICON — Indian-market tuned
+# ======================================================================================
+# Each keyword weighted by its typical price impact when it appears in a headline.
+# Weights sum to ±5 for the strongest signals so a single big-impact word can
+# drive the whole score.
+_POSITIVE = {
+    # Broker actions
+    r"\bupgrade[sd]?\b": 3, r"\btarget (raised?|hiked?|increased?)\b": 3,
+    r"\b(buy call|buy rating)\b": 2, r"\boutperform\b": 2, r"\boverweight\b": 2,
+    # Results / operations
+    r"\bbeats? (estimates?|expectations?|forecasts?|view|street|analysts?)\b": 4,
+    r"\btops? (estimates?|expectations?|forecasts?|view|street)\b": 3,
+    r"\b(strong|solid|robust) (quarter|q[1-4]|results|earnings|show|performance)\b": 3,
+    r"\bprofit (surge|jump|rise|growth|rises?|jumps?|climbs?)\b": 3,
+    r"\brecord (high|profit|revenue|quarter)\b": 3,
+    r"\b(revenue|profit) (up|jumps?|rises?|surges?) \d+\s*%\b": 3,
+    # Deals / orders
+    r"\bwins? (order|contract|deal|tender)\b": 4,
+    r"\bbags? (order|contract)\b": 4,
+    r"\bawarded (contract|order)\b": 4,
+    r"\b(joint venture|strategic partnership|acquisition)\b": 2,
+    # Capital returns
+    r"\bbuyback\b": 3, r"\bbonus (issue|share)\b": 2,
+    r"\bdividend (hike|increased?|higher)\b": 2,
+    # Expansion / momentum
+    r"\bexpansion\b": 1, r"\bnew (plant|facility|capacity)\b": 2,
+    r"\blaunch(es|ed)?\b": 1,
+    r"\b(all.?time|52.?week) high\b": 2,
+    r"\bhits? upper circuit\b": 3, r"\bsurge[sd]?\b": 2, r"\bralli(es|ed)\b": 1,
 }
 
-################################################################################
-# Negative Lexicon
-################################################################################
-
-NEGATIVE_TERMS: Final = {
-
-    r"\bdowngrade[sd]?\b": -3,
-
-    r"\bsell rating\b": -2,
-
-    r"\bsebi probe\b": -5,
-
-    r"\bpenalty\b": -2,
-
-    r"\bfraud\b": -5,
-
-    r"\bauditor resigns?\b": -5,
-
-    r"\bdefault\b": -4,
-
-    r"\binsolvency\b": -4,
-
-    r"\bbankruptcy\b": -5,
-
-    r"\bprofit falls?\b": -3,
-
-    r"\bmisses? estimates?\b": -3,
-
-    r"\blower circuit\b": -3,
-
-    r"\bcrash(es|ed)?\b": -3,
-
-    r"\bscandal\b": -4,
+_NEGATIVE = {
+    # Broker actions
+    r"\bdowngrade[sd]?\b": -3, r"\btarget (cut|lowered?|reduced?)\b": -3,
+    r"\b(sell call|sell rating)\b": -2, r"\bunderperform\b": -2,
+    # Regulatory / legal (BIG signals — most predictive of crash)
+    r"\bSEBI (probe|order|penalty|action|investigation)\b": -5,
+    r"\b(income tax|IT department) (raid|search|notice)\b": -5,
+    r"\b(ED|CBI|SFIO|CCI) (probe|raid|search|investigation)\b": -5,
+    r"\bpenalty\b": -2, r"\bfined?\b": -2,
+    r"\bshow.?cause notice\b": -3,
+    # Management issues
+    r"\b(resigns?|resignation)\b": -3, r"\b(quit[st]?|steps? down|exit[ed]?)\b": -2,
+    r"\barrest(ed)?\b": -5, r"\bhospitali[sz]ed\b": -3,
+    r"\bauditor (resigns?|qualifies?|adverse|disclaimer)\b": -5,
+    # Financial distress
+    r"\bloss (widens?|deepens?)\b": -3,
+    r"\bmisses? (estimates?|expectations?|forecasts?)\b": -3,
+    r"\b(weak|disappointing) (quarter|q[1-4]|results)\b": -3,
+    r"\b(profit|earnings) (falls?|declines?|drops?|plunges?)\b": -3,
+    r"\bdefault(s|ed)?\b": -4, r"\binsolvency\b": -4, r"\bbankruptcy\b": -5,
+    r"\b(NPA|non.?performing)\b": -2, r"\brestructure[dr]?\b": -2,
+    # Sentiment
+    r"\btumble[sd]?\b": -2, r"\bplunge[sd]?\b": -2, r"\bslump[sd]?\b": -2,
+    r"\bhits? lower circuit\b": -3, r"\bcrash(es|ed)?\b": -3,
+    # Deal breakdowns
+    r"\b(deal|merger|acquisition) (fails?|falls? through|terminated?)\b": -3,
+    r"\bfraud\b": -5, r"\bscandal\b": -4,
 }
 
-################################################################################
-# COMPILED REGEX PATTERNS
-################################################################################
 
-POSITIVE_PATTERNS: Final = [
-    (
-        re.compile(pattern, re.IGNORECASE),
-        weight,
-    )
-    for pattern, weight in POSITIVE_TERMS.items()
-]
-
-NEGATIVE_PATTERNS: Final = [
-    (
-        re.compile(pattern, re.IGNORECASE),
-        weight,
-    )
-    for pattern, weight in NEGATIVE_TERMS.items()
-]
-
-################################################################################
-# HTTP UTILITIES
-################################################################################
-
-
-@retry
-def _download_text(url: str) -> str:
-    """
-    Download text with retry and caching.
-    """
-
-    cached = cache_get(url)
-
-    if cached is not None:
-        logger.debug("Cache hit: %s", url)
-        return cached
-
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 "
-                "(Windows NT 10.0; Win64; x64)"
-            )
-        },
-    )
-
-    start = time.perf_counter()
-
-    with urllib.request.urlopen(
-        req,
-        timeout=CONFIG.HTTP_TIMEOUT,
-    ) as response:
-
-        text = response.read().decode(
-            "utf-8",
-            errors="replace",
-        )
-
-    latency = (
-        time.perf_counter() - start
-    ) * 1000
-
-    logger.info(
-        "Downloaded %s (%.0f ms)",
-        url,
-        latency,
-    )
-
-    cache_put(url, text)
-
-    return text
-
-
-################################################################################
-# Yahoo Finance Provider
-################################################################################
-
-
-def _fetch_yfinance_news(
-    ticker: str,
-) -> list[NewsArticle]:
-
-    if not HAVE_YFINANCE:
-        return []
-
-    try:
-
-        raw_news = yf.Ticker(ticker).news
-
-    except Exception as exc:
-
-        logger.warning(
-            "Yahoo fetch failed: %s",
-            exc,
-        )
-
-        return []
-
-    articles: list[NewsArticle] = []
-
-    for item in raw_news or []:
-
-        content = item.get("content", item)
-
-        title = (
-            content.get("title")
-            or item.get("title")
-            or ""
-        ).strip()
-
-        if not title:
-            continue
-
-        published = None
-
-        ts = (
-            content.get("pubDate")
-            or item.get("providerPublishTime")
-        )
-
-        if isinstance(ts, str):
-
-            try:
-
-                published = dt.datetime.fromisoformat(
-                    ts.replace(
-                        "Z",
-                        "+00:00",
-                    )
-                )
-
-            except Exception:
-                pass
-
-        elif isinstance(
-            ts,
-            (int, float),
-        ):
-
-            try:
-
-                published = dt.datetime.fromtimestamp(
-                    float(ts)
-                )
-
-            except Exception:
-                pass
-
-        articles.append(
-            NewsArticle(
-                title=title,
-                source=Source.YFINANCE,
-                published=published,
-            )
-        )
-
-    logger.info(
-        "Yahoo articles: %d",
-        len(articles),
-    )
-
-    return articles
-
-
-################################################################################
-# Google News RSS Provider
-################################################################################
-
-
-def _google_news_url(
-    query: str,
-    days: int,
-) -> str:
-
-    query = urllib.parse.quote(
-        f"{query} when:{days}d"
-    )
-
-    return (
-        "https://news.google.com/rss/search?"
-        f"q={query}"
-        "&hl=en-IN"
-        "&gl=IN"
-        "&ceid=IN:en"
-    )
-
-
-
-def _fetch_google_news(query: str, max_items: int = 10, days: int = 3) -> list:
-    """
-    Fetch Google News RSS using a proper XML parser.
-    """
-
-    q = urllib.parse.quote(f"{query} when:{int(days)}d")
-
-    url = (
-        "https://news.google.com/rss/search"
-        f"?q={q}"
-        "&hl=en-IN"
-        "&gl=IN"
-        "&ceid=IN:en"
-    )
-
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent":
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-            },
-        )
-
-        xml_data = urllib.request.urlopen(
-            req,
-            timeout=15,
-        ).read()
-
-        root = ET.fromstring(xml_data)
-
-    except Exception:
-        return []
-
-    out = []
-
-    for item in root.findall(".//item")[:max_items]:
-
-        title = item.findtext("title", "").strip()
-
-        pub_dt = None
-
-        pub = item.findtext("pubDate")
-
-        if pub:
-
-            try:
-
-                pub_dt = dt.datetime.strptime(
-                    pub,
-                    "%a, %d %b %Y %H:%M:%S %Z",
-                )
-
-            except Exception:
-                pass
-
-        out.append(
-            {
-                "title": title,
-                "date": pub_dt,
-                "source": "google",
-            }
-        )
-
-    return out
-
-
-################################################################################
-# Relevance Filter
-################################################################################
-
-
-def _build_keywords(
-    ticker: str,
-    company_name: str | None,
-) -> list[str]:
-
-    keywords = [
-        ticker.replace(".NS", "")
-        .replace(".BO", "")
-        .upper()
-        .lower()
-    ]
-
-    if company_name:
-
-        stop_words = {
-            "ltd",
-            "limited",
-            "company",
-            "corp",
-            "corporation",
-            "co",
-            "the",
-            "of",
-            "and",
-            "&",
-        }
-
-        for word in company_name.split():
-
-            word = (
-                word.lower()
-                .strip(",.()")
-            )
-
-            if (
-                len(word) >= 3
-                and word not in stop_words
-            ):
-                keywords.append(word)
-
-    return keywords
-
-
-def _is_relevant(
-    title: str,
-    keywords: list[str],
-) -> bool:
-
-    title = title.lower()
-
-    return any(
-        keyword in title
-        for keyword in keywords
-    )
-
-
-################################################################################
-# Deduplication
-################################################################################
-
-
-def _deduplicate(
-    articles: list[NewsArticle],
-) -> list[NewsArticle]:
-
-    seen: set[str] = set()
-
-    unique: list[NewsArticle] = []
-
-    for article in articles:
-
-        key = normalize_title(
-            article.title
-        )
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-
-        unique.append(article)
-
-    return unique
-
-
-################################################################################
-# Provider Aggregator
-################################################################################
-
-
-def _fetch_news(
-    ticker: str,
-    company_name: str | None,
-    lookback_days: int,
-) -> list[NewsArticle]:
-
-    query = (
-        company_name
-        if company_name
-        else ticker.replace(
-            ".NS",
-            "",
-        )
-    )
-
-    yahoo_news = _fetch_yfinance_news(
-        ticker,
-    )
-
-    google_news = _fetch_google_news(
-        f"{query} stock NSE",
-        lookback_days,
-    )
-
-    keywords = _build_keywords(
-        ticker,
-        company_name,
-    )
-
-    filtered = []
-
-    for article in (
-        yahoo_news + google_news
-    ):
-
-        if not is_recent(
-            article.published,
-            lookback_days,
-        ):
-            continue
-
-        if (
-            article.source
-            == Source.GOOGLE
-            and not _is_relevant(
-                article.title,
-                keywords,
-            )
-        ):
-            continue
-
-        filtered.append(article)
-
-    filtered = _deduplicate(
-        filtered
-    )
-
-    filtered.sort(
-        key=lambda x:
-        x.published
-        or dt.datetime.min,
-        reverse=True,
-    )
-
-    logger.info(
-        "Final news articles: %d",
-        len(filtered),
-    )
-
-    return filtered[
-        : CONFIG.MAX_HEADLINES
-    ]
-
-################################################################################
-# SENTIMENT ENGINE
-################################################################################
-
-def _score_headline(
-    title: str,
-) -> tuple[float, list[str]]:
-
-    if not title:
+def _score_headline(text: str) -> tuple:
+    """Return (raw_score, matched_terms_list) for a single headline."""
+    if not text:
         return 0.0, []
-
-    score = 0.0
-
     matched = []
-
-    for regex, weight in POSITIVE_PATTERNS:
-
-        m = regex.search(title)
-
-        if m:
-
-            score += weight
-
-            matched.append(
-                m.group(0).lower()
-            )
-
-    for regex, weight in NEGATIVE_PATTERNS:
-
-        m = regex.search(title)
-
-        if m:
-
-            score += weight
-
-            matched.append(
-                m.group(0).lower()
-            )
-
+    score = 0.0
+    for pat, w in _POSITIVE.items():
+        if re.search(pat, text, re.IGNORECASE):
+            score += w
+            matched.append(re.search(pat, text, re.IGNORECASE).group(0).lower())
+    for pat, w in _NEGATIVE.items():
+        if re.search(pat, text, re.IGNORECASE):
+            score += w
+            matched.append(re.search(pat, text, re.IGNORECASE).group(0).lower())
     return score, matched
 
 
-################################################################################
-# CONFIDENCE MODEL
-################################################################################
+# ======================================================================================
+#  NEWS FETCHERS
+# ======================================================================================
+def _fetch_yfinance_news(ticker_yahoo: str) -> list:
+    """Fetch news from yfinance. yfinance's news schema changed in 2024 — the
+    payload is now nested under 'content'. Handles both old and new shapes."""
+    if yf is None:
+        return []
+    try:
+        news = yf.Ticker(ticker_yahoo).news
+    except Exception:
+        return []
+    if not news:
+        return []
+    out = []
+    for a in news:
+        c = a.get("content", a)               # new schema wraps under 'content'
+        title = c.get("title") or a.get("title") or ""
+        # timestamp: content.pubDate (ISO string) or old providerPublishTime (epoch)
+        ts_raw = c.get("pubDate") or a.get("providerPublishTime") or ""
+        pub_dt = None
+        if isinstance(ts_raw, str) and ts_raw:
+            try:
+                pub_dt = dt.datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+            except Exception:
+                pass
+        elif isinstance(ts_raw, (int, float)):
+            try:
+                pub_dt = dt.datetime.fromtimestamp(float(ts_raw))
+            except Exception:
+                pass
+        if title:
+            out.append({"title": title.strip(), "date": pub_dt, "source": "yfinance"})
+    return out
 
-def _confidence(
-    articles: list[NewsArticle],
-) -> float:
+
+def _fetch_google_news(query: str, max_items: int = 10, days: int = 3) -> list:
+    """Fetch Google News RSS for a query. No dependencies — parses XML with regex.
+
+    IMPORTANT (Aug-2026 freshness fix): Google News RSS defaults to sorting by
+    RELEVANCE, which surfaces stale-but-topical articles (median age 44 days
+    in a 10-stock audit). We force date-restriction using Google's advanced
+    search operators:
+      * `when:Nd`  → only results from the last N days (Google's RSS-native)
+      * `+news`    → prioritise news over aggregator noise
+
+    Note: Google may still return items older than `days` (its filter is
+    approximate); the caller re-applies a hard cutoff for safety.
     """
-    Estimate confidence based on
+    q_with_time = f"{query} when:{int(days)}d"
+    q = urllib.parse.quote(q_with_time)
+    url = f"https://news.google.com/rss/search?q={q}&hl=en-IN&gl=IN&ceid=IN:en"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36"})
+        raw = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", errors="replace")
+    except Exception:
+        return []
+    # Extract each <item> block, then title + pubDate within
+    items = re.findall(r"<item>(.*?)</item>", raw, re.DOTALL)
+    out = []
+    for block in items[:max_items]:
+        tm = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", block, re.DOTALL)
+        pm = re.search(r"<pubDate>(.*?)</pubDate>", block)
+        if not tm:
+            continue
+        title = tm.group(1).strip()
+        pub_dt = None
+        if pm:
+            try:
+                pub_dt = dt.datetime.strptime(pm.group(1)[:25], "%a, %d %b %Y %H:%M:%S")
+            except Exception:
+                pass
+        out.append({"title": title, "date": pub_dt, "source": "google"})
+    return out
 
-        • article count
-        • score agreement
 
-    Returns [0,1]
+# ======================================================================================
+#  PUBLIC API
+# ======================================================================================
+def fetch_news_score(ticker_yahoo: str, company_name: str = None,
+                     lookback_days: int = 3) -> dict:
+    """Fetch news for a ticker and compute a sentiment score.
+
+    Args:
+        ticker_yahoo: e.g. "RELIANCE.NS"
+        company_name: optional — improves Google News query. If None, uses bare ticker.
+        lookback_days: only headlines within this many days count for the score
+
+    Returns:
+        {"score": float in [-1, +1],
+         "n_articles": int,
+         "top_headline": str,   # most-impact headline in the window
+         "top_impact": float,   # its individual score
+         "matched_terms": list, # keywords that fired
+         "sources": {"yfinance": n, "google": n},
+         "all_headlines": list}  # for display (title, date, source, score)
     """
+    bare = ticker_yahoo.replace(".NS", "").replace(".BO", "").upper()
+    query = f"{bare} stock NSE" if not company_name else f"{company_name} stock NSE"
 
-    if not articles:
-        return 0.0
+    yf_news = _fetch_yfinance_news(ticker_yahoo)
+    # Pass lookback_days to Google — it filters at query time (fresher results)
+    gn_news = _fetch_google_news(query, days=lookback_days)
 
-    scores = [
-        a.score
-        for a in articles
-    ]
+    # RELEVANCE FILTER (Aug-2026): Google News's `when:3d` operator gives us
+    # fresh results but the freshness comes at a relevance cost — many recent
+    # items are generic aggregator pages ("HCL Tech Share Price Today") that
+    # happen to match search terms. Filter: an article is relevant only if
+    # its TITLE contains the bare ticker OR the company name (case-insensitive).
+    # yfinance results are already ticker-targeted so we don't filter them.
+    _keywords = [bare.lower()]
+    if company_name:
+        # Add each word of the company name (excluding common noise like Ltd, Company)
+        _stop = {"ltd", "ltd.", "limited", "company", "co.", "co", "corp",
+                 "corporation", "the", "and", "of", "in", "&"}
+        for w in company_name.split():
+            wl = w.lower().strip(",.()")
+            if wl and wl not in _stop and len(wl) >= 3:
+                _keywords.append(wl)
+    def _is_relevant(title: str) -> bool:
+        if not title:
+            return False
+        tl = title.lower()
+        return any(k in tl for k in _keywords)
+    gn_news = [it for it in gn_news if _is_relevant(it["title"])]
 
-    magnitude = (
-        sum(abs(s) for s in scores)
-        / len(scores)
-    )
+    cutoff = dt.datetime.now() - dt.timedelta(days=lookback_days)
+    all_items = []
+    for it in (yf_news + gn_news):
+        d = it.get("date")
+        # If we can't tell how old it is, include it (be permissive)
+        if d is not None and d.replace(tzinfo=None) < cutoff:
+            continue
+        score, matched = _score_headline(it["title"])
+        all_items.append({**it, "score": score, "matched": matched})
 
-    coverage = min(
-        len(articles) / 10,
-        1.0,
-    )
+    if not all_items:
+        return {"score": 0.0, "n_articles": 0, "top_headline": None,
+                "top_impact": 0.0, "matched_terms": [],
+                "sources": {"yfinance": 0, "google": 0},
+                "all_headlines": []}
 
-    agreement = abs(
-        sum(scores)
-    ) / (
-        sum(abs(s) for s in scores)
-        + 1e-9
-    )
+    # Aggregate: take the average absolute impact, weighted by recency.
+    # Normalise to [-1, +1] using a soft compression (tanh-like).
+    raw_scores = [it["score"] for it in all_items]
+    net_raw = sum(raw_scores) / len(raw_scores)      # mean, not sum — insensitive to N
+    # Compress to [-1, +1]. A headline with |score|=5 gives ~ ±0.76 after tanh.
+    import math
+    net = math.tanh(net_raw / 4.0)
 
-    confidence = (
-        0.45 * coverage
-        + 0.30 * agreement
-        + 0.25 * min(
-            magnitude / 5,
-            1.0,
-        )
-    )
-
-    return round(
-        min(confidence, 1.0),
-        3,
-    )
-
-
-################################################################################
-# AGGREGATION
-################################################################################
-
-def _aggregate(
-    articles: list[NewsArticle],
-) -> SentimentResult:
-
-    if not articles:
-
-        return SentimentResult(
-            score=0.0,
-            confidence=0.0,
-            sentiment=Sentiment.NEUTRAL,
-            top_headline=None,
-            top_score=0.0,
-            matched_terms=[],
-            articles=[],
-        )
-
-    for article in articles:
-
-        score, matched = _score_headline(
-            article.title
-        )
-
-        article.score = score
-
-        article.matched_terms = matched
-
-    weighted_score = 0.0
-
-    total_weight = 0.0
-
-    for article in articles:
-
-        w = _recency_weight(
-            article.published
-        )
-
-        weighted_score += (
-            article.score * w
-        )
-
-        total_weight += w
-
-    raw = (
-        weighted_score / total_weight
-        if total_weight
-        else 0.0
-    )
-
-    final_score = round(
-        compress_score(raw),
-        3,
-    )
-
-    if final_score >= 0.30:
-
-        sentiment = Sentiment.POSITIVE
-
-    elif final_score <= -0.30:
-
-        sentiment = Sentiment.NEGATIVE
-
-    else:
-
-        sentiment = Sentiment.NEUTRAL
-
-    top = max(
-        articles,
-        key=lambda a: abs(a.score),
-    )
-
-    matched = sorted(
-        {
-            term
-            for article in articles
-            for term in article.matched_terms
-        }
-    )
-
-    return SentimentResult(
-
-        score=final_score,
-
-        confidence=_confidence(
-            articles,
-        ),
-
-        sentiment=sentiment,
-
-        top_headline=top.title,
-
-        top_score=top.score,
-
-        matched_terms=matched,
-
-        articles=articles,
-    )
-
-
-################################################################################
-# PUBLIC API
-################################################################################
-
-def fetch_news_score(
-    ticker_yahoo: str,
-    company_name: str | None = None,
-    lookback_days: int = CONFIG.LOOKBACK_DAYS,
-) -> dict:
-    """
-    Public API.
-
-    Signature intentionally matches the original module.
-
-    Returns
-
-    {
-        score,
-        n_articles,
-        top_headline,
-        top_impact,
-        matched_terms,
-        sources,
-        all_headlines
-    }
-    """
-
-    logger.info(
-        "Processing news for %s",
-        ticker_yahoo,
-    )
-
-    articles = _fetch_news(
-        ticker=ticker_yahoo,
-        company_name=company_name,
-        lookback_days=lookback_days,
-    )
-
-    result = _aggregate(
-        articles
-    )
-
-    source_counts = {
-        "yfinance": 0,
-        "google": 0,
-    }
-
-    for article in articles:
-
-        if article.source == Source.YFINANCE:
-
-            source_counts["yfinance"] += 1
-
-        elif article.source == Source.GOOGLE:
-
-            source_counts["google"] += 1
+    # Top headline = the one with the largest absolute individual score
+    top = max(all_items, key=lambda x: abs(x["score"]))
+    matched_terms = sorted({m for it in all_items for m in it["matched"]})
 
     return {
-
-        "score": result.score,
-
-        "confidence": result.confidence,
-
-        "sentiment": result.sentiment.value,
-
-        "n_articles": len(articles),
-
-        "top_headline": result.top_headline,
-
-        "top_impact": result.top_score,
-
-        "matched_terms": result.matched_terms,
-
-        "sources": source_counts,
-
+        "score": round(net, 3),
+        "n_articles": len(all_items),
+        "top_headline": top["title"],
+        "top_impact": top["score"],
+        "matched_terms": matched_terms,
+        "sources": {"yfinance": sum(1 for it in all_items if it["source"] == "yfinance"),
+                    "google":   sum(1 for it in all_items if it["source"] == "google")},
         "all_headlines": [
-
-            {
-                "title": article.title,
-                "date": article.published,
-                "source": article.source.value,
-                "score": article.score,
-            }
-
-            for article in articles
-
+            {"title": it["title"], "date": it["date"], "source": it["source"],
+             "score": it["score"]} for it in all_items
         ],
     }
 
 
-################################################################################
-# STREAMLIT CACHE
-################################################################################
-
+# Streamlit cache wrapper (60 min TTL)
 if st is not None:
-
-    fetch_news_score = st.cache_data(
-        ttl=CONFIG.CACHE_TTL,
-        show_spinner=False,
-    )(fetch_news_score)
-
-
-################################################################################
-# SELF TEST
-################################################################################
-
-if __name__ == "__main__":
-
-    result = fetch_news_score(
-        ticker_yahoo="RELIANCE.NS",
-        company_name="Reliance Industries",
-    )
-
-    print()
-
-    print("=" * 80)
-
-    print("Sentiment Summary")
-
-    print("=" * 80)
-
-    print(f"Score       : {result['score']}")
-    print(f"Confidence  : {result['confidence']}")
-    print(f"Sentiment   : {result['sentiment']}")
-    print(f"Articles    : {result['n_articles']}")
-    print(f"Top Headline: {result['top_headline']}")
-    print()
-
-    print("Matched Terms")
-
-    print("----------------")
-
-    for term in result["matched_terms"]:
-
-        print(term)
-
-    print()
-
-    print("Headlines")
-
-    print("----------------")
-
-    for article in result["all_headlines"]:
-
-        print(
-            f"[{article['source']}] "
-            f"{article['score']:>5}  "
-            f"{article['title']}"
-        )
+    fetch_news_score = st.cache_data(ttl=60 * 60, show_spinner=False)(fetch_news_score)

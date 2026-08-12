@@ -2448,24 +2448,40 @@ def set_stock_limit(
             timeout=PAGE_TIMEOUT_MS,
         )
 
-        slider.press(
-            "Home",
-            timeout=PAGE_TIMEOUT_MS,
+        logger.info(
+            "Setting slider directly | Current=%d | Target=%d",
+            current_value,
+            limit,
         )
 
-        steps = (
-            limit
-            - minimum_value
+        slider.evaluate(
+            """
+            (element, value) => {
+
+                element.value = value;
+
+                element.dispatchEvent(
+                    new Event(
+                        "input",
+                        { bubbles: true }
+                    )
+                );
+
+                element.dispatchEvent(
+                    new Event(
+                        "change",
+                        { bubbles: true }
+                    )
+                );
+
+            }
+            """,
+            str(limit),
         )
 
-        for _ in range(
-            steps
-        ):
-
-            slider.press(
-                "ArrowRight",
-                timeout=PAGE_TIMEOUT_MS,
-            )
+        page.wait_for_timeout(
+            500
+        )
 
     except PlaywrightError as error:
 

@@ -37,14 +37,15 @@ CACHE_DIR = PROJECT_ROOT / "cache"
 # Create required directories
 
 for directory in (
-
     OUTPUT_EXCEL_DIR,
-    OUTPUT_EXCEL,
     OUTPUT_CSV,
     LOG_DIR,
     CACHE_DIR,
 ):
-    directory.mkdir(parents=True, exist_ok=True)
+    directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
 # =============================================================================
 # API KEYS
@@ -91,6 +92,7 @@ GOOGLE_NEWS_LANGUAGE = "en-IN"
 GOOGLE_NEWS_COUNTRY = "IN"
 
 MAX_NEWS_ARTICLES = 5
+MIN_NEWS_RELEVANCE_SCORE = 25
 
 # =============================================================================
 # FULL NEWS UNIVERSE SETTINGS

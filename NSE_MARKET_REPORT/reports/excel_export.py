@@ -735,14 +735,33 @@ class ExcelExporter:
 
         if output_path is None:
 
-            output_path = (
-                self.filename
-            )
+            output_path = self.filename
+
+        output_path = Path(
+            output_path
+        )
 
         output_path.parent.mkdir(
             parents=True,
             exist_ok=True,
         )
+
+        if output_path.exists():
+
+            if output_path.is_dir():
+
+                raise IsADirectoryError(
+                    "Excel output path is a directory, "
+                    f"but a workbook file is required: "
+                    f"{output_path}"
+                )
+
+            if not output_path.is_file():
+
+                raise OSError(
+                    "Excel output path is not "
+                    f"a regular file: {output_path}"
+                )
 
         workbook.save(
             output_path
@@ -869,10 +888,39 @@ class ExcelExporter:
         )
 
         #######################################################################
+        # PATH SAFETY
+        #######################################################################
+
+        if workbook_path.exists() and (
+            workbook_path.is_dir()
+        ):
+
+            raise IsADirectoryError(
+                "Excel output path is a directory, "
+                f"but a workbook file is required: "
+                f"{workbook_path}"
+            )
+
+        #######################################################################
         # LOAD / CREATE WORKBOOK
         #######################################################################
 
         if workbook_path.exists():
+
+            if workbook_path.is_dir():
+
+                raise IsADirectoryError(
+                    "Excel output path is a directory, "
+                    f"but a workbook file is required: "
+                    f"{workbook_path}"
+                )
+
+            if not workbook_path.is_file():
+
+                raise OSError(
+                    "Excel output path exists but is not "
+                    f"a regular file: {workbook_path}"
+                )
 
             workbook = load_workbook(
                 workbook_path
@@ -992,6 +1040,23 @@ class ExcelExporter:
                 if header is not None
 
             }
+
+            missing_headers = [
+                column
+                for column in required_columns
+                if column not in header_index
+            ]
+
+            if missing_headers:
+
+                raise ValueError(
+                    "Existing Excel workbook has an "
+                    "incompatible schema. Missing headers: "
+                    + ", ".join(
+                        missing_headers
+                    )
+                )
+
 
             signature_columns = [
 
@@ -1135,13 +1200,28 @@ class ExcelExporter:
                 )
 
             ###################################################################
-            # HEADER
+            # HEADER — ALWAYS VALIDATE / REPAIR
             ###################################################################
 
-            if worksheet.max_row == 0:
+            expected_headers = list(
+                required_columns
+            )
+
+            current_headers = [
+                worksheet.cell(
+                    row=1,
+                    column=column_index,
+                ).value
+                for column_index in range(
+                    1,
+                    len(expected_headers) + 1,
+                )
+            ]
+
+            if current_headers != expected_headers:
 
                 for column_index, column in enumerate(
-                    required_columns,
+                    expected_headers,
                     start=1,
                 ):
 
@@ -1151,27 +1231,33 @@ class ExcelExporter:
                         value=column,
                     )
 
-            elif worksheet.max_row == 1:
+            ###################################################################
+            # HEADER STYLE
+            ###################################################################
 
-                existing_headers = [
-                    cell.value
-                    for cell in worksheet[1]
-                ]
+            for column_index in range(
+                1,
+                len(expected_headers) + 1,
+            ):
 
-                if not any(
-                    existing_headers
-                ):
+                cell = worksheet.cell(
+                    row=1,
+                    column=column_index,
+                )
 
-                    for column_index, column in enumerate(
-                        required_columns,
-                        start=1,
-                    ):
+                cell.font = HEADER_FONT
 
-                        worksheet.cell(
-                            row=1,
-                            column=column_index,
-                            value=column,
-                        )
+                cell.fill = HEADER_FILL
+
+                cell.alignment = CENTER_ALIGNMENT
+
+                cell.border = THIN_BORDER
+
+            ###################################################################
+            # FREEZE HEADER
+            ###################################################################
+
+            worksheet.freeze_panes = "A2"
 
             ###################################################################
             # SAME-DAY DUPLICATES
@@ -1254,6 +1340,16 @@ class ExcelExporter:
                     skipped_duplicates,
                 )
 
+                ################################################################
+                # FINAL WORKSHEET SETTINGS
+                ################################################################
+
+                worksheet.freeze_panes = "A2"
+
+                worksheet.auto_filter.ref = (
+                    worksheet.dimensions
+                )
+
                 return
 
             ###################################################################
@@ -1321,14 +1417,26 @@ class ExcelExporter:
             )
 
             ###################################################################
-            # HEADER STYLE
+            # FINAL HEADER STYLE
             ###################################################################
 
-            for cell in worksheet[1]:
+            for column_index in range(
+                1,
+                len(required_columns) + 1,
+            ):
 
-                cell.font = cell.font.copy(
-                    bold=True
+                cell = worksheet.cell(
+                    row=1,
+                    column=column_index,
                 )
+
+                cell.font = HEADER_FONT
+
+                cell.fill = HEADER_FILL
+
+                cell.alignment = CENTER_ALIGNMENT
+
+                cell.border = THIN_BORDER
 
             ###################################################################
             # FREEZE HEADER

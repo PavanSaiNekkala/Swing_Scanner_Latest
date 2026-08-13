@@ -55,8 +55,9 @@ from config.timezone import (
 from config.config import (
     MAX_WORKERS,
     NEWS_LOOKBACK_DAYS,
+    MAX_NEWS_ARTICLES,
+    MIN_NEWS_RELEVANCE_SCORE,
 )
-
 
 ###############################################################################
 # CONFIGURATION
@@ -75,8 +76,6 @@ DEFAULT_BACKOFF = 2
 REQUEST_DELAY = 0.75
 
 MAX_BACKOFF_SECONDS = 120
-
-MAX_ARTICLES = 5
 
 LANGUAGE = "en-IN"
 
@@ -319,6 +318,7 @@ class GoogleNews:
     def _request(
         self,
         symbol: str,
+        search_term: str,
         timeout: int = DEFAULT_TIMEOUT,
     ) -> str:
         """
@@ -346,7 +346,25 @@ class GoogleNews:
             Raw RSS XML.
         """
 
-        symbol = symbol.strip().upper()
+        symbol = str(
+            symbol or ""
+        ).strip().upper()
+
+        search_term = str(
+            search_term or ""
+        ).strip()
+
+        if not symbol:
+
+            raise GoogleNewsConnectionError(
+                "Google News symbol cannot be empty."
+            )
+
+        if not search_term:
+
+            raise GoogleNewsConnectionError(
+                f"Google News search term is empty for {symbol}."
+            )
 
         cached = self.cache.get(
             symbol
@@ -354,12 +372,24 @@ class GoogleNews:
 
         if cached is not None:
 
-            logger.debug(
-                "Google News cache hit : %s",
-                symbol,
+            cached_xml = cached.get(
+                "xml"
             )
 
-            return cached["xml"]
+            if (
+                isinstance(
+                    cached_xml,
+                    str,
+                )
+                and cached_xml.strip()
+            ):
+
+                logger.debug(
+                    "Google News cache hit : %s",
+                    symbol,
+                )
+
+                return cached_xml
 
         #######################################################################
         # SEARCH PARAMETERS
@@ -367,7 +397,7 @@ class GoogleNews:
 
         params = {
             "q": (
-                f"({symbol} NSE OR {symbol} stock) "
+                f"({search_term}) "
                 "when:15d"
             ),
             "hl": LANGUAGE,
@@ -588,6 +618,7 @@ class GoogleNews:
 
             )
 
+
 ###############################################################################
 # DOWNLOAD RSS
 ###############################################################################
@@ -595,13 +626,45 @@ class GoogleNews:
     def _download_feed(
         self,
         symbol: str,
+        search_term: str,
     ) -> str:
+        """
+        Download RSS XML and validate it.
+        """
 
         xml = self._request(
-            symbol
+            symbol=symbol,
+            search_term=search_term,
         )
 
+        if not isinstance(
+            xml,
+            str,
+        ):
 
+            raise GoogleNewsParsingError(
+                "Google News download returned "
+                f"{type(xml).__name__} instead of str."
+            )
+
+        xml = xml.strip()
+
+        if not xml:
+
+            raise GoogleNewsParsingError(
+                f"Google News returned empty XML for {symbol}."
+            )
+
+        self._validate_xml(
+            xml
+        )
+
+        return xml
+
+
+###############################################################################
+# PUBLICATION DATE PARSING
+###############################################################################
 
     @staticmethod
     def _parse_published_date(
@@ -612,6 +675,7 @@ class GoogleNews:
         """
 
         if not value:
+
             return None
 
         try:
@@ -647,7 +711,6 @@ class GoogleNews:
 
             return None
 
-        
 
 ###############################################################################
 # XML PARSING
@@ -659,75 +722,137 @@ class GoogleNews:
         symbol: str,
     ) -> List[Dict[str, Any]]:
         """
-        Parse Google News RSS feed and retain only articles
-        published within the last 15 days.
+        Parse Google News RSS feed.
         """
 
         import xml.etree.ElementTree as ET
 
-        try:
-
-            root = ET.fromstring(xml)
-
-        except Exception as ex:
-
-            logger.exception(ex)
+        if not isinstance(
+            xml,
+            str,
+        ):
 
             raise GoogleNewsParsingError(
-                "Unable to parse RSS XML."
+                f"RSS XML for {symbol} is "
+                f"{type(xml).__name__}, expected str."
             )
 
-        articles: List[Dict[str, Any]] = []
+        xml = xml.strip()
 
-        channel = root.find("channel")
+        if not xml:
+
+            raise GoogleNewsParsingError(
+                f"RSS XML for {symbol} is empty."
+            )
+
+        try:
+
+            root = ET.fromstring(
+                xml
+            )
+
+        except (
+            ET.ParseError,
+            TypeError,
+            ValueError,
+        ) as ex:
+
+            logger.exception(
+                "Google News XML parsing failed | "
+                "Symbol=%s | XML length=%d",
+                symbol,
+                len(xml),
+            )
+
+            raise GoogleNewsParsingError(
+                f"Unable to parse RSS XML for {symbol}."
+            ) from ex
+
+        articles: List[
+            Dict[str, Any]
+        ] = []
+
+        channel = root.find(
+            "channel"
+        )
 
         if channel is None:
 
             raise GoogleNewsParsingError(
-                "RSS channel missing."
+                f"RSS channel missing for {symbol}."
             )
 
         raw_count = 0
 
-        for item in channel.findall("item"):
+        for item in channel.findall(
+            "item"
+        ):
 
             raw_count += 1
 
-            published = self._parse_published_date(
+            published_text = (
                 item.findtext(
                     "pubDate",
                     default="",
-                ).strip()
+                )
+                or ""
+            ).strip()
+
+            headline = (
+                item.findtext(
+                    "title",
+                    default="",
+                )
+                or ""
+            ).strip()
+
+            link = (
+                item.findtext(
+                    "link",
+                    default="",
+                )
+                or ""
+            ).strip()
+
+            source = (
+                item.findtext(
+                    "source",
+                    default="Google News",
+                )
+                or "Google News"
+            ).strip()
+
+            published = (
+                self._parse_published_date(
+                    published_text
+                )
             )
 
-            # Skip articles where publication time
-            # cannot be verified.
             if published is None:
+
+                continue
+
+            if not headline:
+
                 continue
 
             article = {
-                "Symbol": symbol,
+
+                "Symbol":
+                    symbol,
 
                 "Headline":
-                    item.findtext(
-                        "title",
-                        default="",
-                    ).strip(),
+                    headline,
 
                 "Link":
-                    item.findtext(
-                        "link",
-                        default="",
-                    ).strip(),
+                    link,
 
                 "Published":
                     published,
 
                 "Source":
-                    item.findtext(
-                        "source",
-                        default="Google News",
-                    ).strip(),
+                    source,
+
             }
 
             articles.append(
@@ -738,21 +863,26 @@ class GoogleNews:
         # 15-DAY FILTER
         #######################################################################
 
-        recent_articles = self._filter_recent_articles(
-            articles,
-            days=NEWS_LOOKBACK_DAYS,
+        recent_articles = (
+            self._filter_recent_articles(
+                articles,
+                days=NEWS_LOOKBACK_DAYS,
+            )
         )
 
         logger.info(
             "Google News RSS : %s | "
-            "Raw=%d | Last%dDays=%d",
+            "Raw=%d | Parsed=%d | "
+            "Last%dDays=%d",
             symbol,
             raw_count,
+            len(articles),
             NEWS_LOOKBACK_DAYS,
             len(recent_articles),
         )
 
         return recent_articles
+
 
 ###############################################################################
 # DEDUPLICATION
@@ -782,72 +912,411 @@ class GoogleNews:
 
         return cleaned
 
+
 ###############################################################################
 # RELEVANCE SCORING
 ###############################################################################
 
     @staticmethod
     def _score_article(
-        article: Dict[str, str],
+        article: Dict[str, Any],
         symbol: str,
+        company: Optional[str] = None,
     ) -> int:
         """
-        Calculate relevance score.
+        Calculate institutional-style article relevance.
+
+        Scoring priorities
+        ------------------
+        1. Exact ticker relevance.
+        2. Exact company relevance.
+        3. Financial materiality.
+        4. Source quality.
+        5. Publication recency.
+        6. Generic market terminology.
 
         Higher score = more relevant.
         """
 
         score = 0
 
-        headline = article["Headline"].lower()
+        #######################################################################
+        # NORMALIZE
+        #######################################################################
 
-        symbol = symbol.lower()
+        headline = (
+            str(
+                article.get(
+                    "Headline",
+                    "",
+                )
+                or "",
+            )
+            .strip()
+            .lower()
+        )
 
-        if symbol in headline:
+        source = (
+            str(
+                article.get(
+                    "Source",
+                    "",
+                )
+                or "",
+            )
+            .strip()
+            .lower()
+        )
 
-            score += 20
+        link = (
+            str(
+                article.get(
+                    "Link",
+                    "",
+                )
+                or "",
+            )
+            .strip()
+            .lower()
+        )
 
-        important_words = [
+        symbol_text = (
+            str(
+                symbol or "",
+            )
+            .strip()
+            .lower()
+        )
 
-            "results",
+        company_text = (
+            str(
+                company or "",
+            )
+            .strip()
+            .lower()
+        )
 
-            "earnings",
+        #######################################################################
+        # INVALID ARTICLE
+        #######################################################################
 
-            "profit",
+        if not headline:
 
-            "loss",
+            return -1000
 
-            "order",
+        #######################################################################
+        # BLOCKED / SOCIAL SOURCES
+        #######################################################################
 
-            "contract",
+        blocked_domains = {
 
-            "dividend",
+            "facebook.com",
+            "facebook",
 
-            "board",
+            "instagram.com",
+            "instagram",
 
-            "acquisition",
+            "youtube.com",
+            "youtube",
 
-            "merger",
+            "twitter.com",
+            "twitter",
 
-            "buyback",
+            "x.com",
 
-            "share",
+            "reddit.com",
+            "reddit",
 
-            "stock",
+        }
 
-            "nse",
+        for domain in blocked_domains:
 
-            "bse",
+            if domain in source:
 
-        ]
+                score -= 100
 
-        for word in important_words:
+                break
+
+            if domain in link:
+
+                score -= 100
+
+                break
+
+        #######################################################################
+        # EXACT TICKER MATCH
+        #######################################################################
+
+        if (
+            symbol_text
+            and symbol_text in headline
+        ):
+
+            score += 100
+
+        #######################################################################
+        # EXACT COMPANY MATCH
+        #######################################################################
+
+        if (
+            company_text
+            and company_text in headline
+        ):
+
+            score += 80
+
+        #######################################################################
+        # FINANCIAL MATERIALITY
+        #######################################################################
+
+        material_keywords = {
+
+            "results": 15,
+
+            "earnings": 15,
+
+            "profit": 15,
+
+            "loss": 12,
+
+            "revenue": 12,
+
+            "ebitda": 12,
+
+            "margin": 10,
+
+            "guidance": 10,
+
+            "dividend": 12,
+
+            "buyback": 12,
+
+            "order": 10,
+
+            "contract": 10,
+
+            "acquisition": 12,
+
+            "merger": 12,
+
+            "board": 8,
+
+            "capex": 8,
+
+            "investment": 8,
+
+            "fundraising": 8,
+
+            "rating": 8,
+
+            "upgrade": 6,
+
+            "downgrade": 6,
+
+            "target": 5,
+
+        }
+
+        for word, weight in (
+            material_keywords.items()
+        ):
 
             if word in headline:
 
-                score += 5
+                score += weight
+
+        #######################################################################
+        # GENERIC MARKET TERMS
+        #######################################################################
+
+        generic_keywords = {
+
+            "share": 1,
+
+            "stock": 1,
+
+            "nse": 1,
+
+            "bse": 1,
+
+        }
+
+        for word, weight in (
+            generic_keywords.items()
+        ):
+
+            if word in headline:
+
+                score += weight
+
+        #######################################################################
+        # PREFERRED FINANCIAL SOURCES
+        #######################################################################
+
+        preferred_sources = {
+
+            "economic times",
+            "moneycontrol",
+            "business standard",
+            "livemint",
+            "mint",
+            "reuters",
+            "bloomberg",
+            "cnbc",
+            "ndtv profit",
+            "financial express",
+
+        }
+
+        for preferred in preferred_sources:
+
+            if preferred in source:
+
+                score += 15
+
+                break
+
+        #######################################################################
+        # RECENCY
+        #######################################################################
+
+        published = article.get(
+            "Published"
+        )
+
+        if published is not None:
+
+            try:
+
+                now = now_ist()
+
+                if published.tzinfo is None:
+
+                    published = published.replace(
+                        tzinfo=IST
+                    )
+
+                else:
+
+                    published = published.astimezone(
+                        IST
+                    )
+
+                age_hours = (
+                    now - published
+                ).total_seconds() / 3600
+
+                if age_hours <= 24:
+
+                    score += 30
+
+                elif age_hours <= 72:
+
+                    score += 20
+
+                elif age_hours <= 168:
+
+                    score += 10
+
+            except (
+                TypeError,
+                ValueError,
+                OverflowError,
+            ):
+
+                pass
 
         return score
+
+
+###############################################################################
+# SOURCE QUALITY
+###############################################################################
+
+    @staticmethod
+    def _is_quality_article(
+        article: Dict[str, Any],
+    ) -> bool:
+        """
+        Reject obvious low-quality/social-media articles.
+        """
+
+        headline = (
+            str(
+                article.get(
+                    "Headline",
+                    "",
+                )
+                or "",
+            )
+            .strip()
+        )
+
+        source = (
+            str(
+                article.get(
+                    "Source",
+                    "",
+                )
+                or "",
+            )
+            .strip()
+            .lower()
+        )
+
+        link = (
+            str(
+                article.get(
+                    "Link",
+                    "",
+                )
+                or "",
+            )
+            .strip()
+            .lower()
+        )
+
+        if not headline:
+
+            return False
+
+        #######################################################################
+        # BLOCKED SOURCES
+        #######################################################################
+
+        blocked_domains = {
+
+            "facebook.com",
+            "facebook",
+
+            "instagram.com",
+            "instagram",
+
+            "youtube.com",
+            "youtube",
+
+            "twitter.com",
+            "twitter",
+
+            "x.com",
+
+            "reddit.com",
+            "reddit",
+
+        }
+
+        for domain in blocked_domains:
+
+            if domain in source:
+
+                return False
+
+            if domain in link:
+
+                return False
+
+        return True
+
 
 ###############################################################################
 # SORT NEWS
@@ -857,6 +1326,7 @@ class GoogleNews:
         self,
         articles: List[Dict[str, str]],
         symbol: str,
+        company: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """
         Sort articles by relevance.
@@ -865,10 +1335,10 @@ class GoogleNews:
         articles.sort(
 
             key=lambda article:
-
                 self._score_article(
                     article,
                     symbol,
+                    company,
                 ),
 
             reverse=True,
@@ -877,67 +1347,79 @@ class GoogleNews:
 
         return articles
 
+
 ###############################################################################
 # BUILD NEWS OBJECT
 ###############################################################################
 
     def _prepare_news(
         self,
-        articles: List[Dict[str, str]],
-    ) -> Dict[str, object]:
+        articles: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
         """
-        Convert article list into report format.
+        Convert ranked articles into report format.
         """
 
         if not articles:
 
             return {
-
                 "Symbol": None,
-
                 "Top Headline": None,
-
                 "Headline Link": None,
-
                 "Published": None,
-
-                "Recent News": []
-
+                "Recent News": [],
             }
 
         top = articles[0]
 
-        recent = [
+        recent = []
 
-            item["Headline"]
+        for article in articles:
 
-            for item in articles[:MAX_ARTICLES]
+            headline = str(
+                article.get(
+                    "Headline",
+                    "",
+                )
+                or "",
+            ).strip()
 
-        ]
+            if not headline:
+
+                continue
+
+            if headline in recent:
+
+                continue
+
+            recent.append(
+                headline
+            )
+
+            if (
+                len(recent)
+                >= MAX_NEWS_ARTICLES
+            ):
+
+                break
 
         return {
-
             "Symbol":
-
-                top["Symbol"],
+                top.get("Symbol"),
 
             "Top Headline":
-
-                top["Headline"],
+                top.get("Headline"),
 
             "Headline Link":
-
-                top["Link"],
+                top.get("Link"),
 
             "Published":
-
-                top["Published"],
+                top.get("Published"),
 
             "Recent News":
-
                 recent,
-
         }
+        
 
 ###############################################################################
 # COMPLETE PARSER
@@ -947,27 +1429,107 @@ class GoogleNews:
         self,
         xml: str,
         symbol: str,
-    ) -> Dict[str, object]:
+        company: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
-        Complete RSS processing pipeline.
+        Complete Google News processing pipeline.
         """
+
+        #######################################################################
+        # PARSE
+        #######################################################################
 
         articles = self._parse_feed(
             xml,
             symbol,
         )
 
+        parsed_count = len(
+            articles
+        )
+
+        #######################################################################
+        # QUALITY FILTER
+        #######################################################################
+
+        articles = [
+            article
+            for article in articles
+            if self._is_quality_article(
+                article
+            )
+        ]
+
+        quality_count = len(
+            articles
+        )
+
+        #######################################################################
+        # DEDUPLICATION
+        #######################################################################
+
         articles = self._deduplicate(
             articles
         )
 
+        deduplicated_count = len(
+            articles
+        )
+
+        #######################################################################
+        # RELEVANCE RANKING
+        #######################################################################
+
         articles = self._rank_articles(
             articles,
             symbol,
+            company,
         )
 
+        #######################################################################
+        # MINIMUM RELEVANCE
+        #######################################################################
+
+        qualified_articles = []
+
+        for article in articles:
+
+            score = self._score_article(
+                article,
+                symbol,
+                company,
+            )
+
+            if (
+                score
+                >= MIN_NEWS_RELEVANCE_SCORE
+            ):
+
+                qualified_articles.append(
+                    article
+                )
+
+        #######################################################################
+        # LOGGING
+        #######################################################################
+
+        logger.info(
+            "Google News relevance : %s | "
+            "Parsed=%d | Quality=%d | "
+            "Deduplicated=%d | Qualified=%d",
+            symbol,
+            parsed_count,
+            quality_count,
+            deduplicated_count,
+            len(qualified_articles),
+        )
+
+        #######################################################################
+        # FINAL RESULT
+        #######################################################################
+
         return self._prepare_news(
-            articles
+            qualified_articles
         )
 
 
@@ -984,7 +1546,20 @@ class GoogleNews:
         Fetch Google News for a single stock.
         """
 
-        symbol = symbol.strip().upper()
+        symbol = (
+            str(
+                symbol or ""
+            )
+            .strip()
+            .upper()
+        )
+
+        company = (
+            str(
+                company or ""
+            )
+            .strip()
+        )
 
         logger.info(
             "Fetching Google News : %s",
@@ -995,18 +1570,26 @@ class GoogleNews:
         # SEARCH TERM
         #######################################################################
 
-        search_term = (
-            company
-            if company
-            else symbol
-        )
+        if company:
+
+            search_term = (
+                f'"{symbol}" OR '
+                f'"{company}"'
+            )
+
+        else:
+
+            search_term = (
+                f'"{symbol}"'
+            )
 
         #######################################################################
         # DOWNLOAD
         #######################################################################
 
         xml = self._download_feed(
-            search_term,
+            symbol=symbol,
+            search_term=search_term,
         )
 
         #######################################################################
@@ -1016,6 +1599,7 @@ class GoogleNews:
         result = self._process_feed(
             xml,
             symbol,
+            company,
         )
 
         return result
@@ -1240,6 +1824,34 @@ class GoogleNews:
             "Google News refreshed."
 
         )
+
+
+###############################################################################
+# CLOSE
+###############################################################################
+
+    def close(
+        self,
+    ) -> None:
+        """
+        Close the HTTP session and release resources.
+        """
+
+        try:
+
+            self.session.close()
+
+        except Exception as ex:
+
+            logger.exception(
+                "Google News session close failed: %s",
+                ex,
+            )
+
+        logger.info(
+            "GoogleNews closed."
+        )
+
 
 ###############################################################################
 # TESTING

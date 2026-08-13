@@ -27,15 +27,12 @@ from config.config import (
 
 from config.logging_config import logger
 
-<<<<<<< HEAD
 try:
     from nselib.capital_market import live_market_data
     NSELIB_AVAILABLE = True
 except ImportError:
     NSELIB_AVAILABLE = False
 
-=======
->>>>>>> 263a17d ("13/08/2026")
 
 ###############################################################################
 # NSE URLS

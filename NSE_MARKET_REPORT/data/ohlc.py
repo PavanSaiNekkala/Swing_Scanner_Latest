@@ -30,6 +30,11 @@ from __future__ import annotations
 import threading
 import time
 
+<<<<<<< HEAD
+=======
+from datetime import datetime
+
+>>>>>>> 263a17d ("13/08/2026")
 from typing import Any
 from typing import Dict
 from typing import List
@@ -37,12 +42,24 @@ from typing import Optional
 
 import pandas as pd
 
+<<<<<<< HEAD
 from config.logging_config import logger
 from config.timezone import now_ist
 
 from data.nse_data import NSEDataError
 
 from nselib.capital_market import price_volume_data
+=======
+from requests import Session
+
+from config.logging_config import logger
+
+from data.nse_data import (
+    NSEData,
+    NSEConnectionError,
+    NSEDataError,
+)
+>>>>>>> 263a17d ("13/08/2026")
 
 ###############################################################################
 # CONFIGURATION
@@ -170,9 +187,19 @@ class OHLCData:
 
         logger.info("Initializing OHLCData...")
 
+<<<<<<< HEAD
         self.cache = QuoteCache()
 
         self.timestamp = now_ist()
+=======
+        self.nse = NSEData()
+
+        self.session: Session = self.nse.session
+
+        self.cache = QuoteCache()
+
+        self.timestamp = datetime.now()
+>>>>>>> 263a17d ("13/08/2026")
 
         logger.info("OHLCData initialized successfully.")
 
@@ -195,27 +222,57 @@ class OHLCData:
     def _request(
         self,
         symbol: str,
+<<<<<<< HEAD
     ) -> pd.DataFrame:
         """
         Download OHLCV data using nselib.
+=======
+        timeout: int = DEFAULT_TIMEOUT,
+    ) -> Dict[str, Any]:
+        """
+        Download quote JSON for a single NSE symbol.
+
+        Features
+        --------
+        ✓ Cache lookup
+        ✓ Retry
+        ✓ Cookie refresh
+        ✓ Rate limiting
+        ✓ JSON validation
+>>>>>>> 263a17d ("13/08/2026")
 
         Parameters
         ----------
         symbol : str
+<<<<<<< HEAD
             NSE equity symbol.
 
         Returns
         -------
         pandas.DataFrame
             OHLCV data returned by nselib.
+=======
+
+        Returns
+        -------
+        dict
+>>>>>>> 263a17d ("13/08/2026")
         """
 
         symbol = symbol.strip().upper()
 
+<<<<<<< HEAD
+=======
+        # -------------------------------------------------------------
+        # Cache Lookup
+        # -------------------------------------------------------------
+
+>>>>>>> 263a17d ("13/08/2026")
         cached = self.cache.get(symbol)
 
         if cached is not None:
 
+<<<<<<< HEAD
             logger.debug(
                 "Cache hit : %s",
                 symbol,
@@ -277,10 +334,124 @@ class OHLCData:
                 f"Unable to download OHLC for {symbol}: {ex}"
             )
 
+=======
+            logger.debug("Cache hit : %s", symbol)
+
+            return cached
+
+        logger.info("Downloading quote : %s", symbol)
+
+        # -------------------------------------------------------------
+        # Retry Loop
+        # -------------------------------------------------------------
+
+        for attempt in range(1, DEFAULT_RETRIES + 1):
+
+            try:
+
+                # Small delay prevents NSE rate limiting
+                time.sleep(REQUEST_DELAY)
+
+                payload = self.nse._request(
+
+                    QUOTE_ENDPOINT,
+
+                    params={
+
+                        "symbol": symbol
+
+                    },
+
+                    timeout=timeout,
+
+                )
+
+                if not payload:
+
+                    raise NSEDataError(
+
+                        f"Empty payload received for {symbol}"
+
+                    )
+
+                if not isinstance(payload, dict):
+
+                    raise NSEDataError(
+
+                        f"Invalid JSON received for {symbol}"
+
+                    )
+
+                # Save to cache
+
+                self.cache.set(
+
+                    symbol,
+
+                    payload,
+
+                )
+
+                logger.info(
+
+                    "Quote downloaded : %s",
+
+                    symbol,
+
+                )
+
+                return payload
+
+            except NSEConnectionError:
+
+                logger.warning(
+
+                    "Retry %d/%d : %s",
+
+                    attempt,
+
+                    DEFAULT_RETRIES,
+
+                    symbol,
+
+                )
+
+                if attempt == DEFAULT_RETRIES:
+
+                    raise
+
+                time.sleep(
+
+                    DEFAULT_BACKOFF ** attempt
+
+                )
+
+            except Exception as ex:
+
+                logger.exception(ex)
+
+                if attempt == DEFAULT_RETRIES:
+
+                    raise
+
+                time.sleep(
+
+                    DEFAULT_BACKOFF ** attempt
+
+                )
+
+        raise NSEConnectionError(
+
+            f"Unable to download quote for {symbol}"
+
+        )
+
+>>>>>>> 263a17d ("13/08/2026")
     ###########################################################################
     # RAW JSON EXTRACTION
     ###########################################################################
 
+<<<<<<< HEAD
     def _download_quote(
         self,
         symbol: str,
@@ -293,11 +464,92 @@ class OHLCData:
             symbol,
         )
 
+=======
+    @staticmethod
+    def _safe_get(
+        data: Dict[str, Any],
+        *keys: str,
+        default: Any = None,
+    ) -> Any:
+        """
+        Safely retrieve nested dictionary values.
+
+        Example
+        -------
+        _safe_get(payload, "priceInfo", "lastPrice")
+        """
+
+        value: Any = data
+
+        for key in keys:
+
+            if not isinstance(value, dict):
+
+                return default
+
+            value = value.get(key)
+
+            if value is None:
+
+                return default
+
+        return value
+
+    ###########################################################################
+
+    def _download_quote(
+        self,
+        symbol: str,
+    ) -> Dict[str, Any]:
+        """
+        Returns validated quote JSON.
+        """
+
+        payload = self._request(symbol)
+
+        required_sections = [
+
+            "priceInfo",
+
+            "metadata",
+
+        ]
+
+        missing = [
+
+            section
+
+            for section in required_sections
+
+            if section not in payload
+
+        ]
+
+        if missing:
+
+            raise NSEDataError(
+
+                f"{symbol} missing sections: {missing}"
+
+            )
+
+        logger.debug(
+
+            "Quote JSON validated : %s",
+
+            symbol,
+
+        )
+
+        return payload
+
+>>>>>>> 263a17d ("13/08/2026")
 
     ###########################################################################
     # JSON PARSING
     ###########################################################################
 
+<<<<<<< HEAD
     @staticmethod
     def _parse_quote(
         payload: pd.DataFrame,
@@ -347,6 +599,118 @@ class OHLCData:
 
         return df
     
+=======
+    def _parse_quote(
+        self,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Parse NSE quote JSON into a flat dictionary.
+
+        Parameters
+        ----------
+        payload : dict
+
+        Returns
+        -------
+        dict
+        """
+
+        record = {
+
+            "Symbol": self._safe_get(
+                payload,
+                "metadata",
+                "symbol"
+            ),
+
+            "CMP": self._safe_get(
+                payload,
+                "priceInfo",
+                "lastPrice"
+            ),
+
+            "Open": self._safe_get(
+                payload,
+                "priceInfo",
+                "open"
+            ),
+
+            "High": self._safe_get(
+                payload,
+                "priceInfo",
+                "intraDayHighLow",
+                "max"
+            ),
+
+            "Low": self._safe_get(
+                payload,
+                "priceInfo",
+                "intraDayHighLow",
+                "min"
+            ),
+
+            "Close": self._safe_get(
+                payload,
+                "priceInfo",
+                "close"
+            ),
+
+            "Previous Close": self._safe_get(
+                payload,
+                "priceInfo",
+                "previousClose"
+            ),
+
+            "Volume": self._safe_get(
+                payload,
+                "securityWiseDP",
+                "quantityTraded"
+            ),
+
+            "VWAP": self._safe_get(
+                payload,
+                "priceInfo",
+                "vwap"
+            ),
+
+            "52 Week High": self._safe_get(
+                payload,
+                "priceInfo",
+                "weekHighLow",
+                "max"
+            ),
+
+            "52 Week Low": self._safe_get(
+                payload,
+                "priceInfo",
+                "weekHighLow",
+                "min"
+            ),
+
+            "Upper Circuit": self._safe_get(
+                payload,
+                "securityInfo",
+                "upperCP"
+            ),
+
+            "Lower Circuit": self._safe_get(
+                payload,
+                "securityInfo",
+                "lowerCP"
+            ),
+
+            "Face Value": self._safe_get(
+                payload,
+                "securityInfo",
+                "faceValue"
+            )
+
+        }
+
+        return record
+
+>>>>>>> 263a17d ("13/08/2026")
     ###########################################################################
     # NORMALIZATION
     ###########################################################################
@@ -491,6 +855,7 @@ class OHLCData:
 
     def _prepare_dataframe(
         self,
+<<<<<<< HEAD
         payload: pd.DataFrame,
     ) -> pd.DataFrame:
         """
@@ -528,6 +893,23 @@ class OHLCData:
         df = self._clean(
             df,
         )
+=======
+        payload: Dict[str, Any],
+    ) -> pd.DataFrame:
+        """
+        Complete processing pipeline.
+        """
+
+        record = self._parse_quote(payload)
+
+        df = self._normalize(record)
+
+        df = self._convert_numeric(df)
+
+        df = self._validate(df)
+
+        df = self._clean(df)
+>>>>>>> 263a17d ("13/08/2026")
 
         return df
 
@@ -542,6 +924,7 @@ class OHLCData:
     ) -> pd.DataFrame:
         """
         Fetch OHLC data for a single symbol.
+<<<<<<< HEAD
         """
 
         logger.info(
@@ -557,6 +940,24 @@ class OHLCData:
             payload,
         )
     
+=======
+
+        Parameters
+        ----------
+        symbol : str
+
+        Returns
+        -------
+        pandas.DataFrame
+        """
+
+        logger.info("Fetching OHLC : %s", symbol)
+
+        payload = self._download_quote(symbol)
+
+        return self._prepare_dataframe(payload)
+
+>>>>>>> 263a17d ("13/08/2026")
     ###########################################################################
 
     def _fetch_worker(
@@ -766,7 +1167,11 @@ class OHLCData:
         Refresh timestamp and clear cache.
         """
 
+<<<<<<< HEAD
         self.timestamp = now_ist()
+=======
+        self.timestamp = datetime.now()
+>>>>>>> 263a17d ("13/08/2026")
 
         self.clear_cache()
 
@@ -781,9 +1186,16 @@ class OHLCData:
         return {
             "component": "OHLCData",
             "status": "ready",
+<<<<<<< HEAD
             "provider": "nselib",
             "cache_enabled": self.cache is not None,
             "timestamp": self.timestamp.strftime(
                 "%Y-%m-%d %H:%M:%S IST"
+=======
+            "session_initialized": self.nse.cookies_initialized,
+            "cache_enabled": self.cache is not None,
+            "timestamp": self.timestamp.strftime(
+                "%Y-%m-%d %H:%M:%S"
+>>>>>>> 263a17d ("13/08/2026")
             ),
         }

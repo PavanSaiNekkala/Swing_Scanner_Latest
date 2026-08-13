@@ -30,7 +30,10 @@ from typing import Any
 from typing import Dict
 
 import pandas as pd
+<<<<<<< HEAD
 import math
+=======
+>>>>>>> 263a17d ("13/08/2026")
 
 from openpyxl import Workbook
 from openpyxl import load_workbook
@@ -43,6 +46,7 @@ from openpyxl.styles import Alignment
 
 from openpyxl.utils import get_column_letter
 
+<<<<<<< HEAD
 from config.timezone import now_ist
 
 from config.config import (
@@ -53,6 +57,22 @@ from config.config import (
     LOSER_COLOR,
     REPORT_COLUMNS,
     DATETIME_FORMAT,
+=======
+from config.config import (
+
+    OUTPUT_EXCEL,
+
+    HEADER_COLOR,
+
+    GAINER_COLOR,
+
+    LOSER_COLOR,
+
+    REPORT_COLUMNS,
+
+    DATETIME_FORMAT,
+
+>>>>>>> 263a17d ("13/08/2026")
 )
 
 from config.logging_config import logger
@@ -128,7 +148,11 @@ class ExcelExporter:
 
         self.timestamp = datetime.now()
 
+<<<<<<< HEAD
         OUTPUT_EXCEL_DIR.mkdir(
+=======
+        OUTPUT_EXCEL.mkdir(
+>>>>>>> 263a17d ("13/08/2026")
 
             parents=True,
 
@@ -156,7 +180,11 @@ class ExcelExporter:
 
         )
 
+<<<<<<< HEAD
         return OUTPUT_EXCEL_DIR / name
+=======
+        return OUTPUT_EXCEL / name
+>>>>>>> 263a17d ("13/08/2026")
 
 ###############################################################################
 # VALIDATION
@@ -735,6 +763,7 @@ class ExcelExporter:
         return output_path
     
 
+<<<<<<< HEAD
 
     def export_gainers_losers_append(
         self,
@@ -1259,6 +1288,8 @@ class ExcelExporter:
 
 
 
+=======
+>>>>>>> 263a17d ("13/08/2026")
 ###############################################################################
 # EXPORT REPORT
 ###############################################################################
@@ -1403,7 +1434,11 @@ class ExcelExporter:
 
             "output_directory": str(
 
+<<<<<<< HEAD
                 OUTPUT_EXCEL_DIR,
+=======
+                OUTPUT_EXCEL,
+>>>>>>> 263a17d ("13/08/2026")
 
             ),
 
@@ -1432,7 +1467,11 @@ class ExcelExporter:
 
             "output_directory": str(
 
+<<<<<<< HEAD
                 OUTPUT_EXCEL_DIR,
+=======
+                OUTPUT_EXCEL,
+>>>>>>> 263a17d ("13/08/2026")
 
             ),
 

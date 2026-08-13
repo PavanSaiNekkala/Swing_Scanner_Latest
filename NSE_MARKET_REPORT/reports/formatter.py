@@ -37,8 +37,11 @@ from config.config import (
 
 from config.logging_config import logger
 
+<<<<<<< HEAD
 from config.timezone import format_ist
 
+=======
+>>>>>>> 263a17d ("13/08/2026")
 ###############################################################################
 # DEFAULT VALUES
 ###############################################################################
@@ -46,6 +49,7 @@ from config.timezone import format_ist
 DEFAULT_VALUES = {
 
     "Timestamp": "",
+<<<<<<< HEAD
     "Category": "",
     "Symbol": "",
     "Company": "",
@@ -63,6 +67,43 @@ DEFAULT_VALUES = {
     "Sentiment": "",
     "Strength Score": "",
     "Risk": "",
+=======
+
+    "Category": "",
+
+    "Symbol": "",
+
+    "Company": "",
+
+    "CMP": 0.0,
+
+    "Open": 0.0,
+
+    "High": 0.0,
+
+    "Low": 0.0,
+
+    "Previous Close": 0.0,
+
+    "Close": 0.0,
+
+    "Volume": 0,
+
+    "1 Day Change %": 0.0,
+
+    "Top Headline": "",
+
+    "Recent News": "",
+
+    "AI Summary": "",
+
+    "Sentiment": "",
+
+    "Strength Score": "",
+
+    "Risk": "",
+
+>>>>>>> 263a17d ("13/08/2026")
     "Final Remarks": "",
 
 }
@@ -104,7 +145,13 @@ class ReportFormatter:
         """
 
         return self.timestamp.strftime(
+<<<<<<< HEAD
             DATETIME_FORMAT,
+=======
+
+            DATETIME_FORMAT,
+
+>>>>>>> 263a17d ("13/08/2026")
         )
 
 ###############################################################################
@@ -120,12 +167,26 @@ class ReportFormatter:
         """
 
         if not isinstance(
+<<<<<<< HEAD
             df,
             pd.DataFrame,
         ):
 
             raise TypeError(
                 "Expected pandas DataFrame."
+=======
+
+            df,
+
+            pd.DataFrame,
+
+        ):
+
+            raise TypeError(
+
+                "Expected pandas DataFrame."
+
+>>>>>>> 263a17d ("13/08/2026")
             )
 
 ###############################################################################
@@ -141,9 +202,19 @@ class ReportFormatter:
         for column in REPORT_COLUMNS:
 
             if column not in df.columns:
+<<<<<<< HEAD
                 df[column] = DEFAULT_VALUES.get(
                     column,
                     "",
+=======
+
+                df[column] = DEFAULT_VALUES.get(
+
+                    column,
+
+                    "",
+
+>>>>>>> 263a17d ("13/08/2026")
                 )
 
         return df
@@ -182,6 +253,7 @@ class ReportFormatter:
         df: pd.DataFrame,
     ) -> pd.DataFrame:
         """
+<<<<<<< HEAD
         Add current IST timestamp to every report row.
         """
 
@@ -191,6 +263,12 @@ class ReportFormatter:
         timestamp = format_ist()
 
         df["Timestamp"] = timestamp
+=======
+        Add report generation timestamp.
+        """
+
+        df["Timestamp"] = self.generated_at
+>>>>>>> 263a17d ("13/08/2026")
 
         return df
 
@@ -207,12 +285,28 @@ class ReportFormatter:
         """
 
         price_columns = [
+<<<<<<< HEAD
             "CMP",
             "Open",
             "High",
             "Low",
             "Previous Close",
             "Close",
+=======
+
+            "CMP",
+
+            "Open",
+
+            "High",
+
+            "Low",
+
+            "Previous Close",
+
+            "Close",
+
+>>>>>>> 263a17d ("13/08/2026")
         ]
 
         for column in price_columns:
@@ -226,11 +320,23 @@ class ReportFormatter:
                 pd.to_numeric(
 
                     df[column],
+<<<<<<< HEAD
                     errors="coerce",
 
                 )
                 .fillna(0)
                 .round(2)
+=======
+
+                    errors="coerce",
+
+                )
+
+                .fillna(0)
+
+                .round(2)
+
+>>>>>>> 263a17d ("13/08/2026")
             )
 
         return df
@@ -254,11 +360,23 @@ class ReportFormatter:
                 pd.to_numeric(
 
                     df["1 Day Change %"],
+<<<<<<< HEAD
                     errors="coerce",
 
                 )
                 .fillna(0)
                 .round(2)
+=======
+
+                    errors="coerce",
+
+                )
+
+                .fillna(0)
+
+                .round(2)
+
+>>>>>>> 263a17d ("13/08/2026")
             )
 
         return df
@@ -284,12 +402,22 @@ class ReportFormatter:
             pd.to_numeric(
 
                 df["Volume"],
+<<<<<<< HEAD
+=======
+
+>>>>>>> 263a17d ("13/08/2026")
                 errors="coerce",
 
             )
 
             .fillna(0)
+<<<<<<< HEAD
             .astype("int64")
+=======
+
+            .astype("int64")
+
+>>>>>>> 263a17d ("13/08/2026")
         )
 
         return df
@@ -315,7 +443,13 @@ class ReportFormatter:
             pd.to_numeric(
 
                 df["Strength Score"],
+<<<<<<< HEAD
                 errors="coerce",
+=======
+
+                errors="coerce",
+
+>>>>>>> 263a17d ("13/08/2026")
             )
 
             .fillna(0)
@@ -323,10 +457,20 @@ class ReportFormatter:
             .clip(
 
                 lower=0,
+<<<<<<< HEAD
                 upper=100,
 
             )
             .astype(int)
+=======
+
+                upper=100,
+
+            )
+
+            .astype(int)
+
+>>>>>>> 263a17d ("13/08/2026")
         )
 
         return df
@@ -420,6 +564,7 @@ class ReportFormatter:
 # SORT REPORT
 ###############################################################################
 
+<<<<<<< HEAD
     def sort_report(
         self,
         df: pd.DataFrame,
@@ -494,6 +639,55 @@ class ReportFormatter:
         )
 
         return df
+=======
+    @staticmethod
+    def sort_report(
+        df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Sort report by category and percentage change.
+
+        Gainers:
+            Highest % change first
+
+        Losers:
+            Lowest % change first
+        """
+
+        if (
+            "Category" not in df.columns
+            or "1 Day Change %" not in df.columns
+        ):
+            return df
+
+        gainers = df[
+            df["Category"].str.lower() == "gainer"
+        ].sort_values(
+            by="1 Day Change %",
+            ascending=False,
+        )
+
+        losers = df[
+            df["Category"].str.lower() == "loser"
+        ].sort_values(
+            by="1 Day Change %",
+            ascending=True,
+        )
+
+        return pd.concat(
+
+            [
+
+                gainers,
+
+                losers,
+
+            ],
+
+            ignore_index=True,
+
+        )
+>>>>>>> 263a17d ("13/08/2026")
 
 ###############################################################################
 # PREPARE REPORT
@@ -523,6 +717,7 @@ class ReportFormatter:
         """
 
         logger.info(
+<<<<<<< HEAD
             "[FORMATTER] Preparing report..."
         )
 
@@ -631,6 +826,89 @@ class ReportFormatter:
 
         logger.info(
             "[FORMATTER] Report ready."
+=======
+
+            "[FORMATTER] Preparing report..."
+
+        )
+
+        self.validate_dataframe(
+
+            report_df,
+
+        )
+
+        df = self.copy_dataframe(
+
+            report_df,
+
+        )
+
+        df = self.ensure_columns(
+
+            df,
+
+        )
+
+        df = self.fill_missing_values(
+
+            df,
+
+        )
+
+        df = self.add_timestamp(
+
+            df,
+
+        )
+
+        df = self.format_prices(
+
+            df,
+
+        )
+
+        df = self.format_percentages(
+
+            df,
+
+        )
+
+        df = self.format_volume(
+
+            df,
+
+        )
+
+        df = self.format_strength_score(
+
+            df,
+
+        )
+
+        df = self.clean_text(
+
+            df,
+
+        )
+
+        df = self.sort_report(
+
+            df,
+
+        )
+
+        df = self.reorder_columns(
+
+            df,
+
+        )
+
+        logger.info(
+
+            "[FORMATTER] Report ready."
+
+>>>>>>> 263a17d ("13/08/2026")
         )
 
         return df

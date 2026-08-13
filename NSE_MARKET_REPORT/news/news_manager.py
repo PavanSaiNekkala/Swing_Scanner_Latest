@@ -27,8 +27,11 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
 
 from datetime import datetime
+<<<<<<< HEAD
 from datetime import timedelta
 from datetime import timezone
+=======
+>>>>>>> 263a17d ("13/08/2026")
 
 from typing import Any
 from typing import Dict
@@ -42,11 +45,14 @@ from config.config import (
     ENABLED_NEWS_PROVIDERS,
 )
 
+<<<<<<< HEAD
 from config.timezone import (
     IST,
     now_ist,
 )
 
+=======
+>>>>>>> 263a17d ("13/08/2026")
 from config.logging_config import logger
 
 from news.google_news import GoogleNews
@@ -139,7 +145,11 @@ class NewsManager:
 
         )
 
+<<<<<<< HEAD
         self.timestamp = now_ist()
+=======
+        self.timestamp = datetime.now()
+>>>>>>> 263a17d ("13/08/2026")
 
         self.providers = self._load_providers()
 
@@ -228,7 +238,11 @@ class NewsManager:
         Refresh all providers.
         """
 
+<<<<<<< HEAD
         self.timestamp = now_ist()
+=======
+        self.timestamp = datetime.now()
+>>>>>>> 263a17d ("13/08/2026")
 
         for provider in self.providers:
 
@@ -554,6 +568,7 @@ class NewsManager:
 
         return articles
 
+<<<<<<< HEAD
 
 ###############################################################################
 # 15 DAYS FILTER
@@ -655,6 +670,8 @@ class NewsManager:
 
 
 
+=======
+>>>>>>> 263a17d ("13/08/2026")
 ###############################################################################
 # REMOVE DUPLICATE ARTICLES
 ###############################################################################
@@ -679,6 +696,7 @@ class NewsManager:
 
             key = (
 
+<<<<<<< HEAD
                 str(
                     article.get("Headline") or ""
                 ).strip().lower(),
@@ -686,6 +704,11 @@ class NewsManager:
                 str(
                     article.get("Headline Link") or ""
                 ).strip(),
+=======
+                article.get("Headline", "").strip().lower(),
+
+                article.get("Headline Link", "").strip(),
+>>>>>>> 263a17d ("13/08/2026")
 
             )
 
@@ -709,14 +732,18 @@ class NewsManager:
     ) -> int:
         """
         Calculate a unified relevance score.
+<<<<<<< HEAD
 
         All text inputs are normalized to strings so that
         missing/None provider fields cannot cause .lower()
         failures.
+=======
+>>>>>>> 263a17d ("13/08/2026")
         """
 
         score = 0
 
+<<<<<<< HEAD
         symbol_text = str(
             symbol or ""
         ).strip().lower()
@@ -740,6 +767,33 @@ class NewsManager:
             score += 20
 
         KEYWORDS = {
+=======
+        symbol = symbol.lower()
+
+        headline = article.get(
+            "Headline",
+            "",
+        ).lower()
+
+        description = article.get(
+            "Description",
+            "",
+        ).lower()
+
+        provider = article.get(
+            "Provider",
+            "",
+        )
+
+        if symbol in headline:
+            score += 40
+
+        if symbol in description:
+            score += 20
+
+        KEYWORDS = {
+
+>>>>>>> 263a17d ("13/08/2026")
             "results": 25,
             "earnings": 25,
             "profit": 20,
@@ -757,6 +811,10 @@ class NewsManager:
             "share": 8,
             "nse": 6,
             "bse": 6,
+<<<<<<< HEAD
+=======
+
+>>>>>>> 263a17d ("13/08/2026")
         }
 
         text = f"{headline} {description}"
@@ -764,7 +822,10 @@ class NewsManager:
         for word, weight in KEYWORDS.items():
 
             if word in text:
+<<<<<<< HEAD
 
+=======
+>>>>>>> 263a17d ("13/08/2026")
                 score += weight
 
         if provider == "GoogleNews":
@@ -911,6 +972,7 @@ class NewsManager:
         """
 
         articles = self._flatten(
+<<<<<<< HEAD
             provider_results,
         )
 
@@ -933,6 +995,25 @@ class NewsManager:
         articles = self._rank_articles(
             articles,
             symbol,
+=======
+
+            provider_results,
+
+        )
+
+        articles = self._deduplicate(
+
+            articles,
+
+        )
+
+        articles = self._rank_articles(
+
+            articles,
+
+            symbol,
+
+>>>>>>> 263a17d ("13/08/2026")
         )
 
         return self._build_news(

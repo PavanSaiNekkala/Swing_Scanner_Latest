@@ -24,6 +24,7 @@ load_dotenv()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 OUTPUT_DIR = PROJECT_ROOT / "output"
+<<<<<<< HEAD
 
 OUTPUT_EXCEL_DIR = OUTPUT_DIR / "excel"
 OUTPUT_CSV = OUTPUT_DIR / "csv"
@@ -33,13 +34,22 @@ OUTPUT_EXCEL = (
     / "NSE_Market_Report.xlsx"
 )
 
+=======
+OUTPUT_EXCEL = OUTPUT_DIR / "excel"
+OUTPUT_CSV = OUTPUT_DIR / "csv"
+
+>>>>>>> 263a17d ("13/08/2026")
 LOG_DIR = PROJECT_ROOT / "logs"
 CACHE_DIR = PROJECT_ROOT / "cache"
 
 # Create required directories
 
 for directory in (
+<<<<<<< HEAD
     OUTPUT_EXCEL_DIR,
+=======
+    OUTPUT_EXCEL,
+>>>>>>> 263a17d ("13/08/2026")
     OUTPUT_CSV,
     LOG_DIR,
     CACHE_DIR,

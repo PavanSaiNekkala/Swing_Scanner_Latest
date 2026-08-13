@@ -233,11 +233,15 @@ class AIRemarks:
 
             "timestamp": self.timestamp,
 
+<<<<<<< HEAD
             "status": (
                 "ready"
                 if self.model is not None
                 else "disabled"
             ),
+=======
+            "status": "ready",
+>>>>>>> 263a17d ("13/08/2026")
 
         }
 
@@ -333,8 +337,13 @@ class AIRemarks:
 
         if self.model is None:
 
+<<<<<<< HEAD
             raise AIConnectionError(
                 "Gemini API key not configured."
+=======
+            raise AIRemarkError(
+                "Gemini model is not initialized."
+>>>>>>> 263a17d ("13/08/2026")
             )
         
         last_exception = None
@@ -620,13 +629,24 @@ class AIRemarks:
         """
         Generate AI remarks for multiple stocks.
 
+<<<<<<< HEAD
         If the AI model is unavailable, return fallback remarks
         immediately without creating unnecessary model requests.
+=======
+        Parameters
+        ----------
+        stocks : List[dict]
+
+        Returns
+        -------
+        DataFrame
+>>>>>>> 263a17d ("13/08/2026")
         """
 
         if not stocks:
 
             return pd.DataFrame(
+<<<<<<< HEAD
                 columns=OUTPUT_COLUMNS,
             )
 
@@ -667,6 +687,21 @@ class AIRemarks:
         # PARALLEL AI GENERATION
         #######################################################################
 
+=======
+
+                columns=OUTPUT_COLUMNS,
+
+            )
+
+        logger.info(
+
+            "[REMARKS] Processing %d stocks.",
+
+            len(stocks),
+
+        )
+
+>>>>>>> 263a17d ("13/08/2026")
         rows: List[Dict[str, Any]] = []
 
         from concurrent.futures import (
@@ -675,6 +710,7 @@ class AIRemarks:
         )
 
         with ThreadPoolExecutor(
+<<<<<<< HEAD
             max_workers=MAX_WORKERS,
         ) as executor:
 
@@ -688,6 +724,31 @@ class AIRemarks:
 
             for future in as_completed(
                 futures,
+=======
+
+            max_workers=MAX_WORKERS,
+
+        ) as executor:
+
+            futures = {
+
+                executor.submit(
+
+                    self._generate_worker,
+
+                    stock,
+
+                ): stock.get("Symbol")
+
+                for stock in stocks
+
+            }
+
+            for future in as_completed(
+
+                futures,
+
+>>>>>>> 263a17d ("13/08/2026")
             ):
 
                 symbol = futures[future]
@@ -695,11 +756,18 @@ class AIRemarks:
                 try:
 
                     rows.append(
+<<<<<<< HEAD
                         future.result()
+=======
+
+                        future.result()
+
+>>>>>>> 263a17d ("13/08/2026")
                     )
 
                 except Exception as ex:
 
+<<<<<<< HEAD
                     logger.error(
                         "[REMARKS] Failed for %s: %s",
                         symbol,
@@ -741,6 +809,68 @@ class AIRemarks:
         logger.info(
             "[REMARKS] Completed for %d stocks.",
             len(df),
+=======
+                    logger.exception(
+
+                        "[REMARKS] %s : %s",
+
+                        symbol,
+
+                        ex,
+
+                    )
+
+                    rows.append(
+
+                        {
+
+                            "Symbol": symbol,
+
+                            "Sentiment": "Unknown",
+
+                            "Strength Score": None,
+
+                            "Risk": "Unknown",
+
+                            "Final Remarks":
+
+                                "Unable to generate AI remarks.",
+
+                        }
+
+                    )
+
+        df = pd.DataFrame(
+
+            rows,
+
+            columns=OUTPUT_COLUMNS,
+
+        )
+
+        df.sort_values(
+
+            by="Symbol",
+
+            inplace=True,
+
+        )
+
+        df.reset_index(
+
+            drop=True,
+
+            inplace=True,
+
+        )
+
+        logger.info(
+
+            "[REMARKS] Completed for %d stocks.",
+
+            len(df),
+
+>>>>>>> 263a17d ("13/08/2026")
         )
 
         return df
@@ -899,6 +1029,7 @@ class AIRemarks:
         """
 
         return {
+<<<<<<< HEAD
             "provider": self.provider,
             "model": MODEL_NAME,
             "timestamp": self.timestamp,
@@ -907,6 +1038,21 @@ class AIRemarks:
                 if self.model is not None
                 else "disabled"
             ),
+=======
+
+            "provider": self.provider,
+
+            "model": MODEL_NAME,
+
+            "temperature": TEMPERATURE,
+
+            "max_tokens": MAX_TOKENS,
+
+            "timestamp": self.timestamp,
+
+            "status": "ready",
+
+>>>>>>> 263a17d ("13/08/2026")
         }
 
 ###############################################################################

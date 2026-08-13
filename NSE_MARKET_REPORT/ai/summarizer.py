@@ -702,7 +702,10 @@ class AISummarizer:
 
         return merged
 
+<<<<<<< HEAD
     
+=======
+>>>>>>> 263a17d ("13/08/2026")
 ###############################################################################
 # STATISTICS
 ###############################################################################
@@ -723,6 +726,7 @@ class AISummarizer:
         dict
         """
 
+<<<<<<< HEAD
         if summary_df is None:
 
             return {
@@ -800,6 +804,42 @@ class AISummarizer:
                 if self.model is not None
                 else "disabled"
             ),
+=======
+        if summary_df.empty:
+
+            return {
+
+                "total": 0,
+
+                "generated": 0,
+
+                "failed": 0,
+
+                "provider": self.provider,
+
+                "model": MODEL_NAME,
+
+            }
+
+        failed = summary_df["AI Summary"].str.contains(
+            "unavailable",
+            case=False,
+            na=False,
+        ).sum()
+
+        return {
+
+            "total": len(summary_df),
+
+            "generated": len(summary_df) - failed,
+
+            "failed": failed,
+
+            "provider": self.provider,
+
+            "model": MODEL_NAME,
+
+>>>>>>> 263a17d ("13/08/2026")
         }
 
 ###############################################################################

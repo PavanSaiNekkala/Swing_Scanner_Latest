@@ -16,7 +16,8 @@ from config.config import (
 from config.logging_config import logger
 
 NSELIB_GAINERS = "gainers"
-NSELIB_LOSERS = "loosers"  # nselib's expected spelling
+NSELIB_LOSERS = "loosers"
+NSELIB_ALL_SECURITIES = "allSec"
 
 
 class NSELibProvider:
@@ -223,15 +224,18 @@ class NSELibProvider:
 
         return df
 
-    ###########################################################################
-    # TOP GAINERS
-    ###########################################################################
+    ###############################################################################
+    # TOP NSE-WIDE GAINERS
+    ###############################################################################
 
     def fetch_top_gainers(
         self,
     ) -> pd.DataFrame:
         """
-        Return Top NSE Gainers.
+        Return Top NSE-Wide Gainers.
+
+        Uses nselib's `allSec` section to identify
+        NSE-wide gainers rather than an index-specific section.
         """
 
         try:
@@ -243,7 +247,7 @@ class NSELibProvider:
         except Exception as ex:
 
             logger.exception(
-                "[NSELIB] Failed to fetch gainers: %s",
+                "[NSELIB] Failed to fetch NSE-wide gainers: %s",
                 ex,
             )
 
@@ -264,13 +268,15 @@ class NSELibProvider:
 
             try:
 
-                data = pd.DataFrame(data)
+                data = pd.DataFrame(
+                    data
+                )
 
             except Exception as ex:
 
                 logger.exception(
-                    "[NSELIB] Unable to convert gainers "
-                    "response to DataFrame: %s",
+                    "[NSELIB] Unable to convert "
+                    "gainers response: %s",
                     ex,
                 )
 
@@ -284,9 +290,88 @@ class NSELibProvider:
 
             return pd.DataFrame()
 
+        #######################################################################
+        # FILTER NSE-WIDE ALL-SECURITIES SECTION
+        #######################################################################
+
+        if "legend" not in data.columns:
+
+            logger.error(
+                "[NSELIB] Gainers response does not "
+                "contain 'legend' column."
+            )
+
+            return pd.DataFrame()
+
+        data["legend"] = (
+            data["legend"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+
+        data = data.loc[
+            data["legend"].eq(
+                NSELIB_ALL_SECURITIES.lower()
+            )
+        ].copy()
+
+        if data.empty:
+
+            logger.warning(
+                "[NSELIB] NSE-wide gainers section "
+                "'allSec' returned no rows."
+            )
+
+            return pd.DataFrame()
+
+        #######################################################################
+        # NUMERIC CHANGE
+        #######################################################################
+
+        data["perChange"] = pd.to_numeric(
+            data["perChange"],
+            errors="coerce",
+        )
+
+        data = data.dropna(
+            subset=["perChange"]
+        )
+
+        #######################################################################
+        # SORT NSE-WIDE GAINERS
+        #######################################################################
+
+        data.sort_values(
+            by=[
+                "perChange",
+                "symbol",
+            ],
+            ascending=[
+                False,
+                True,
+            ],
+            inplace=True,
+            kind="stable",
+        )
+
+        #######################################################################
+        # REMOVE DUPLICATE SYMBOLS
+        #######################################################################
+
+        data.drop_duplicates(
+            subset=["symbol"],
+            keep="first",
+            inplace=True,
+        )
+
+        #######################################################################
+        # TOP N
+        #######################################################################
+
         data = data.head(
             TOP_GAINERS_COUNT
-        )
+        ).copy()
 
         data = self._normalize(
             data
@@ -295,24 +380,35 @@ class NSELibProvider:
         if data.empty:
 
             logger.warning(
-                "[NSELIB] Normalized gainers dataframe is empty."
+                "[NSELIB] Normalized NSE-wide "
+                "gainers dataframe is empty."
             )
 
             return pd.DataFrame()
 
         data["Category"] = "Gainer"
 
+        logger.info(
+            "[NSELIB] NSE-wide gainers selected=%d | "
+            "MaxChange=%.2f%% | MinChange=%.2f%%",
+            len(data),
+            data["1 Day Change %"].max(),
+            data["1 Day Change %"].min(),
+        )
+
         return data
 
-    ###########################################################################
-    # TOP LOSERS
-    ###########################################################################
+    ###############################################################################
+    # TOP NSE-WIDE LOSERS
+    ###############################################################################
 
     def fetch_top_losers(
         self,
     ) -> pd.DataFrame:
         """
-        Return Top NSE Losers.
+        Return Top NSE-Wide Losers.
+
+        Uses nselib's `allSec` section.
         """
 
         try:
@@ -324,7 +420,7 @@ class NSELibProvider:
         except Exception as ex:
 
             logger.exception(
-                "[NSELIB] Failed to fetch losers: %s",
+                "[NSELIB] Failed to fetch NSE-wide losers: %s",
                 ex,
             )
 
@@ -345,13 +441,15 @@ class NSELibProvider:
 
             try:
 
-                data = pd.DataFrame(data)
+                data = pd.DataFrame(
+                    data
+                )
 
             except Exception as ex:
 
                 logger.exception(
-                    "[NSELIB] Unable to convert losers "
-                    "response to DataFrame: %s",
+                    "[NSELIB] Unable to convert "
+                    "losers response: %s",
                     ex,
                 )
 
@@ -365,9 +463,88 @@ class NSELibProvider:
 
             return pd.DataFrame()
 
+        #######################################################################
+        # FILTER NSE-WIDE ALL-SECURITIES SECTION
+        #######################################################################
+
+        if "legend" not in data.columns:
+
+            logger.error(
+                "[NSELIB] Losers response does not "
+                "contain 'legend' column."
+            )
+
+            return pd.DataFrame()
+
+        data["legend"] = (
+            data["legend"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+
+        data = data.loc[
+            data["legend"].eq(
+                NSELIB_ALL_SECURITIES.lower()
+            )
+        ].copy()
+
+        if data.empty:
+
+            logger.warning(
+                "[NSELIB] NSE-wide losers section "
+                "'allSec' returned no rows."
+            )
+
+            return pd.DataFrame()
+
+        #######################################################################
+        # NUMERIC CHANGE
+        #######################################################################
+
+        data["perChange"] = pd.to_numeric(
+            data["perChange"],
+            errors="coerce",
+        )
+
+        data = data.dropna(
+            subset=["perChange"]
+        )
+
+        #######################################################################
+        # SORT NSE-WIDE LOSERS
+        #######################################################################
+
+        data.sort_values(
+            by=[
+                "perChange",
+                "symbol",
+            ],
+            ascending=[
+                True,
+                True,
+            ],
+            inplace=True,
+            kind="stable",
+        )
+
+        #######################################################################
+        # REMOVE DUPLICATE SYMBOLS
+        #######################################################################
+
+        data.drop_duplicates(
+            subset=["symbol"],
+            keep="first",
+            inplace=True,
+        )
+
+        #######################################################################
+        # TOP N
+        #######################################################################
+
         data = data.head(
             TOP_LOSERS_COUNT
-        )
+        ).copy()
 
         data = self._normalize(
             data
@@ -376,12 +553,18 @@ class NSELibProvider:
         if data.empty:
 
             logger.warning(
-                "[NSELIB] Normalized losers dataframe is empty."
+                "[NSELIB] Normalized NSE-wide "
+                "losers dataframe is empty."
             )
 
             return pd.DataFrame()
 
         data["Category"] = "Loser"
+
+        logger.info(
+            "[NSELIB] NSE-wide losers selected=%d",
+            len(data),
+        )
 
         return data
 
@@ -411,11 +594,29 @@ class NSELibProvider:
         if report.empty:
             return pd.DataFrame()
 
+        before_dedup = len(
+            report
+        )
+
         report.drop_duplicates(
             subset=["Symbol"],
+            keep="first",
             inplace=True,
         )
 
+        duplicates_removed = (
+            before_dedup
+            - len(report)
+        )
+
+        if duplicates_removed:
+
+            logger.warning(
+                "[NSELIB] Duplicate symbols removed "
+                "from combined market report=%d",
+                duplicates_removed,
+            )
+            
         report.reset_index(
             drop=True,
             inplace=True,

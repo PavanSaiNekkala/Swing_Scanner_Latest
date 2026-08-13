@@ -65,8 +65,8 @@ MARKET = "NSE"
 
 TIMEZONE = "Asia/Kolkata"
 
-TOP_GAINERS_COUNT = 20
-TOP_LOSERS_COUNT = 20
+TOP_GAINERS_COUNT = 30
+TOP_LOSERS_COUNT = 30
 
 # =============================================================================
 # NETWORK SETTINGS

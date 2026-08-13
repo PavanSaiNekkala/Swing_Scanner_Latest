@@ -23,15 +23,20 @@ Author      : Your Name
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
 
 from datetime import datetime
 <<<<<<< HEAD
 from datetime import timedelta
+<<<<<<< HEAD
 from datetime import timezone
 =======
 >>>>>>> 263a17d ("13/08/2026")
+=======
+>>>>>>> 59d6ab5 ("13/08/2026")
 
 from typing import Any
 from typing import Dict
@@ -43,6 +48,8 @@ import pandas as pd
 from config.config import (
     MAX_WORKERS,
     ENABLED_NEWS_PROVIDERS,
+    NEWS_LOOKBACK_DAYS,
+    MARKETAUX_API_KEY,
 )
 
 <<<<<<< HEAD
@@ -56,6 +63,8 @@ from config.timezone import (
 from config.logging_config import logger
 
 from news.google_news import GoogleNews
+
+from news.marketaux_news import MarketauxNews
 
 from news.news_api import NewsAPIClient
 
@@ -140,9 +149,7 @@ class NewsManager:
     def __init__(self):
 
         logger.info(
-
             "[NEWS MANAGER] Initializing..."
-
         )
 
 <<<<<<< HEAD
@@ -151,14 +158,42 @@ class NewsManager:
         self.timestamp = datetime.now()
 >>>>>>> 263a17d ("13/08/2026")
 
+        #######################################################################
+        # NORMAL MARKET-REPORT PROVIDERS
+        #######################################################################
+
         self.providers = self._load_providers()
 
+        #######################################################################
+        # FULL NEWS UNIVERSE PROVIDER
+        #######################################################################
+
+        self.universe_provider = None
+
+        try:
+
+            self.universe_provider = MarketauxNews(
+                MARKETAUX_API_KEY
+            )
+
+            logger.info(
+                "[NEWS MANAGER] "
+                "Marketaux universe provider enabled."
+            )
+
+        except Exception as ex:
+
+            logger.exception(
+                "[NEWS MANAGER] "
+                "Marketaux initialization failed: %s",
+                ex,
+            )
+
+            self.universe_provider = None
+
         logger.info(
-
             "[NEWS MANAGER] %d provider(s) loaded.",
-
             len(self.providers),
-
         )
 
     ###########################################################################
@@ -978,16 +1013,18 @@ class NewsManager:
 
         articles = self._filter_recent_articles(
             articles,
-            days=15,
+            days=NEWS_LOOKBACK_DAYS,
         )
 
         logger.info(
             "[NEWS MANAGER] %s | "
-            "Articles within last 15 days: %d",
+            "Articles within last %d days: %d",
             symbol,
+            NEWS_LOOKBACK_DAYS,
             len(articles),
         )
-        
+
+       
         articles = self._deduplicate(
             articles,
         )
@@ -1024,6 +1061,233 @@ class NewsManager:
 
         )
 
+    
+
+    def load_news_universe(
+        self,
+        csv_path: Path,
+    ) -> List[Dict[str, str]]:
+        """
+        Load the full news-scanning universe from CSV.
+        """
+
+        if not csv_path.exists():
+
+            raise FileNotFoundError(
+                f"News universe file not found: {csv_path}"
+            )
+
+        df = pd.read_csv(
+            csv_path
+        )
+
+        symbol_column = next(
+            (
+                column
+                for column in (
+                    "Symbol",
+                    "SYMBOL",
+                    "Ticker",
+                    "TICKER",
+                    "symbol",
+                    "ticker",
+                )
+                if column in df.columns
+            ),
+            None,
+        )
+
+        if symbol_column is None:
+
+            raise ValueError(
+                "News universe CSV must contain "
+                "Symbol or Ticker column."
+            )
+
+        company_column = next(
+            (
+                column
+                for column in (
+                    "Company",
+                    "COMPANY",
+                    "Company Name",
+                    "company",
+                    "company_name",
+                )
+                if column in df.columns
+            ),
+            None,
+        )
+
+        stocks: list[Dict[str, str]] = []
+
+        for _, row in df.iterrows():
+
+            symbol = str(
+                row.get(symbol_column, "")
+            ).strip().upper()
+
+            if not symbol:
+                continue
+
+            if symbol == "NAN":
+                continue
+
+            company = ""
+
+            if company_column:
+
+                company = str(
+                    row.get(
+                        company_column,
+                        "",
+                    )
+                ).strip()
+
+                if company.lower() == "nan":
+                    company = ""
+
+            stocks.append(
+                {
+                    "Symbol": symbol,
+                    "Company": company,
+                }
+            )
+
+        #######################################################################
+        # DEDUP SYMBOLS
+        #######################################################################
+
+        before_deduplication = len(
+            stocks
+        )
+
+        unique: Dict[
+            str,
+            Dict[str, str],
+        ] = {}
+
+        for stock in stocks:
+
+            symbol = stock["Symbol"]
+
+            if symbol in unique:
+
+                logger.debug(
+                    "[NEWS UNIVERSE] "
+                    "Duplicate symbol ignored: %s",
+                    symbol,
+                )
+
+            unique[
+                symbol
+            ] = stock
+
+        stocks = list(
+            unique.values()
+        )
+
+        duplicates_removed = (
+            before_deduplication
+            - len(stocks)
+        )
+
+        logger.info(
+            "[NEWS UNIVERSE] "
+            "Loaded=%d | Unique=%d | "
+            "DuplicatesRemoved=%d | File=%s",
+            before_deduplication,
+            len(stocks),
+            duplicates_removed,
+            csv_path,
+        )
+
+        return stocks
+
+
+
+    def scan_news_universe(
+        self,
+        csv_path: Path,
+    ) -> pd.DataFrame:
+        """
+        Scan the full CSV universe using Marketaux.
+
+        Google News remains the provider for the normal
+        40-stock market report.
+        """
+
+        stocks = self.load_news_universe(
+            csv_path
+        )
+
+        if not stocks:
+
+            logger.warning(
+                "[NEWS UNIVERSE] "
+                "No valid symbols found."
+            )
+
+            return pd.DataFrame()
+
+        if self.universe_provider is None:
+
+            logger.error(
+                "[NEWS UNIVERSE] "
+                "Marketaux provider unavailable."
+            )
+
+            return pd.DataFrame()
+
+        logger.info(
+            "[NEWS UNIVERSE] "
+            "Starting Marketaux scan for %d symbols.",
+            len(stocks),
+        )
+
+        rows = (
+            self.universe_provider.fetch_many(
+                stocks
+            )
+        )
+
+        if not rows:
+
+            logger.warning(
+                "[NEWS UNIVERSE] "
+                "Marketaux returned no data."
+            )
+
+            return pd.DataFrame()
+
+        news_df = pd.DataFrame(
+            rows
+        )
+
+        news_df.sort_values(
+            by="Symbol",
+            inplace=True,
+        )
+
+        news_df.reset_index(
+            drop=True,
+            inplace=True,
+        )
+
+        logger.info(
+            "[NEWS UNIVERSE] "
+            "Completed Marketaux scan | "
+            "Symbols=%d",
+            len(news_df),
+        )
+
+        return news_df
+    
+
+###############################################################################
+# PUBLIC API
+###############################################################################
+
 ###############################################################################
 # PUBLIC API
 ###############################################################################
@@ -1034,144 +1298,119 @@ class NewsManager:
         company: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Fetch news for a single stock from all configured providers.
+        Fetch and process news for one stock
+        using all configured market-report providers.
         """
 
-        logger.info(
-
-            "[NEWS MANAGER] Fetching news for %s",
-
-            symbol,
-
+        symbol = (
+            str(symbol)
+            .strip()
+            .upper()
         )
 
-        provider_results = self._collect_news(
+        if not symbol:
+            raise ValueError(
+                "Symbol cannot be empty."
+            )
 
-            symbol,
-
-            company,
-
+        provider_results = (
+            self._collect_news(
+                symbol,
+                company,
+            )
         )
 
         return self._process_news(
-
             symbol,
-
             provider_results,
-
         )
-
-###############################################################################
 
     def fetch_many(
         self,
         stocks: List[Dict[str, str]],
     ) -> pd.DataFrame:
         """
-        Fetch news for multiple stocks.
-
-        Parameters
-        ----------
-        stocks
-
-        Example
-        -------
-        [
-            {
-                "Symbol": "RELIANCE",
-                "Company": "Reliance Industries"
-            }
-        ]
+        Fetch and process news for multiple stocks.
         """
 
         if not stocks:
 
-            return pd.DataFrame(columns=OUTPUT_COLUMNS)
+            return pd.DataFrame(
+                columns=OUTPUT_COLUMNS
+            )
 
-        rows: List[Dict[str, Any]] = []
-
-        logger.info(
-
-            "[NEWS MANAGER] Fetching news for %d stocks.",
-
-            len(stocks),
-
+        news_map = (
+            self._collect_news_many(
+                stocks
+            )
         )
 
-        with ThreadPoolExecutor(
+        rows: List[
+            Dict[str, Any]
+        ] = []
 
-            max_workers=MAX_WORKERS,
+        for stock in stocks:
 
-        ) as executor:
-
-            futures = {
-
-                executor.submit(
-
-                    self.fetch,
-
-                    stock["Symbol"],
-
-                    stock.get("Company"),
-
-                ): stock["Symbol"]
-
-                for stock in stocks
-
-            }
-
-            for future in as_completed(futures):
-
-                symbol = futures[future]
-
-                try:
-
-                    result = future.result()
-
-                    if result:
-
-                        rows.append(result)
-
-                except Exception as ex:
-
-                    logger.exception(
-
-                        "[NEWS MANAGER] %s : %s",
-
-                        symbol,
-
-                        ex,
-
+            symbol = (
+                str(
+                    stock.get(
+                        "Symbol",
+                        "",
                     )
+                )
+                .strip()
+                .upper()
+            )
+
+            if not symbol:
+                continue
+
+            provider_results = (
+                news_map.get(
+                    symbol,
+                    [],
+                )
+            )
+
+            result = self._process_news(
+                symbol,
+                provider_results,
+            )
+
+            rows.append(
+                result
+            )
 
         if not rows:
 
-            return pd.DataFrame(columns=OUTPUT_COLUMNS)
+            return pd.DataFrame(
+                columns=OUTPUT_COLUMNS
+            )
 
-        df = pd.DataFrame(rows)
+        df = pd.DataFrame(
+            rows
+        )
+
+        df.drop_duplicates(
+            subset=["Symbol"],
+            keep="first",
+            inplace=True,
+        )
 
         df.sort_values(
-
             by="Symbol",
-
             inplace=True,
-
         )
 
         df.reset_index(
-
             drop=True,
-
             inplace=True,
-
         )
 
         logger.info(
-
-            "[NEWS MANAGER] Completed for %d stocks.",
-
+            "[NEWS MANAGER] "
+            "Completed news processing for %d stocks.",
             len(df),
-
         )
 
         return df
@@ -1251,6 +1490,59 @@ class NewsManager:
         )
 
         return merged
+
+
+###############################################################################
+# CLOSE
+###############################################################################
+
+    def close(
+        self,
+    ) -> None:
+        """
+        Close all configured news providers.
+        """
+
+        for provider in self.providers:
+
+            try:
+
+                close_method = getattr(
+                    provider,
+                    "close",
+                    None,
+                )
+
+                if callable(close_method):
+
+                    close_method()
+
+            except Exception as ex:
+
+                logger.exception(
+                    "[NEWS MANAGER] "
+                    "Failed to close %s: %s",
+                    provider.__class__.__name__,
+                    ex,
+                )
+
+        logger.info(
+            "[NEWS MANAGER] Closed."
+        )
+
+        if self.universe_provider is not None:
+
+            try:
+
+                self.universe_provider.close()
+
+            except Exception as ex:
+
+                logger.exception(
+                    "[NEWS MANAGER] "
+                    "Failed to close Marketaux: %s",
+                    ex,
+                )
 
 ###############################################################################
 

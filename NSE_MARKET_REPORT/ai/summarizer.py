@@ -46,6 +46,10 @@ from config.config import (
     REQUEST_DELAY,
 )
 
+from ai.rate_limiter import (
+    GEMINI_RATE_LIMITER,
+)
+
 from config.config import MAX_WORKERS
 
 from config.logging_config import logger

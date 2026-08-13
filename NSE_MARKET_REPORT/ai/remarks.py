@@ -60,6 +60,9 @@ from config.config import (
     MAX_WORKERS,
 
 )
+from ai.rate_limiter import (
+    GEMINI_RATE_LIMITER,
+)
 
 from config.logging_config import logger
 

@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
 
   schedule:
-    # 08:30 IST
+    # 08:30 IST = 03:00 UTC
     - cron: "0 3 * * 1-5"
 
-    # 16:00 IST
+    # 16:00 IST = 10:30 UTC
     - cron: "30 10 * * 1-5"
 
 permissions:
@@ -17,6 +17,10 @@ concurrency:
   group: nse-market-report
   cancel-in-progress: false
 
+defaults:
+  run:
+    working-directory: NSE_MARKET_REPORT
+
 jobs:
 
   generate-report:
@@ -25,21 +29,38 @@ jobs:
 
     steps:
 
+      #########################################################################
+      # CHECKOUT
+      #########################################################################
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      #########################################################################
+      # PYTHON
+      #########################################################################
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: NSE_MARKET_REPORT/requirements.txt
+
+      #########################################################################
+      # INSTALL DEPENDENCIES
+      #########################################################################
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      #########################################################################
+      # ENVIRONMENT
+      #########################################################################
 
       - name: Create environment file
         shell: bash
@@ -51,9 +72,17 @@ jobs:
           FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}
           EOF
 
+      #########################################################################
+      # GENERATE MARKET REPORT
+      #########################################################################
+
       - name: Generate NSE market report
         run: |
           python -m main
+
+      #########################################################################
+      # VERIFY REPORT
+      #########################################################################
 
       - name: Verify report
         shell: bash
@@ -61,13 +90,17 @@ jobs:
           test -f output/excel/NSE_Market_Report.xlsx
           ls -lh output/excel/NSE_Market_Report.xlsx
 
+      #########################################################################
+      # COMMIT UPDATED REPORT
+      #########################################################################
+
       - name: Commit updated report
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add output/excel/NSE_Market_Report.xlsx
+          git add NSE_MARKET_REPORT/output/excel/NSE_Market_Report.xlsx
 
           if git diff --cached --quiet; then
             echo "No report changes."

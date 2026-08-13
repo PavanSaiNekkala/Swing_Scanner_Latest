@@ -53,10 +53,19 @@ from config.timezone import (
     now_ist,
 )
 
+<<<<<<< HEAD
 =======
 from config.logging_config import logger
 
 >>>>>>> 263a17d ("13/08/2026")
+=======
+from config.config import (
+    MAX_WORKERS,
+    NEWS_LOOKBACK_DAYS,
+)
+
+
+>>>>>>> 59d6ab5 ("13/08/2026")
 ###############################################################################
 # CONFIGURATION
 ###############################################################################
@@ -71,9 +80,9 @@ DEFAULT_RETRIES = 3
 
 DEFAULT_BACKOFF = 2
 
-REQUEST_DELAY = 0.50
+REQUEST_DELAY = 0.75
 
-MAX_WORKERS = 5
+MAX_BACKOFF_SECONDS = 120
 
 MAX_ARTICLES = 5
 
@@ -189,10 +198,10 @@ class NewsCache:
 
             self._cache.clear()
 
+
 ###############################################################################
 # MAIN CLASS
 ###############################################################################
-
 
 class GoogleNews:
     """
@@ -209,7 +218,9 @@ class GoogleNews:
 
     ###########################################################################
 
-    def __init__(self):
+    def __init__(
+        self,
+    ):
 
         logger.info(
             "Initializing GoogleNews..."
@@ -250,27 +261,19 @@ class GoogleNews:
 
             read=DEFAULT_RETRIES,
 
+            status=0,
+
             backoff_factor=1.5,
 
-            status_forcelist=[
-
-                429,
-
-                500,
-
-                502,
-
-                503,
-
-                504,
-
-            ],
+            status_forcelist=[],
 
             allowed_methods=[
 
                 "GET",
 
             ],
+
+            respect_retry_after_header=True,
 
             raise_on_status=False,
 
@@ -336,24 +339,43 @@ class GoogleNews:
         Features
         --------
         ✓ Cache
+        ✓ Global rate limiting
         ✓ Retry
-        ✓ Rate limiting
+        ✓ 429/503-aware backoff
         ✓ XML validation
+
+        Parameters
+        ----------
+        symbol : str
+            Search symbol.
+
+        timeout : int
+            HTTP timeout in seconds.
 
         Returns
         -------
-        Raw XML string
+        str
+            Raw RSS XML.
         """
 
         symbol = symbol.strip().upper()
 
-        cached = self.cache.get(symbol)
+        cached = self.cache.get(
+            symbol
+        )
 
         if cached is not None:
 
-            logger.debug("Google News cache hit : %s", symbol)
+            logger.debug(
+                "Google News cache hit : %s",
+                symbol,
+            )
 
             return cached["xml"]
+
+        #######################################################################
+        # SEARCH PARAMETERS
+        #######################################################################
 
         params = {
 <<<<<<< HEAD
@@ -377,23 +399,64 @@ class GoogleNews:
 >>>>>>> 263a17d ("13/08/2026")
         }
 
-        logger.info("Downloading Google News RSS : %s", symbol)
+        #######################################################################
+        # RETRIES
+        #######################################################################
 
-        for attempt in range(1, DEFAULT_RETRIES + 1):
+        for attempt in range(
+            1,
+            DEFAULT_RETRIES + 1,
+        ):
 
             try:
 
-                time.sleep(REQUEST_DELAY)
+                time.sleep(
+                    REQUEST_DELAY
+                )
 
                 response = self.session.get(
-
                     GOOGLE_NEWS_RSS,
-
                     params=params,
-
                     timeout=timeout,
-
                 )
+
+                status_code = (
+                    response.status_code
+                )
+
+                if status_code in (
+                    429,
+                    500,
+                    502,
+                    503,
+                    504,
+                ):
+
+                    wait_seconds = min(
+                        DEFAULT_BACKOFF ** attempt,
+                        MAX_BACKOFF_SECONDS,
+                    )
+
+                    logger.warning(
+                        "Google News HTTP %s | "
+                        "symbol=%s | attempt=%d/%d | "
+                        "sleep=%.1fs",
+                        status_code,
+                        symbol,
+                        attempt,
+                        DEFAULT_RETRIES,
+                        wait_seconds,
+                    )
+
+                    if attempt < DEFAULT_RETRIES:
+
+                        time.sleep(
+                            wait_seconds
+                        )
+
+                        continue
+
+                    break
 
                 response.raise_for_status()
 
@@ -402,27 +465,22 @@ class GoogleNews:
                 if not xml:
 
                     raise GoogleNewsParsingError(
-
                         "Empty RSS response."
-
                     )
 
                 if "<rss" not in xml.lower():
 
                     raise GoogleNewsParsingError(
-
                         "Invalid RSS document."
-
                     )
 
                 self.cache.set(
-
                     symbol,
-
                     {
 <<<<<<< HEAD
                         "xml": xml,
                         "timestamp": now_ist(),
+<<<<<<< HEAD
                     }
 =======
 
@@ -433,14 +491,14 @@ class GoogleNews:
                     }
 
 >>>>>>> 263a17d ("13/08/2026")
+=======
+                    },
+>>>>>>> 59d6ab5 ("13/08/2026")
                 )
 
                 logger.info(
-
                     "RSS downloaded : %s",
-
                     symbol,
-
                 )
 
                 return xml
@@ -448,7 +506,6 @@ class GoogleNews:
             except requests.Timeout:
 
                 logger.warning(
-
                     "Timeout (%d/%d) : %s",
 <<<<<<< HEAD
                     attempt,
@@ -461,13 +518,11 @@ class GoogleNews:
 
 >>>>>>> 263a17d ("13/08/2026")
                     symbol,
-
                 )
 
             except requests.ConnectionError:
 
                 logger.warning(
-
                     "Connection Error (%d/%d) : %s",
 <<<<<<< HEAD
                     attempt,
@@ -480,25 +535,45 @@ class GoogleNews:
 
 >>>>>>> 263a17d ("13/08/2026")
                     symbol,
+                )
 
+            except GoogleNewsParsingError:
+
+                raise
+
+            except requests.HTTPError as ex:
+
+                logger.warning(
+                    "HTTP error (%d/%d) : %s | %s",
+                    attempt,
+                    DEFAULT_RETRIES,
+                    symbol,
+                    ex,
                 )
 
             except Exception as ex:
 
-                logger.exception(ex)
+                logger.exception(
+                    "Unexpected Google News error | "
+                    "symbol=%s | attempt=%d/%d",
+                    symbol,
+                    attempt,
+                    DEFAULT_RETRIES,
+                )
 
             if attempt < DEFAULT_RETRIES:
 
+                wait_seconds = min(
+                    DEFAULT_BACKOFF ** attempt,
+                    MAX_BACKOFF_SECONDS,
+                )
+
                 time.sleep(
-
-                    DEFAULT_BACKOFF ** attempt
-
+                    wait_seconds
                 )
 
         raise GoogleNewsConnectionError(
-
             f"Unable to download news for {symbol}"
-
         )
 
 <<<<<<< HEAD
@@ -507,7 +582,7 @@ class GoogleNews:
     @staticmethod
     def _filter_recent_articles(
         articles: List[Dict[str, Any]],
-        days: int = 15,
+        days: int,
     ) -> List[Dict[str, Any]]:
         """
         Keep only articles published within the last N days.
@@ -578,25 +653,17 @@ class GoogleNews:
         self,
         symbol: str,
     ) -> str:
-        """
-        Download and validate RSS feed.
-        """
 
-        xml = self._request(symbol)
-
-        self._validate_xml(xml)
-
-        logger.debug(
-
-            "RSS validated : %s",
-
-            symbol,
-
+        xml = self._request(
+            symbol
         )
 
+<<<<<<< HEAD
         return xml
 
 <<<<<<< HEAD
+=======
+>>>>>>> 59d6ab5 ("13/08/2026")
 
 
     @staticmethod
@@ -761,14 +828,15 @@ class GoogleNews:
 
         recent_articles = self._filter_recent_articles(
             articles,
-            days=15,
+            days=NEWS_LOOKBACK_DAYS,
         )
 
         logger.info(
             "Google News RSS : %s | "
-            "Raw=%d | Last15Days=%d",
+            "Raw=%d | Last%dDays=%d",
             symbol,
             raw_count,
+            NEWS_LOOKBACK_DAYS,
             len(recent_articles),
         )
 
@@ -1055,8 +1123,9 @@ class GoogleNews:
 >>>>>>> 263a17d ("13/08/2026")
         )
 
+
 ###############################################################################
-# PUBLIC API
+# PUBLIC FETCH
 ###############################################################################
 
     def fetch(
@@ -1066,32 +1135,46 @@ class GoogleNews:
     ) -> Dict[str, object]:
         """
         Fetch Google News for a single stock.
-
-        Parameters
-        ----------
-        symbol : str
-            NSE trading symbol.
-
-        company : str | None
-            Company name for better search relevance.
-
-        Returns
-        -------
-        dict
         """
 
         symbol = symbol.strip().upper()
 
-        logger.info("Fetching Google News : %s", symbol)
+        logger.info(
+            "Fetching Google News : %s",
+            symbol,
+        )
 
-        search_term = company if company else symbol
+        #######################################################################
+        # SEARCH TERM
+        #######################################################################
 
-        xml = self._download_feed(search_term)
+        search_term = (
+            company
+            if company
+            else symbol
+        )
 
-        result = self._process_feed(xml, symbol)
+        #######################################################################
+        # DOWNLOAD
+        #######################################################################
+
+        xml = self._download_feed(
+            search_term,
+        )
+
+        #######################################################################
+        # PROCESS
+        #######################################################################
+
+        result = self._process_feed(
+            xml,
+            symbol,
+        )
 
         return result
 
+###############################################################################
+# FETCH WORKER
 ###############################################################################
 
     def _fetch_worker(
@@ -1100,33 +1183,29 @@ class GoogleNews:
         company: Optional[str] = None,
     ) -> Optional[Dict[str, object]]:
         """
-        Thread worker.
+        Thread worker for Google News retrieval.
         """
 
         try:
 
             return self.fetch(
-
                 symbol,
-
                 company,
-
             )
 
         except Exception as ex:
 
             logger.exception(
-
                 "Google News failed for %s : %s",
-
                 symbol,
-
                 ex,
-
             )
 
             return None
 
+
+###############################################################################
+# PUBLIC API
 ###############################################################################
 
     def fetch_many(
@@ -1135,102 +1214,89 @@ class GoogleNews:
     ) -> pd.DataFrame:
         """
         Fetch news for multiple stocks.
-
-        Parameters
-        ----------
-        stocks
-
-        Example
-        -------
-
-        [
-
-            {
-
-                "Symbol":"RELIANCE",
-
-                "Company":"Reliance Industries"
-
-            }
-
-        ]
         """
 
-        from concurrent.futures import ThreadPoolExecutor
-        from concurrent.futures import as_completed
+        from concurrent.futures import (
+            ThreadPoolExecutor,
+            as_completed,
+        )
 
         if not stocks:
 
-            return pd.DataFrame(columns=OUTPUT_COLUMNS)
+            return pd.DataFrame(
+                columns=OUTPUT_COLUMNS
+            )
 
         logger.info(
-
             "Downloading Google News for %d stocks.",
-
             len(stocks),
-
         )
 
         rows = []
 
         with ThreadPoolExecutor(
-
             max_workers=MAX_WORKERS,
-
         ) as executor:
 
             futures = {
 
                 executor.submit(
-
                     self._fetch_worker,
-
                     stock["Symbol"],
-
                     stock.get("Company"),
-
-                ): stock
+                ): stock["Symbol"]
 
                 for stock in stocks
 
             }
 
-            for future in as_completed(futures):
+            for future in as_completed(
+                futures
+            ):
 
-                result = future.result()
+                symbol = futures[future]
 
-                if result:
+                try:
 
-                    rows.append(result)
+                    result = future.result()
+
+                    if result:
+
+                        rows.append(
+                            result
+                        )
+
+                except Exception as ex:
+
+                    logger.exception(
+                        "Google News failed for %s : %s",
+                        symbol,
+                        ex,
+                    )
 
         if not rows:
 
-            return pd.DataFrame(columns=OUTPUT_COLUMNS)
+            return pd.DataFrame(
+                columns=OUTPUT_COLUMNS
+            )
 
-        df = pd.DataFrame(rows)
+        df = pd.DataFrame(
+            rows
+        )
 
         df.drop_duplicates(
-
             subset=["Symbol"],
-
             inplace=True,
-
         )
 
         df.reset_index(
-
             drop=True,
-
             inplace=True,
-
         )
 
         logger.info(
-
             "Google News downloaded for %d stocks.",
-
             len(df),
-
         )
 
         return df

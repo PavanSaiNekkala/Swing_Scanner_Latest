@@ -64,6 +64,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
+MARKETAUX_API_KEY = os.getenv("MARKETAUX_API_KEY")
 
 # =============================================================================
 # MARKET SETTINGS
@@ -102,6 +103,28 @@ GOOGLE_NEWS_COUNTRY = "IN"
 MAX_NEWS_ARTICLES = 5
 
 # =============================================================================
+# FULL NEWS UNIVERSE SETTINGS
+# =============================================================================
+
+NEWS_UNIVERSE_FILE = (
+    PROJECT_ROOT
+    / "data"
+    / "universe"
+    / "news_universe.csv"
+)
+
+NEWS_UNIVERSE_OUTPUT = (
+    OUTPUT_EXCEL_DIR
+    / "NSE_News_Universe.xlsx"
+)
+
+NEWS_UNIVERSE_LOOKBACK_DAYS = 15
+
+NEWS_UNIVERSE_MAX_ARTICLES = 5
+
+NEWS_UNIVERSE_BATCH_SIZE = 20
+
+# =============================================================================
 # GENERAL NEWS SETTINGS
 # =============================================================================
 
@@ -109,7 +132,7 @@ MAX_NEWS_PER_STOCK = 5
 
 NEWS_LANGUAGE = "en"
 
-NEWS_LOOKBACK_DAYS = 7
+NEWS_LOOKBACK_DAYS = 15
 
 # =============================================================================
 # AI SETTINGS
@@ -117,7 +140,7 @@ NEWS_LOOKBACK_DAYS = 7
 
 AI_PROVIDER = "gemini"
 
-MODEL_NAME = "gemini-2.5-pro"
+MODEL_NAME = "gemini-3.1-flash-lite"
 
 TEMPERATURE = 0.20
 

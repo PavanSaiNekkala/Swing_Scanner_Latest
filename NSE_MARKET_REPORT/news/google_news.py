@@ -41,7 +41,6 @@ from requests.adapters import HTTPAdapter
 
 from urllib3.util.retry import Retry
 
-<<<<<<< HEAD
 from datetime import timedelta
 
 from config.logging_config import logger
@@ -53,19 +52,12 @@ from config.timezone import (
     now_ist,
 )
 
-<<<<<<< HEAD
-=======
-from config.logging_config import logger
-
->>>>>>> 263a17d ("13/08/2026")
-=======
 from config.config import (
     MAX_WORKERS,
     NEWS_LOOKBACK_DAYS,
 )
 
 
->>>>>>> 59d6ab5 ("13/08/2026")
 ###############################################################################
 # CONFIGURATION
 ###############################################################################
@@ -226,11 +218,7 @@ class GoogleNews:
             "Initializing GoogleNews..."
         )
 
-<<<<<<< HEAD
         self.timestamp = now_ist()
-=======
-        self.timestamp = datetime.now()
->>>>>>> 263a17d ("13/08/2026")
 
         self.cache = NewsCache()
 
@@ -378,7 +366,6 @@ class GoogleNews:
         #######################################################################
 
         params = {
-<<<<<<< HEAD
             "q": (
                 f"({symbol} NSE OR {symbol} stock) "
                 "when:15d"
@@ -386,17 +373,6 @@ class GoogleNews:
             "hl": LANGUAGE,
             "gl": COUNTRY,
             "ceid": f"{COUNTRY}:{LANGUAGE}",
-=======
-
-            "q": f"{symbol} NSE OR {symbol} stock",
-
-            "hl": LANGUAGE,
-
-            "gl": COUNTRY,
-
-            "ceid": f"{COUNTRY}:{LANGUAGE}"
-
->>>>>>> 263a17d ("13/08/2026")
         }
 
         #######################################################################
@@ -477,23 +453,9 @@ class GoogleNews:
                 self.cache.set(
                     symbol,
                     {
-<<<<<<< HEAD
                         "xml": xml,
                         "timestamp": now_ist(),
-<<<<<<< HEAD
-                    }
-=======
-
-                        "xml": xml,
-
-                        "timestamp": datetime.now(),
-
-                    }
-
->>>>>>> 263a17d ("13/08/2026")
-=======
                     },
->>>>>>> 59d6ab5 ("13/08/2026")
                 )
 
                 logger.info(
@@ -507,16 +469,8 @@ class GoogleNews:
 
                 logger.warning(
                     "Timeout (%d/%d) : %s",
-<<<<<<< HEAD
                     attempt,
                     DEFAULT_RETRIES,
-=======
-
-                    attempt,
-
-                    DEFAULT_RETRIES,
-
->>>>>>> 263a17d ("13/08/2026")
                     symbol,
                 )
 
@@ -524,16 +478,8 @@ class GoogleNews:
 
                 logger.warning(
                     "Connection Error (%d/%d) : %s",
-<<<<<<< HEAD
                     attempt,
                     DEFAULT_RETRIES,
-=======
-
-                    attempt,
-
-                    DEFAULT_RETRIES,
-
->>>>>>> 263a17d ("13/08/2026")
                     symbol,
                 )
 
@@ -576,7 +522,6 @@ class GoogleNews:
             f"Unable to download news for {symbol}"
         )
 
-<<<<<<< HEAD
 
 
     @staticmethod
@@ -607,8 +552,6 @@ class GoogleNews:
 
     
 
-=======
->>>>>>> 263a17d ("13/08/2026")
 ###############################################################################
 # XML VALIDATION
 ###############################################################################
@@ -658,12 +601,6 @@ class GoogleNews:
             symbol
         )
 
-<<<<<<< HEAD
-        return xml
-
-<<<<<<< HEAD
-=======
->>>>>>> 59d6ab5 ("13/08/2026")
 
 
     @staticmethod
@@ -712,8 +649,6 @@ class GoogleNews:
 
         
 
-=======
->>>>>>> 263a17d ("13/08/2026")
 ###############################################################################
 # XML PARSING
 ###############################################################################
@@ -722,28 +657,10 @@ class GoogleNews:
         self,
         xml: str,
         symbol: str,
-<<<<<<< HEAD
     ) -> List[Dict[str, Any]]:
         """
         Parse Google News RSS feed and retain only articles
         published within the last 15 days.
-=======
-    ) -> List[Dict[str, str]]:
-        """
-        Parse Google News RSS feed.
-
-        Parameters
-        ----------
-        xml : str
-            RSS XML document.
-
-        symbol : str
-            NSE Symbol.
-
-        Returns
-        -------
-        List[Dict]
->>>>>>> 263a17d ("13/08/2026")
         """
 
         import xml.etree.ElementTree as ET
@@ -760,11 +677,7 @@ class GoogleNews:
                 "Unable to parse RSS XML."
             )
 
-<<<<<<< HEAD
         articles: List[Dict[str, Any]] = []
-=======
-        articles = []
->>>>>>> 263a17d ("13/08/2026")
 
         channel = root.find("channel")
 
@@ -774,7 +687,6 @@ class GoogleNews:
                 "RSS channel missing."
             )
 
-<<<<<<< HEAD
         raw_count = 0
 
         for item in channel.findall("item"):
@@ -841,43 +753,6 @@ class GoogleNews:
         )
 
         return recent_articles
-=======
-        for item in channel.findall("item"):
-
-            articles.append({
-
-                "Symbol": symbol,
-
-                "Headline":
-
-                    item.findtext("title", default="").strip(),
-
-                "Link":
-
-                    item.findtext("link", default="").strip(),
-
-                "Published":
-
-                    item.findtext("pubDate", default="").strip(),
-
-                "Source":
-
-                    item.findtext("source", default="Google News").strip()
-
-            })
-
-        logger.info(
-
-            "%d articles parsed for %s",
-
-            len(articles),
-
-            symbol,
-
-        )
-
-        return articles
->>>>>>> 263a17d ("13/08/2026")
 
 ###############################################################################
 # DEDUPLICATION
@@ -1078,7 +953,6 @@ class GoogleNews:
         """
 
         articles = self._parse_feed(
-<<<<<<< HEAD
             xml,
             symbol,
         )
@@ -1094,33 +968,6 @@ class GoogleNews:
 
         return self._prepare_news(
             articles
-=======
-
-            xml,
-
-            symbol,
-
-        )
-
-        articles = self._deduplicate(
-
-            articles
-
-        )
-
-        articles = self._rank_articles(
-
-            articles,
-
-            symbol,
-
-        )
-
-        return self._prepare_news(
-
-            articles
-
->>>>>>> 263a17d ("13/08/2026")
         )
 
 
@@ -1384,11 +1231,7 @@ class GoogleNews:
         Reset cache and timestamp.
         """
 
-<<<<<<< HEAD
         self.timestamp = now_ist()
-=======
-        self.timestamp = datetime.now()
->>>>>>> 263a17d ("13/08/2026")
 
         self.clear_cache()
 

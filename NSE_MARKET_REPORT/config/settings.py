@@ -61,9 +61,6 @@ DEFAULT_ENCODING = "utf-8"
 
 DEFAULT_TIMEZONE = "Asia/Kolkata"
 
-
-<<<<<<< HEAD
 MARKET_PROVIDER = "nselib"
-=======
+
 MARKET_PROVIDER = "nse"
->>>>>>> 263a17d ("13/08/2026")

@@ -1,33 +1,28 @@
 """
-==============================================================================
-File        : ai/remarks.py
-Project     : NSE Market Report
+ai/remarks.py
 
-Description
------------
-AI-powered Final Remarks Generator.
+AI-powered Final Remarks Generator for NSE Market Report.
 
-This module generates concise professional remarks for each NSE stock
-based on:
-
-    • OHLC Data
-    • Daily Change
-    • Volume
-    • News Headlines
-    • AI Summary
-
-Output is suitable for Excel reports.
-
-Author      : Your Name
-==============================================================================
+Responsibilities
+----------------
+- Initialize configured AI provider.
+- Build prompts.
+- Call Gemini.
+- Validate and parse structured JSON responses.
+- Generate single and batch remarks.
+- Apply shared Gemini rate limiting.
+- Merge remarks into the market report.
 """
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
+
+import json
 import time
 
 from datetime import datetime
-
 from typing import Any
 from typing import Dict
 from typing import List
@@ -37,36 +32,33 @@ import pandas as pd
 
 import google.generativeai as genai
 
-from config.config import (
-
-    AI_PROVIDER,
-
-    GEMINI_API_KEY,
-
-    OPENAI_API_KEY,
-
-    MODEL_NAME,
-
-    TEMPERATURE,
-
-    MAX_TOKENS,
-
-    DEFAULT_RETRIES,
-
-    DEFAULT_BACKOFF,
-
-    REQUEST_DELAY,
-
-    MAX_WORKERS,
-
+from ai.prompts import (
+    build_remarks_prompt,
 )
+
 from ai.rate_limiter import (
     GEMINI_RATE_LIMITER,
 )
 
+from config.config import (
+    AI_PROVIDER,
+    DEFAULT_BACKOFF,
+    DEFAULT_RETRIES,
+    GEMINI_API_KEY,
+    MAX_TOKENS,
+    MAX_WORKERS,
+    MODEL_NAME,
+    OPENAI_API_KEY,
+    REQUEST_DELAY,
+    TEMPERATURE,
+)
+
 from config.logging_config import logger
 
-from ai.prompts import build_remarks_prompt
+from config.timezone import (
+    now_ist,
+)
+
 
 ###############################################################################
 # OUTPUT SCHEMA
@@ -86,6 +78,7 @@ OUTPUT_COLUMNS = [
 
 ]
 
+
 ###############################################################################
 # EXCEPTIONS
 ###############################################################################
@@ -93,7 +86,7 @@ OUTPUT_COLUMNS = [
 
 class AIRemarkError(Exception):
     """
-    Base Remarks exception.
+    Base AI remarks exception.
     """
 
 
@@ -108,6 +101,7 @@ class AIResponseError(AIRemarkError):
     Invalid AI response.
     """
 
+
 ###############################################################################
 # AI REMARKS ENGINE
 ###############################################################################
@@ -119,177 +113,228 @@ class AIRemarks:
 
     Public API
     ----------
-
     generate()
-
     generate_many()
-
     merge()
-
     statistics()
-
     health_check()
-
     refresh()
+    test_connection()
+    info()
+    reset()
+    close()
     """
 
     ###########################################################################
+    # INITIALIZATION
+    ###########################################################################
 
-    def __init__(self):
+    def __init__(
+        self,
+    ) -> None:
 
         logger.info(
-
             "[REMARKS] Initializing AI Remarks Engine..."
-
         )
 
-        self.timestamp = datetime.now()
+        self.timestamp = now_ist()
 
-        self.provider = AI_PROVIDER.lower()
+        self.provider = (
+            str(
+                AI_PROVIDER or ""
+            )
+            .strip()
+            .lower()
+        )
 
-        self.model = self._initialize_model()
+        self.model = (
+            self._initialize_model()
+        )
 
         logger.info(
-
             "[REMARKS] %s initialized.",
-
             self.provider,
-
         )
 
     ###########################################################################
+    # MODEL INITIALIZATION
+    ###########################################################################
 
-    def _initialize_model(self):
+    def _initialize_model(
+        self,
+    ) -> Any:
         """
-        Initialize configured AI provider.
+        Initialize the configured AI provider.
         """
 
         if self.provider == "gemini":
 
             if not GEMINI_API_KEY:
+
                 logger.warning(
                     "GEMINI_API_KEY not configured."
                 )
+
                 logger.warning(
                     "AI remarks will be disabled."
                 )
+
                 return None
 
-            genai.configure(
+            try:
 
-                api_key=GEMINI_API_KEY,
+                genai.configure(
+                    api_key=GEMINI_API_KEY,
+                )
 
-            )
+                generation_config = {
+                    "temperature": TEMPERATURE,
+                    "max_output_tokens": MAX_TOKENS,
+                }
 
-            generation_config = {
+                model = (
+                    genai.GenerativeModel(
+                        model_name=MODEL_NAME,
+                        generation_config=(
+                            generation_config
+                        ),
+                    )
+                )
 
-                "temperature": TEMPERATURE,
+                logger.info(
+                    "[REMARKS] Gemini model initialized."
+                )
 
-                "max_output_tokens": MAX_TOKENS,
+                return model
 
-            }
+            except Exception as ex:
 
-            return genai.GenerativeModel(
+                logger.exception(
+                    "[REMARKS] "
+                    "Gemini initialization failed: %s",
+                    ex,
+                )
 
-                model_name=MODEL_NAME,
+                logger.warning(
+                    "[REMARKS] "
+                    "AI remarks will be disabled."
+                )
 
-                generation_config=generation_config,
+                return None
 
-            )
+        if self.provider == "openai":
 
-        elif self.provider == "openai":
+            if not OPENAI_API_KEY:
+
+                logger.warning(
+                    "OPENAI_API_KEY not configured."
+                )
 
             raise NotImplementedError(
-
                 "OpenAI support will be added later."
-
             )
 
         raise AIRemarkError(
-
-            f"Unsupported provider: {AI_PROVIDER}"
-
+            f"Unsupported AI provider: "
+            f"{AI_PROVIDER}"
         )
 
     ###########################################################################
+    # PROVIDER
+    ###########################################################################
 
     @property
-    def provider_name(self) -> str:
+    def provider_name(
+        self,
+    ) -> str:
         """
-        Active AI provider.
+        Return active provider.
         """
 
         return self.provider
 
     ###########################################################################
+    # HEALTH CHECK
+    ###########################################################################
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(
+        self,
+    ) -> Dict[str, Any]:
         """
-        AI engine status.
+        Return AI engine health information.
         """
 
         return {
 
-            "provider": self.provider,
+            "provider":
+                self.provider,
 
-            "model": MODEL_NAME,
+            "model":
+                MODEL_NAME,
 
-            "timestamp": self.timestamp,
+            "timestamp":
+                self.timestamp,
 
-<<<<<<< HEAD
             "status": (
                 "ready"
                 if self.model is not None
                 else "disabled"
             ),
-=======
-            "status": "ready",
->>>>>>> 263a17d ("13/08/2026")
 
         }
 
     ###########################################################################
+    # REFRESH
+    ###########################################################################
 
-    def refresh(self) -> None:
+    def refresh(
+        self,
+    ) -> None:
         """
         Reinitialize AI model.
         """
 
-        self.timestamp = datetime.now()
+        self.timestamp = now_ist()
 
-        self.model = self._initialize_model()
-
-        logger.info(
-
-            "[REMARKS] AI model refreshed."
-
+        self.model = (
+            self._initialize_model()
         )
 
+        logger.info(
+            "[REMARKS] AI model refreshed (%s).",
+            (
+                "enabled"
+                if self.model is not None
+                else "disabled"
+            ),
+        )
 
-###############################################################################
-# PROMPT BUILDER
-###############################################################################
+    ###########################################################################
+    # PROMPT BUILDER
+    ###########################################################################
 
     def _build_prompt(
         self,
         stock: Dict[str, Any],
     ) -> str:
         """
-        Build AI prompt for remarks generation.
+        Build AI remarks prompt.
         """
 
-        return build_remarks_prompt(stock)
+        return build_remarks_prompt(
+            stock
+        )
 
-###############################################################################
-# RESPONSE VALIDATION
-###############################################################################
+    ###########################################################################
+    # RESPONSE VALIDATION
+    ###########################################################################
 
     @staticmethod
     def _validate_response(
         text: Optional[str],
     ) -> str:
         """
-        Validate AI response.
+        Validate raw AI response.
         """
 
         if text is None:
@@ -298,7 +343,9 @@ class AIRemarks:
                 "Empty AI response."
             )
 
-        text = text.strip()
+        text = str(
+            text
+        ).strip()
 
         if not text:
 
@@ -308,95 +355,110 @@ class AIRemarks:
 
         return text
 
-###############################################################################
-# CLEAN RESPONSE
-###############################################################################
+    ###########################################################################
+    # CLEAN RESPONSE
+    ###########################################################################
 
     @staticmethod
     def _clean_response(
         text: str,
     ) -> str:
         """
-        Clean AI output.
+        Remove common markdown wrappers around JSON.
         """
 
-        text = text.replace("```json", "")
+        text = text.strip()
 
-        text = text.replace("```", "")
+        if text.startswith(
+            "```json"
+        ):
+
+            text = text[
+                len("```json"):
+            ]
+
+        elif text.startswith(
+            "```"
+        ):
+
+            text = text[
+                len("```"):
+            ]
+
+        if text.endswith(
+            "```"
+        ):
+
+            text = text[
+                :-len("```")
+            ]
 
         return text.strip()
 
-###############################################################################
-# GEMINI REQUEST
-###############################################################################
+    ###########################################################################
+    # GEMINI REQUEST
+    ###########################################################################
 
     def _call_gemini(
         self,
         prompt: str,
     ) -> str:
         """
-        Call Gemini API.
+        Call Gemini using the shared rate limiter.
         """
 
         if self.model is None:
 
-<<<<<<< HEAD
             raise AIConnectionError(
-                "Gemini API key not configured."
-=======
-            raise AIRemarkError(
                 "Gemini model is not initialized."
->>>>>>> 263a17d ("13/08/2026")
             )
-        
-        last_exception = None
+
+        last_exception: Optional[
+            Exception
+        ] = None
 
         for attempt in range(
-
             1,
-
             DEFAULT_RETRIES + 1,
-
         ):
 
             try:
 
-                time.sleep(
+                ################################################################
+                # GLOBAL RATE LIMIT
+                ################################################################
 
-                    REQUEST_DELAY,
+                GEMINI_RATE_LIMITER.wait()
 
-                )
+                ################################################################
+                # REQUEST
+                ################################################################
 
-                response = self.model.generate_content(
-
-                    prompt,
-
+                response = (
+                    self.model.generate_content(
+                        prompt
+                    )
                 )
 
                 if not hasattr(
-
                     response,
-
                     "text",
-
                 ):
 
                     raise AIResponseError(
-
                         "Invalid Gemini response."
-
                     )
 
-                text = self._validate_response(
-
-                    response.text,
-
+                text = (
+                    self._validate_response(
+                        response.text
+                    )
                 )
 
-                return self._clean_response(
-
-                    text,
-
+                return (
+                    self._clean_response(
+                        text
+                    )
                 )
 
             except Exception as ex:
@@ -404,34 +466,31 @@ class AIRemarks:
                 last_exception = ex
 
                 logger.warning(
-
-                    "[REMARKS] Attempt %d/%d failed : %s",
-
+                    "[REMARKS] "
+                    "Attempt %d/%d failed: %s",
                     attempt,
-
                     DEFAULT_RETRIES,
-
                     ex,
-
                 )
 
-                if attempt < DEFAULT_RETRIES:
+                if (
+                    attempt
+                    < DEFAULT_RETRIES
+                ):
 
                     time.sleep(
-
-                        DEFAULT_BACKOFF ** attempt,
-
+                        DEFAULT_BACKOFF
+                        ** attempt
                     )
 
         raise AIConnectionError(
-
-            f"Gemini request failed : {last_exception}"
-
+            "Gemini request failed: "
+            f"{last_exception}"
         )
 
-###############################################################################
-# PROVIDER ROUTER
-###############################################################################
+    ###########################################################################
+    # PROVIDER ROUTER
+    ###########################################################################
 
     def _call_model(
         self,
@@ -450,42 +509,61 @@ class AIRemarks:
                     "(Gemini API key not configured)."
                 )
 
-            return self._call_gemini(prompt)
+            return self._call_gemini(
+                prompt
+            )
 
         raise AIRemarkError(
-
-            f"Unsupported AI provider: {self.provider}"
-
+            f"Unsupported AI provider: "
+            f"{self.provider}"
         )
 
-###############################################################################
-# JSON PARSER
-###############################################################################
+    ###########################################################################
+    # JSON PARSER
+    ###########################################################################
 
     @staticmethod
     def _parse_response(
         response: str,
     ) -> Dict[str, Any]:
         """
-        Parse AI JSON response.
+        Parse and validate AI JSON response.
         """
 
-        import json
+        response = str(
+            response or ""
+        ).strip()
+
+        if not response:
+
+            raise AIResponseError(
+                "AI returned empty JSON response."
+            )
 
         try:
 
             result = json.loads(
-
-                response,
-
+                response
             )
 
-        except Exception as ex:
+        except (
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ) as ex:
 
             raise AIResponseError(
+                "Invalid JSON returned by AI: "
+                f"{ex}"
+            ) from ex
 
-                f"Invalid JSON returned by AI: {ex}"
+        if not isinstance(
+            result,
+            dict,
+        ):
 
+            raise AIResponseError(
+                "AI JSON response must be an object."
             )
 
         required_fields = [
@@ -505,107 +583,112 @@ class AIRemarks:
             if field not in result:
 
                 raise AIResponseError(
-
                     f"Missing field: {field}"
-
                 )
 
         return result
 
-
-###############################################################################
-# SINGLE STOCK REMARK GENERATION
-###############################################################################
+    ###########################################################################
+    # SINGLE STOCK GENERATION
+    ###########################################################################
 
     def generate(
         self,
         stock: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Generate AI remarks for a single stock.
-
-        Parameters
-        ----------
-        stock : dict
-
-        Returns
-        -------
-        dict
+        Generate AI remarks for one stock.
         """
 
-        symbol = stock.get("Symbol", "UNKNOWN")
+        symbol = str(
+            stock.get(
+                "Symbol",
+                "UNKNOWN",
+            )
+        ).strip()
 
         logger.info(
-
             "[REMARKS] Generating remarks for %s",
-
             symbol,
-
         )
 
         try:
 
-            prompt = self._build_prompt(
-
-                stock,
-
+            prompt = (
+                self._build_prompt(
+                    stock
+                )
             )
 
-            response = self._call_model(
-
-                prompt,
-
+            response = (
+                self._call_model(
+                    prompt
+                )
             )
 
-            result = self._parse_response(
-
-                response,
-
+            result = (
+                self._parse_response(
+                    response
+                )
             )
 
             return {
 
-                "Symbol": symbol,
+                "Symbol":
+                    symbol,
 
-                "Sentiment": result["sentiment"],
+                "Sentiment":
+                    result.get(
+                        "sentiment"
+                    ),
 
-                "Strength Score": result["strength_score"],
+                "Strength Score":
+                    result.get(
+                        "strength_score"
+                    ),
 
-                "Risk": result["risk"],
+                "Risk":
+                    result.get(
+                        "risk"
+                    ),
 
-                "Final Remarks": result["final_remark"],
+                "Final Remarks":
+                    result.get(
+                        "final_remark"
+                    ),
 
             }
 
         except Exception as ex:
 
             logger.exception(
-
                 "[REMARKS] Failed for %s : %s",
-
                 symbol,
-
                 ex,
-
             )
 
             return {
 
-                "Symbol": symbol,
+                "Symbol":
+                    symbol,
 
-                "Sentiment": "Unknown",
+                "Sentiment":
+                    "Unknown",
 
-                "Strength Score": None,
+                "Strength Score":
+                    None,
 
-                "Risk": "Unknown",
+                "Risk":
+                    "Unknown",
 
-                "Final Remarks": "Unable to generate AI remarks.",
+                "Final Remarks":
+                    "Unable to generate AI remarks.",
 
             }
 
-###############################################################################
-# THREAD WORKER
-###############################################################################
+    ###########################################################################
+    # WORKER
+    ###########################################################################
 
     def _generate_worker(
         self,
@@ -616,9 +699,7 @@ class AIRemarks:
         """
 
         return self.generate(
-
-            stock,
-
+            stock
         )
 
 ###############################################################################
@@ -627,30 +708,18 @@ class AIRemarks:
 
     def generate_many(
         self,
-        stocks: List[Dict[str, Any]],
+        stocks: List[
+            Dict[str, Any]
+        ],
     ) -> pd.DataFrame:
         """
         Generate AI remarks for multiple stocks.
-
-<<<<<<< HEAD
-        If the AI model is unavailable, return fallback remarks
-        immediately without creating unnecessary model requests.
-=======
-        Parameters
-        ----------
-        stocks : List[dict]
-
-        Returns
-        -------
-        DataFrame
->>>>>>> 263a17d ("13/08/2026")
         """
 
         if not stocks:
 
             return pd.DataFrame(
-<<<<<<< HEAD
-                columns=OUTPUT_COLUMNS,
+                columns=OUTPUT_COLUMNS
             )
 
         logger.info(
@@ -671,14 +740,29 @@ class AIRemarks:
             )
 
             rows = [
+
                 {
-                    "Symbol": stock.get("Symbol"),
-                    "Sentiment": "Unknown",
-                    "Strength Score": None,
-                    "Risk": "Unknown",
-                    "Final Remarks": "AI remarks unavailable.",
+                    "Symbol":
+                        stock.get(
+                            "Symbol"
+                        ),
+
+                    "Sentiment":
+                        "Unknown",
+
+                    "Strength Score":
+                        None,
+
+                    "Risk":
+                        "Unknown",
+
+                    "Final Remarks":
+                        "AI remarks unavailable.",
+
                 }
+
                 for stock in stocks
+
             ]
 
             return pd.DataFrame(
@@ -687,109 +771,77 @@ class AIRemarks:
             )
 
         #######################################################################
-        # PARALLEL AI GENERATION
+        # GENERATE
         #######################################################################
 
-=======
-
-                columns=OUTPUT_COLUMNS,
-
-            )
-
-        logger.info(
-
-            "[REMARKS] Processing %d stocks.",
-
-            len(stocks),
-
-        )
-
->>>>>>> 263a17d ("13/08/2026")
-        rows: List[Dict[str, Any]] = []
-
-        from concurrent.futures import (
-            ThreadPoolExecutor,
-            as_completed,
-        )
+        rows: List[
+            Dict[str, Any]
+        ] = []
 
         with ThreadPoolExecutor(
-<<<<<<< HEAD
             max_workers=MAX_WORKERS,
-        ) as executor:
-
-            futures = {
-                executor.submit(
-                    self._generate_worker,
-                    stock,
-                ): stock.get("Symbol")
-                for stock in stocks
-            }
-
-            for future in as_completed(
-                futures,
-=======
-
-            max_workers=MAX_WORKERS,
-
         ) as executor:
 
             futures = {
 
                 executor.submit(
-
                     self._generate_worker,
-
                     stock,
-
-                ): stock.get("Symbol")
+                ):
+                    stock.get(
+                        "Symbol"
+                    )
 
                 for stock in stocks
 
             }
 
             for future in as_completed(
-
-                futures,
-
->>>>>>> 263a17d ("13/08/2026")
+                futures
             ):
 
-                symbol = futures[future]
+                symbol = futures[
+                    future
+                ]
 
                 try:
 
                     rows.append(
-<<<<<<< HEAD
                         future.result()
-=======
-
-                        future.result()
-
->>>>>>> 263a17d ("13/08/2026")
                     )
 
                 except Exception as ex:
 
-<<<<<<< HEAD
-                    logger.error(
-                        "[REMARKS] Failed for %s: %s",
+                    logger.exception(
+                        "[REMARKS] "
+                        "Failed for %s: %s",
                         symbol,
                         ex,
                     )
 
                     rows.append(
                         {
-                            "Symbol": symbol,
-                            "Sentiment": "Unknown",
-                            "Strength Score": None,
-                            "Risk": "Unknown",
+
+                            "Symbol":
+                                symbol,
+
+                            "Sentiment":
+                                "Unknown",
+
+                            "Strength Score":
+                                None,
+
+                            "Risk":
+                                "Unknown",
+
                             "Final Remarks":
                                 "Unable to generate AI remarks.",
+
                         }
                     )
 
         #######################################################################
-        # BUILD RESULT
+        # RESULT
         #######################################################################
 
         df = pd.DataFrame(
@@ -798,6 +850,12 @@ class AIRemarks:
         )
 
         if not df.empty:
+
+            df.drop_duplicates(
+                subset=["Symbol"],
+                keep="first",
+                inplace=True,
+            )
 
             df.sort_values(
                 by="Symbol",
@@ -812,71 +870,10 @@ class AIRemarks:
         logger.info(
             "[REMARKS] Completed for %d stocks.",
             len(df),
-=======
-                    logger.exception(
-
-                        "[REMARKS] %s : %s",
-
-                        symbol,
-
-                        ex,
-
-                    )
-
-                    rows.append(
-
-                        {
-
-                            "Symbol": symbol,
-
-                            "Sentiment": "Unknown",
-
-                            "Strength Score": None,
-
-                            "Risk": "Unknown",
-
-                            "Final Remarks":
-
-                                "Unable to generate AI remarks.",
-
-                        }
-
-                    )
-
-        df = pd.DataFrame(
-
-            rows,
-
-            columns=OUTPUT_COLUMNS,
-
-        )
-
-        df.sort_values(
-
-            by="Symbol",
-
-            inplace=True,
-
-        )
-
-        df.reset_index(
-
-            drop=True,
-
-            inplace=True,
-
-        )
-
-        logger.info(
-
-            "[REMARKS] Completed for %d stocks.",
-
-            len(df),
-
->>>>>>> 263a17d ("13/08/2026")
         )
 
         return df
+
 
 ###############################################################################
 # MERGE INTO REPORT
@@ -893,49 +890,64 @@ class AIRemarks:
         if report_df.empty:
 
             logger.warning(
-
                 "[REMARKS] Empty report dataframe."
-
             )
 
             return report_df
 
-        stocks = report_df.to_dict(
-
-            orient="records",
-
+        stocks = (
+            report_df.to_dict(
+                orient="records"
+            )
         )
 
-        remarks_df = self.generate_many(
-
-            stocks,
-
+        remarks_df = (
+            self.generate_many(
+                stocks
+            )
         )
 
         if remarks_df.empty:
 
             logger.warning(
-
-                "[REMARKS] No remarks generated."
-
+                "[REMARKS] "
+                "No remarks generated."
             )
 
             return report_df
 
+        #######################################################################
+        # REMOVE EXISTING REMARK COLUMNS
+        #######################################################################
+
+        existing_columns = [
+            column
+            for column in OUTPUT_COLUMNS
+            if column in report_df.columns
+            and column != "Symbol"
+        ]
+
+        if existing_columns:
+
+            report_df = (
+                report_df.drop(
+                    columns=existing_columns
+                )
+            )
+
+        #######################################################################
+        # MERGE
+        #######################################################################
+
         merged = report_df.merge(
-
             remarks_df,
-
             on="Symbol",
-
             how="left",
-
         )
 
         logger.info(
-
-            "[REMARKS] Report merged successfully."
-
+            "[REMARKS] "
+            "Report merged successfully."
         )
 
         return merged
@@ -953,6 +965,27 @@ class AIRemarks:
         Return AI remarks generation statistics.
         """
 
+        if remarks_df is None:
+
+            return {
+
+                "total": 0,
+
+                "generated": 0,
+
+                "failed": 0,
+
+                "provider":
+                    self.provider,
+
+                "model":
+                    MODEL_NAME,
+
+                "status":
+                    "unavailable",
+
+            }
+
         if remarks_df.empty:
 
             return {
@@ -963,129 +996,206 @@ class AIRemarks:
 
                 "failed": 0,
 
-                "provider": self.provider,
+                "provider":
+                    self.provider,
 
-                "model": MODEL_NAME,
+                "model":
+                    MODEL_NAME,
+
+                "status":
+                    "empty",
 
             }
 
-        failed = (
+        if (
+            "Final Remarks"
+            not in remarks_df.columns
+        ):
 
-            remarks_df["Final Remarks"]
+            return {
 
-            == "Unable to generate AI remarks."
+                "total":
+                    len(remarks_df),
 
-        ).sum()
+                "generated":
+                    0,
 
-        return {
+                "failed":
+                    0,
 
-            "total": len(remarks_df),
+                "provider":
+                    self.provider,
 
-            "generated": len(remarks_df) - failed,
+                "model":
+                    MODEL_NAME,
 
-            "failed": failed,
+                "status":
+                    "invalid",
 
-            "provider": self.provider,
+            }
 
-            "model": MODEL_NAME,
-
-        }
-
-###############################################################################
-# CONNECTION TEST
-###############################################################################
-
-    def test_connection(self) -> bool:
-        """
-        Test AI connectivity.
-        """
-
-        logger.info(
-
-            "[REMARKS] Testing AI connection..."
-
+        remarks_series = (
+            remarks_df[
+                "Final Remarks"
+            ]
+            .fillna("")
+            .astype(str)
         )
 
-        try:
-
-            response = self._call_model(
-
-                "Reply with exactly one word: OK"
-
+        failed = (
+            remarks_series
+            .str.contains(
+                "Unable to generate AI remarks|"
+                "AI remarks unavailable",
+                case=False,
+                regex=True,
+                na=False,
             )
-
-            return response.strip().upper() == "OK"
-
-        except Exception as ex:
-
-            logger.exception(ex)
-
-            return False
-
-###############################################################################
-# SERVICE INFO
-###############################################################################
-
-    def info(self) -> Dict[str, Any]:
-        """
-        Return AI engine information.
-        """
+            .sum()
+        )
 
         return {
-<<<<<<< HEAD
-            "provider": self.provider,
-            "model": MODEL_NAME,
-            "timestamp": self.timestamp,
+
+            "total":
+                len(remarks_df),
+
+            "generated":
+                len(remarks_df) - failed,
+
+            "failed":
+                int(failed),
+
+            "provider":
+                self.provider,
+
+            "model":
+                MODEL_NAME,
+
             "status": (
                 "ready"
                 if self.model is not None
                 else "disabled"
             ),
-=======
 
-            "provider": self.provider,
-
-            "model": MODEL_NAME,
-
-            "temperature": TEMPERATURE,
-
-            "max_tokens": MAX_TOKENS,
-
-            "timestamp": self.timestamp,
-
-            "status": "ready",
-
->>>>>>> 263a17d ("13/08/2026")
         }
+
+
+###############################################################################
+# CONNECTION TEST
+###############################################################################
+
+    def test_connection(
+        self,
+    ) -> bool:
+        """
+        Test AI connectivity.
+        """
+
+        logger.info(
+            "[REMARKS] Testing AI connection..."
+        )
+
+        if self.model is None:
+
+            logger.warning(
+                "[REMARKS] "
+                "Connection test skipped."
+            )
+
+            return False
+
+        try:
+
+            response = (
+                self._call_model(
+                    "Reply with exactly one word: OK"
+                )
+            )
+
+            return (
+                bool(response)
+                and response.strip()
+                .upper()
+                == "OK"
+            )
+
+        except Exception as ex:
+
+            logger.exception(
+                "[REMARKS] "
+                "Connection test failed: %s",
+                ex,
+            )
+
+            return False
+
+
+###############################################################################
+# SERVICE INFORMATION
+###############################################################################
+
+    def info(
+        self,
+    ) -> Dict[str, Any]:
+        """
+        Return AI remarks service information.
+        """
+
+        return {
+
+            "provider":
+                self.provider,
+
+            "model":
+                MODEL_NAME,
+
+            "temperature":
+                TEMPERATURE,
+
+            "max_tokens":
+                MAX_TOKENS,
+
+            "timestamp":
+                self.timestamp,
+
+            "status": (
+                "ready"
+                if self.model is not None
+                else "disabled"
+            ),
+
+        }
+
 
 ###############################################################################
 # RESET
 ###############################################################################
 
-    def reset(self) -> None:
+    def reset(
+        self,
+    ) -> None:
         """
-        Reset AI model.
+        Reset AI engine.
         """
 
         logger.info(
-
             "[REMARKS] Resetting AI engine..."
-
         )
 
         self.refresh()
+
 
 ###############################################################################
 # CLOSE
 ###############################################################################
 
-    def close(self) -> None:
+    def close(
+        self,
+    ) -> None:
         """
-        Cleanup resources.
+        Cleanup AI resources.
         """
 
         logger.info(
-
             "[REMARKS] Service closed."
-
         )

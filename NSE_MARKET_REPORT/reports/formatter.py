@@ -1,24 +1,18 @@
 """
-==============================================================================
-File        : reports/formatter.py
-Project     : NSE Market Report
+reports/formatter.py
 
-Description
------------
-Report formatting engine.
+Report formatting engine for NSE Market Report.
 
 Responsibilities
 ----------------
-✓ Validate report schema
-✓ Add missing columns
-✓ Normalize values
-✓ Format numbers
-✓ Format timestamps
-✓ Clean strings
-✓ Prepare final DataFrame for export
-
-Author      : Your Name
-==============================================================================
+- Validate report schema.
+- Add missing columns.
+- Normalize values.
+- Format numbers.
+- Format timestamps in IST.
+- Clean strings.
+- Sort report rows.
+- Prepare final DataFrame for export.
 """
 
 from __future__ import annotations
@@ -31,17 +25,18 @@ from typing import List
 import pandas as pd
 
 from config.config import (
-    REPORT_COLUMNS,
     DATETIME_FORMAT,
+    REPORT_COLUMNS,
 )
 
 from config.logging_config import logger
 
-<<<<<<< HEAD
-from config.timezone import format_ist
+from config.timezone import (
+    format_ist,
+    now_ist,
+)
 
-=======
->>>>>>> 263a17d ("13/08/2026")
+
 ###############################################################################
 # DEFAULT VALUES
 ###############################################################################
@@ -49,25 +44,6 @@ from config.timezone import format_ist
 DEFAULT_VALUES = {
 
     "Timestamp": "",
-<<<<<<< HEAD
-    "Category": "",
-    "Symbol": "",
-    "Company": "",
-    "CMP": 0.0,
-    "Open": 0.0,
-    "High": 0.0,
-    "Low": 0.0,
-    "Previous Close": 0.0,
-    "Close": 0.0,
-    "Volume": 0,
-    "1 Day Change %": 0.0,
-    "Top Headline": "",
-    "Recent News": "",
-    "AI Summary": "",
-    "Sentiment": "",
-    "Strength Score": "",
-    "Risk": "",
-=======
 
     "Category": "",
 
@@ -103,15 +79,14 @@ DEFAULT_VALUES = {
 
     "Risk": "",
 
->>>>>>> 263a17d ("13/08/2026")
     "Final Remarks": "",
 
 }
 
+
 ###############################################################################
 # REPORT FORMATTER
 ###############################################################################
-
 
 class ReportFormatter:
     """
@@ -119,44 +94,42 @@ class ReportFormatter:
     """
 
     ###########################################################################
+    # INITIALIZATION
+    ###########################################################################
 
-    def __init__(self):
+    def __init__(
+        self,
+    ) -> None:
 
         logger.info(
-
             "[FORMATTER] Initializing formatter..."
-
         )
 
-        self.timestamp = datetime.now()
+        self.timestamp = now_ist()
 
         logger.info(
-
             "[FORMATTER] Formatter ready."
-
         )
 
     ###########################################################################
+    # GENERATED TIMESTAMP
+    ###########################################################################
 
     @property
-    def generated_at(self) -> str:
+    def generated_at(
+        self,
+    ) -> str:
         """
-        Report generation timestamp.
+        Return formatter generation timestamp in IST.
         """
 
         return self.timestamp.strftime(
-<<<<<<< HEAD
-            DATETIME_FORMAT,
-=======
-
-            DATETIME_FORMAT,
-
->>>>>>> 263a17d ("13/08/2026")
+            DATETIME_FORMAT
         )
 
-###############################################################################
-# VALIDATION
-###############################################################################
+    ###########################################################################
+    # VALIDATION
+    ###########################################################################
 
     @staticmethod
     def validate_dataframe(
@@ -167,59 +140,42 @@ class ReportFormatter:
         """
 
         if not isinstance(
-<<<<<<< HEAD
             df,
             pd.DataFrame,
         ):
 
             raise TypeError(
                 "Expected pandas DataFrame."
-=======
-
-            df,
-
-            pd.DataFrame,
-
-        ):
-
-            raise TypeError(
-
-                "Expected pandas DataFrame."
-
->>>>>>> 263a17d ("13/08/2026")
             )
 
-###############################################################################
+    ###########################################################################
+    # ENSURE COLUMNS
+    ###########################################################################
 
     @staticmethod
     def ensure_columns(
         df: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Add any missing report columns.
+        Add missing report columns.
         """
 
         for column in REPORT_COLUMNS:
 
             if column not in df.columns:
-<<<<<<< HEAD
-                df[column] = DEFAULT_VALUES.get(
-                    column,
-                    "",
-=======
 
-                df[column] = DEFAULT_VALUES.get(
-
-                    column,
-
-                    "",
-
->>>>>>> 263a17d ("13/08/2026")
+                df[column] = (
+                    DEFAULT_VALUES.get(
+                        column,
+                        "",
+                    )
                 )
 
         return df
 
-###############################################################################
+    ###########################################################################
+    # REORDER COLUMNS
+    ###########################################################################
 
     @staticmethod
     def reorder_columns(
@@ -229,20 +185,26 @@ class ReportFormatter:
         Arrange columns according to REPORT_COLUMNS.
         """
 
-        return df[REPORT_COLUMNS]
+        return df[
+            REPORT_COLUMNS
+        ]
 
-###############################################################################
+    ###########################################################################
+    # COPY
+    ###########################################################################
 
     @staticmethod
     def copy_dataframe(
         df: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Work on a copy to avoid mutating callers.
+        Work on a deep copy.
         """
 
-        return df.copy(deep=True)
-    
+        return df.copy(
+            deep=True
+        )
+
 
 ###############################################################################
 # TIMESTAMP
@@ -253,24 +215,21 @@ class ReportFormatter:
         df: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-<<<<<<< HEAD
         Add current IST timestamp to every report row.
         """
 
         if df.empty:
+
             return df
 
         timestamp = format_ist()
 
-        df["Timestamp"] = timestamp
-=======
-        Add report generation timestamp.
-        """
-
-        df["Timestamp"] = self.generated_at
->>>>>>> 263a17d ("13/08/2026")
+        df[
+            "Timestamp"
+        ] = timestamp
 
         return df
+
 
 ###############################################################################
 # PRICE FORMATTING
@@ -281,18 +240,10 @@ class ReportFormatter:
         df: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Format price columns.
+        Format price columns to two decimals.
         """
 
         price_columns = [
-<<<<<<< HEAD
-            "CMP",
-            "Open",
-            "High",
-            "Low",
-            "Previous Close",
-            "Close",
-=======
 
             "CMP",
 
@@ -306,7 +257,6 @@ class ReportFormatter:
 
             "Close",
 
->>>>>>> 263a17d ("13/08/2026")
         ]
 
         for column in price_columns:
@@ -316,30 +266,16 @@ class ReportFormatter:
                 continue
 
             df[column] = (
-
                 pd.to_numeric(
-
                     df[column],
-<<<<<<< HEAD
                     errors="coerce",
-
                 )
                 .fillna(0)
                 .round(2)
-=======
-
-                    errors="coerce",
-
-                )
-
-                .fillna(0)
-
-                .round(2)
-
->>>>>>> 263a17d ("13/08/2026")
             )
 
         return df
+
 
 ###############################################################################
 # PERCENTAGES
@@ -353,33 +289,27 @@ class ReportFormatter:
         Format percentage columns.
         """
 
-        if "1 Day Change %" in df.columns:
+        if "1 Day Change %" not in (
+            df.columns
+        ):
 
-            df["1 Day Change %"] = (
+            return df
 
-                pd.to_numeric(
-
-                    df["1 Day Change %"],
-<<<<<<< HEAD
-                    errors="coerce",
-
-                )
-                .fillna(0)
-                .round(2)
-=======
-
-                    errors="coerce",
-
-                )
-
-                .fillna(0)
-
-                .round(2)
-
->>>>>>> 263a17d ("13/08/2026")
+        df[
+            "1 Day Change %"
+        ] = (
+            pd.to_numeric(
+                df[
+                    "1 Day Change %"
+                ],
+                errors="coerce",
             )
+            .fillna(0)
+            .round(2)
+        )
 
         return df
+
 
 ###############################################################################
 # VOLUME
@@ -390,37 +320,28 @@ class ReportFormatter:
         df: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Format traded volume.
+        Format traded volume as integer.
         """
 
-        if "Volume" not in df.columns:
+        if "Volume" not in (
+            df.columns
+        ):
 
             return df
 
-        df["Volume"] = (
-
+        df[
+            "Volume"
+        ] = (
             pd.to_numeric(
-
                 df["Volume"],
-<<<<<<< HEAD
-=======
-
->>>>>>> 263a17d ("13/08/2026")
                 errors="coerce",
-
             )
-
             .fillna(0)
-<<<<<<< HEAD
             .astype("int64")
-=======
-
-            .astype("int64")
-
->>>>>>> 263a17d ("13/08/2026")
         )
 
         return df
+
 
 ###############################################################################
 # STRENGTH SCORE
@@ -431,49 +352,33 @@ class ReportFormatter:
         df: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Normalize AI strength score.
+        Normalize AI strength score to 0-100.
         """
 
-        if "Strength Score" not in df.columns:
+        if (
+            "Strength Score"
+            not in df.columns
+        ):
 
             return df
 
-        df["Strength Score"] = (
-
+        df[
+            "Strength Score"
+        ] = (
             pd.to_numeric(
-
                 df["Strength Score"],
-<<<<<<< HEAD
                 errors="coerce",
-=======
-
-                errors="coerce",
-
->>>>>>> 263a17d ("13/08/2026")
             )
-
             .fillna(0)
-
             .clip(
-
                 lower=0,
-<<<<<<< HEAD
                 upper=100,
-
             )
             .astype(int)
-=======
-
-                upper=100,
-
-            )
-
-            .astype(int)
-
->>>>>>> 263a17d ("13/08/2026")
         )
 
         return df
+
 
 ###############################################################################
 # TEXT CLEANUP
@@ -484,7 +389,7 @@ class ReportFormatter:
         df: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Clean text columns.
+        Normalize textual report fields.
         """
 
         text_columns = [
@@ -516,28 +421,19 @@ class ReportFormatter:
                 continue
 
             df[column] = (
-
                 df[column]
-
                 .fillna("")
-
                 .astype(str)
-
                 .str.replace(
-
                     r"\s+",
-
                     " ",
-
                     regex=True,
-
                 )
-
                 .str.strip()
-
             )
 
         return df
+
 
 ###############################################################################
 # MISSING VALUES
@@ -548,14 +444,19 @@ class ReportFormatter:
         df: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Fill missing values using defaults.
+        Fill missing values using configured defaults.
         """
 
-        for column, value in DEFAULT_VALUES.items():
+        for column, value in (
+            DEFAULT_VALUES.items()
+        ):
 
             if column in df.columns:
 
-                df[column] = df[column].fillna(value)
+                df[column] = (
+                    df[column]
+                    .fillna(value)
+                )
 
         return df
 
@@ -564,60 +465,114 @@ class ReportFormatter:
 # SORT REPORT
 ###############################################################################
 
-<<<<<<< HEAD
     def sort_report(
         self,
         df: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Sort the final report without filtering out valid rows.
+        Sort the final report.
+
+        Ordering
+        --------
+        1. Gainers before losers.
+        2. Highest percentage change first.
+        3. Symbol ascending.
+
+        No valid rows are filtered out.
         """
 
         if df.empty:
+
             return df
 
-        sort_columns = []
-        ascending = []
+        sort_columns: List[
+            str
+        ] = []
+
+        ascending: List[
+            bool
+        ] = []
+
+        #######################################################################
+        # CATEGORY ORDER
+        #######################################################################
 
         if "Category" in df.columns:
+
             category_order = {
+
                 "Gainer": 0,
+
                 "Loser": 1,
+
             }
 
-            df["_CategoryOrder"] = (
-                df["Category"]
+            df[
+                "_CategoryOrder"
+            ] = (
+                df[
+                    "Category"
+                ]
                 .astype(str)
-                .map(category_order)
+                .map(
+                    category_order
+                )
                 .fillna(99)
             )
 
-            sort_columns.append("_CategoryOrder")
-            ascending.append(True)
+            sort_columns.append(
+                "_CategoryOrder"
+            )
 
-        if "Change %" in df.columns:
-            df["_ChangeSort"] = pd.to_numeric(
-                df["Change %"],
+            ascending.append(
+                True
+            )
+
+        #######################################################################
+        # CHANGE ORDER
+        #######################################################################
+
+        if "1 Day Change %" in (
+            df.columns
+        ):
+
+            df[
+                "_ChangeSort"
+            ] = pd.to_numeric(
+                df[
+                    "1 Day Change %"
+                ],
                 errors="coerce",
             ).fillna(0)
 
-            sort_columns.append("_ChangeSort")
-            ascending.append(False)
+            sort_columns.append(
+                "_ChangeSort"
+            )
 
-        elif "1 Day Change %" in df.columns:
-            df["_ChangeSort"] = pd.to_numeric(
-                df["1 Day Change %"],
-                errors="coerce",
-            ).fillna(0)
+            ascending.append(
+                False
+            )
 
-            sort_columns.append("_ChangeSort")
-            ascending.append(False)
+        #######################################################################
+        # SYMBOL
+        #######################################################################
 
         if "Symbol" in df.columns:
-            sort_columns.append("Symbol")
-            ascending.append(True)
+
+            sort_columns.append(
+                "Symbol"
+            )
+
+            ascending.append(
+                True
+            )
+
+        #######################################################################
+        # APPLY SORT
+        #######################################################################
 
         if sort_columns:
+
             df = df.sort_values(
                 by=sort_columns,
                 ascending=ascending,
@@ -639,55 +594,6 @@ class ReportFormatter:
         )
 
         return df
-=======
-    @staticmethod
-    def sort_report(
-        df: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """
-        Sort report by category and percentage change.
-
-        Gainers:
-            Highest % change first
-
-        Losers:
-            Lowest % change first
-        """
-
-        if (
-            "Category" not in df.columns
-            or "1 Day Change %" not in df.columns
-        ):
-            return df
-
-        gainers = df[
-            df["Category"].str.lower() == "gainer"
-        ].sort_values(
-            by="1 Day Change %",
-            ascending=False,
-        )
-
-        losers = df[
-            df["Category"].str.lower() == "loser"
-        ].sort_values(
-            by="1 Day Change %",
-            ascending=True,
-        )
-
-        return pd.concat(
-
-            [
-
-                gainers,
-
-                losers,
-
-            ],
-
-            ignore_index=True,
-
-        )
->>>>>>> 263a17d ("13/08/2026")
 
 ###############################################################################
 # PREPARE REPORT
@@ -706,7 +612,7 @@ class ReportFormatter:
         2. Copy
         3. Ensure columns
         4. Fill missing values
-        5. Add timestamp
+        5. Add IST timestamp
         6. Format prices
         7. Format percentages
         8. Format volume
@@ -717,16 +623,23 @@ class ReportFormatter:
         """
 
         logger.info(
-<<<<<<< HEAD
             "[FORMATTER] Preparing report..."
         )
 
+        #######################################################################
+        # VALIDATE
+        #######################################################################
+
         self.validate_dataframe(
-            report_df,
+            report_df
         )
 
+        #######################################################################
+        # COPY
+        #######################################################################
+
         df = self.copy_dataframe(
-            report_df,
+            report_df
         )
 
         logger.info(
@@ -734,8 +647,12 @@ class ReportFormatter:
             len(df),
         )
 
+        #######################################################################
+        # ENSURE COLUMNS
+        #######################################################################
+
         df = self.ensure_columns(
-            df,
+            df
         )
 
         logger.info(
@@ -743,8 +660,12 @@ class ReportFormatter:
             len(df),
         )
 
+        #######################################################################
+        # FILL MISSING
+        #######################################################################
+
         df = self.fill_missing_values(
-            df,
+            df
         )
 
         logger.info(
@@ -752,8 +673,12 @@ class ReportFormatter:
             len(df),
         )
 
+        #######################################################################
+        # TIMESTAMP
+        #######################################################################
+
         df = self.add_timestamp(
-            df,
+            df
         )
 
         logger.info(
@@ -761,8 +686,12 @@ class ReportFormatter:
             len(df),
         )
 
+        #######################################################################
+        # PRICE
+        #######################################################################
+
         df = self.format_prices(
-            df,
+            df
         )
 
         logger.info(
@@ -770,8 +699,12 @@ class ReportFormatter:
             len(df),
         )
 
+        #######################################################################
+        # PERCENTAGE
+        #######################################################################
+
         df = self.format_percentages(
-            df,
+            df
         )
 
         logger.info(
@@ -779,8 +712,12 @@ class ReportFormatter:
             len(df),
         )
 
+        #######################################################################
+        # VOLUME
+        #######################################################################
+
         df = self.format_volume(
-            df,
+            df
         )
 
         logger.info(
@@ -788,8 +725,14 @@ class ReportFormatter:
             len(df),
         )
 
-        df = self.format_strength_score(
-            df,
+        #######################################################################
+        # STRENGTH SCORE
+        #######################################################################
+
+        df = (
+            self.format_strength_score(
+                df
+            )
         )
 
         logger.info(
@@ -797,8 +740,12 @@ class ReportFormatter:
             len(df),
         )
 
+        #######################################################################
+        # TEXT
+        #######################################################################
+
         df = self.clean_text(
-            df,
+            df
         )
 
         logger.info(
@@ -806,8 +753,12 @@ class ReportFormatter:
             len(df),
         )
 
+        #######################################################################
+        # SORT
+        #######################################################################
+
         df = self.sort_report(
-            df,
+            df
         )
 
         logger.info(
@@ -815,8 +766,12 @@ class ReportFormatter:
             len(df),
         )
 
+        #######################################################################
+        # COLUMN ORDER
+        #######################################################################
+
         df = self.reorder_columns(
-            df,
+            df
         )
 
         logger.info(
@@ -826,92 +781,10 @@ class ReportFormatter:
 
         logger.info(
             "[FORMATTER] Report ready."
-=======
-
-            "[FORMATTER] Preparing report..."
-
-        )
-
-        self.validate_dataframe(
-
-            report_df,
-
-        )
-
-        df = self.copy_dataframe(
-
-            report_df,
-
-        )
-
-        df = self.ensure_columns(
-
-            df,
-
-        )
-
-        df = self.fill_missing_values(
-
-            df,
-
-        )
-
-        df = self.add_timestamp(
-
-            df,
-
-        )
-
-        df = self.format_prices(
-
-            df,
-
-        )
-
-        df = self.format_percentages(
-
-            df,
-
-        )
-
-        df = self.format_volume(
-
-            df,
-
-        )
-
-        df = self.format_strength_score(
-
-            df,
-
-        )
-
-        df = self.clean_text(
-
-            df,
-
-        )
-
-        df = self.sort_report(
-
-            df,
-
-        )
-
-        df = self.reorder_columns(
-
-            df,
-
-        )
-
-        logger.info(
-
-            "[FORMATTER] Report ready."
-
->>>>>>> 263a17d ("13/08/2026")
         )
 
         return df
+
 
 ###############################################################################
 # REPORT PREVIEW
@@ -923,10 +796,13 @@ class ReportFormatter:
         rows: int = 5,
     ) -> pd.DataFrame:
         """
-        Return first few rows of report.
+        Return the first N rows.
         """
 
-        return df.head(rows)
+        return df.head(
+            rows
+        )
+
 
 ###############################################################################
 # ROW COUNT
@@ -942,6 +818,7 @@ class ReportFormatter:
 
         return len(df)
 
+
 ###############################################################################
 # REPORT STATISTICS
 ###############################################################################
@@ -954,53 +831,53 @@ class ReportFormatter:
         Return report statistics.
         """
 
-        self.validate_dataframe(df)
+        self.validate_dataframe(
+            df
+        )
 
         stats = {
 
-            "generated_at": self.generated_at,
+            "generated_at":
+                self.generated_at,
 
-            "total_records": len(df),
+            "total_records":
+                len(df),
 
-            "total_columns": len(df.columns),
+            "total_columns":
+                len(df.columns),
 
-            "gainers": 0,
+            "gainers":
+                0,
 
-            "losers": 0,
+            "losers":
+                0,
 
         }
 
         if "Category" in df.columns:
 
-            stats["gainers"] = (
-
+            category_series = (
                 df["Category"]
-
+                .fillna("")
                 .astype(str)
-
+                .str.strip()
                 .str.lower()
+            )
 
+            stats["gainers"] = (
+                category_series
                 .eq("gainer")
-
                 .sum()
-
             )
 
             stats["losers"] = (
-
-                df["Category"]
-
-                .astype(str)
-
-                .str.lower()
-
+                category_series
                 .eq("loser")
-
                 .sum()
-
             )
 
         return stats
+
 
 ###############################################################################
 # VALIDATION REPORT
@@ -1015,14 +892,19 @@ class ReportFormatter:
 
         Returns
         -------
-        List[str]
-            List of validation messages.
-            Empty list means report is valid.
+        list[str]
+            Empty list means valid report.
         """
 
-        issues = []
+        issues: List[str] = []
 
-        self.validate_dataframe(df)
+        self.validate_dataframe(
+            df
+        )
+
+        #######################################################################
+        # REQUIRED COLUMNS
+        #######################################################################
 
         missing_columns = [
 
@@ -1037,77 +919,95 @@ class ReportFormatter:
         if missing_columns:
 
             issues.append(
-
-                f"Missing columns: {missing_columns}"
-
+                "Missing columns: "
+                f"{missing_columns}"
             )
+
+        #######################################################################
+        # EMPTY REPORT
+        #######################################################################
 
         if df.empty:
 
             issues.append(
-
                 "Report dataframe is empty."
-
             )
 
-        duplicate_symbols = []
+        #######################################################################
+        # DUPLICATE SYMBOLS
+        #######################################################################
 
         if "Symbol" in df.columns:
 
+            duplicate_mask = (
+                df["Symbol"]
+                .duplicated(
+                    keep=False
+                )
+            )
+
             duplicate_symbols = (
-
-                df[df["Symbol"].duplicated()]
-
-                ["Symbol"]
-
+                df.loc[
+                    duplicate_mask,
+                    "Symbol",
+                ]
+                .dropna()
+                .astype(str)
+                .unique()
                 .tolist()
-
             )
 
-        if duplicate_symbols:
+            if duplicate_symbols:
 
-            issues.append(
-
-                f"Duplicate symbols found: {duplicate_symbols}"
-
-            )
+                issues.append(
+                    "Duplicate symbols found: "
+                    f"{duplicate_symbols}"
+                )
 
         return issues
+
 
 ###############################################################################
 # HEALTH CHECK
 ###############################################################################
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(
+        self,
+    ) -> Dict[str, Any]:
         """
         Formatter status.
         """
 
         return {
 
-            "component": "ReportFormatter",
+            "component":
+                "ReportFormatter",
 
-            "status": "ready",
+            "status":
+                "ready",
 
-            "generated_at": self.generated_at,
+            "generated_at":
+                self.generated_at,
 
-            "supported_columns": len(REPORT_COLUMNS),
+            "supported_columns":
+                len(REPORT_COLUMNS),
 
         }
+
 
 ###############################################################################
 # RESET
 ###############################################################################
 
-    def reset(self) -> None:
+    def reset(
+        self,
+    ) -> None:
         """
         Reset formatter timestamp.
         """
 
-        self.timestamp = datetime.now()
+        self.timestamp = now_ist()
 
         logger.info(
-
             "[FORMATTER] Reset completed."
-
         )

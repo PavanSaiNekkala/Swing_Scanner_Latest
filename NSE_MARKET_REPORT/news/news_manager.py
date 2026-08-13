@@ -1,42 +1,30 @@
 """
-==============================================================================
-File        : news/news_manager.py
-Project     : NSE Market Report
+news/news_manager.py
 
-Description
------------
-Central News Management Service.
+Central News Management Service for NSE Market Report.
 
 Responsibilities
 ----------------
-✓ Load configured news providers
-✓ Fetch news from multiple providers
-✓ Merge provider results
-✓ Remove duplicates
-✓ Rank articles
-✓ Produce final news dataset
-✓ Merge with market report
-
-Author      : Your Name
-==============================================================================
+- Load configured normal-report news providers.
+- Manage Marketaux as the full-universe provider.
+- Fetch news from multiple providers.
+- Apply 15-day filtering.
+- Flatten provider responses.
+- Remove duplicate articles.
+- Rank articles by relevance.
+- Build final per-symbol news records.
+- Merge news into the market report.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
 
 from datetime import datetime
-<<<<<<< HEAD
 from datetime import timedelta
-<<<<<<< HEAD
-from datetime import timezone
-=======
->>>>>>> 263a17d ("13/08/2026")
-=======
->>>>>>> 59d6ab5 ("13/08/2026")
+
+from pathlib import Path
 
 from typing import Any
 from typing import Dict
@@ -45,28 +33,20 @@ from typing import Optional
 
 import pandas as pd
 
-from config.config import (
-    MAX_WORKERS,
-    ENABLED_NEWS_PROVIDERS,
-    NEWS_LOOKBACK_DAYS,
-    MARKETAUX_API_KEY,
-)
+from config.config import ENABLED_NEWS_PROVIDERS
+from config.config import MARKETAUX_API_KEY
+from config.config import MAX_WORKERS
+from config.config import NEWS_LOOKBACK_DAYS
 
-<<<<<<< HEAD
-from config.timezone import (
-    IST,
-    now_ist,
-)
-
-=======
->>>>>>> 263a17d ("13/08/2026")
 from config.logging_config import logger
 
+from config.timezone import IST
+from config.timezone import now_ist
+
 from news.google_news import GoogleNews
-
 from news.marketaux_news import MarketauxNews
-
 from news.news_api import NewsAPIClient
+
 
 ###############################################################################
 # OUTPUT SCHEMA
@@ -90,79 +70,66 @@ OUTPUT_COLUMNS = [
 
 ]
 
+
 ###############################################################################
 # NEWS MANAGER
 ###############################################################################
-
 
 class NewsManager:
     """
     Central news orchestration service.
 
-    Workflow
-    --------
-
+    Normal market-report flow
+    -------------------------
         Google News
-              │
-              ▼
-
+              |
+              v
         NewsAPI
+              |
+              v
+        Collect provider results
+              |
+              v
+        Flatten articles
+              |
+              v
+        15-day filter
+              |
+              v
+        Deduplicate
+              |
+              v
+        Relevance ranking
+              |
+              v
+        Final news dataset
 
-              │
-
-              ▼
-
-      Merge Providers
-
-              │
-
-              ▼
-
-      Remove Duplicates
-
-              │
-
-              ▼
-
-      Rank Articles
-
-              │
-
-              ▼
-
-      Final News Dataset
-
-    Public Methods
-    --------------
-
-    fetch()
-
-    fetch_many()
-
-    merge()
-
-    refresh()
+    Full-universe flow
+    ------------------
+        news_universe.csv
+              |
+              v
+        MarketauxNews
+              |
+              v
+        Full universe dataset
     """
 
-    ###########################################################################
-
-    def __init__(self):
+    def __init__(self) -> None:
 
         logger.info(
             "[NEWS MANAGER] Initializing..."
         )
 
-<<<<<<< HEAD
         self.timestamp = now_ist()
-=======
-        self.timestamp = datetime.now()
->>>>>>> 263a17d ("13/08/2026")
 
         #######################################################################
         # NORMAL MARKET-REPORT PROVIDERS
         #######################################################################
 
-        self.providers = self._load_providers()
+        self.providers = (
+            self._load_providers()
+        )
 
         #######################################################################
         # FULL NEWS UNIVERSE PROVIDER
@@ -170,26 +137,38 @@ class NewsManager:
 
         self.universe_provider = None
 
-        try:
+        if MARKETAUX_API_KEY:
 
-            self.universe_provider = MarketauxNews(
-                MARKETAUX_API_KEY
-            )
+            try:
 
-            logger.info(
+                self.universe_provider = (
+                    MarketauxNews(
+                        MARKETAUX_API_KEY
+                    )
+                )
+
+                logger.info(
+                    "[NEWS MANAGER] "
+                    "Marketaux universe provider enabled."
+                )
+
+            except Exception as ex:
+
+                logger.exception(
+                    "[NEWS MANAGER] "
+                    "Marketaux initialization failed: %s",
+                    ex,
+                )
+
+                self.universe_provider = None
+
+        else:
+
+            logger.warning(
                 "[NEWS MANAGER] "
-                "Marketaux universe provider enabled."
+                "MARKETAUX_API_KEY not configured. "
+                "Full news-universe scan disabled."
             )
-
-        except Exception as ex:
-
-            logger.exception(
-                "[NEWS MANAGER] "
-                "Marketaux initialization failed: %s",
-                ex,
-            )
-
-            self.universe_provider = None
 
         logger.info(
             "[NEWS MANAGER] %d provider(s) loaded.",
@@ -197,118 +176,140 @@ class NewsManager:
         )
 
     ###########################################################################
+    # PROVIDER LOADING
+    ###########################################################################
 
     @staticmethod
     def _load_providers() -> List[Any]:
         """
-        Load configured news providers.
+        Load configured normal-report providers.
         """
 
-        providers = []
+        providers: List[Any] = []
+
+        #######################################################################
+        # GOOGLE NEWS
+        #######################################################################
 
         if "google" in ENABLED_NEWS_PROVIDERS:
 
             try:
 
                 providers.append(
-
                     GoogleNews()
-
                 )
 
                 logger.info(
-
-                    "[NEWS MANAGER] Google News enabled."
-
+                    "[NEWS MANAGER] "
+                    "Google News enabled."
                 )
 
             except Exception as ex:
 
-                logger.exception(ex)
+                logger.exception(
+                    "[NEWS MANAGER] "
+                    "Google News initialization failed: %s",
+                    ex,
+                )
+
+        #######################################################################
+        # NEWSAPI
+        #######################################################################
 
         if "newsapi" in ENABLED_NEWS_PROVIDERS:
 
             try:
 
                 providers.append(
-
                     NewsAPIClient()
-
                 )
 
                 logger.info(
-
-                    "[NEWS MANAGER] NewsAPI enabled."
-
+                    "[NEWS MANAGER] "
+                    "NewsAPI enabled."
                 )
 
             except Exception as ex:
 
-                logger.exception(ex)
+                logger.exception(
+                    "[NEWS MANAGER] "
+                    "NewsAPI initialization failed: %s",
+                    ex,
+                )
 
         if not providers:
 
             logger.warning(
-
-                "[NEWS MANAGER] No news providers available."
-
+                "[NEWS MANAGER] "
+                "No normal news providers available."
             )
 
         return providers
 
     ###########################################################################
+    # PROVIDER INFORMATION
+    ###########################################################################
 
     @property
     def provider_count(self) -> int:
         """
-        Number of active providers.
+        Number of active normal-report providers.
         """
 
-        return len(self.providers)
+        return len(
+            self.providers
+        )
 
+    def list_providers(
+        self,
+    ) -> List[str]:
+        """
+        Return active provider class names.
+        """
+
+        return [
+            provider.__class__.__name__
+            for provider in self.providers
+        ]
+
+    ###########################################################################
+    # REFRESH
     ###########################################################################
 
     def refresh(self) -> None:
         """
-        Refresh all providers.
+        Refresh timestamp and all normal providers.
         """
 
-<<<<<<< HEAD
         self.timestamp = now_ist()
-=======
-        self.timestamp = datetime.now()
->>>>>>> 263a17d ("13/08/2026")
 
         for provider in self.providers:
 
             try:
 
-                provider.refresh()
+                refresh_method = getattr(
+                    provider,
+                    "refresh",
+                    None,
+                )
+
+                if callable(
+                    refresh_method
+                ):
+
+                    refresh_method()
 
             except Exception as ex:
 
-                logger.exception(ex)
+                logger.exception(
+                    "[NEWS MANAGER] "
+                    "Provider refresh failed: %s",
+                    ex,
+                )
 
         logger.info(
-
             "[NEWS MANAGER] Providers refreshed."
-
         )
-
-    ###########################################################################
-
-    def list_providers(self) -> List[str]:
-        """
-        Return provider names.
-        """
-
-        return [
-
-            provider.__class__.__name__
-
-            for provider in self.providers
-
-        ]
 
 ###############################################################################
 # PROVIDER FETCH
@@ -321,51 +322,48 @@ class NewsManager:
         company: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Fetch news from a single provider.
+        Fetch news from one provider.
         """
 
         try:
 
+            provider_name = (
+                provider.__class__.__name__
+            )
+
             logger.info(
-
                 "[NEWS MANAGER] %s -> %s",
-
-                provider.__class__.__name__,
-
+                provider_name,
                 symbol,
-
             )
 
             result = provider.fetch(
-
                 symbol=symbol,
-
                 company=company,
-
             )
 
             if result:
 
-                result["Provider"] = provider.__class__.__name__
+                result["Provider"] = (
+                    provider_name
+                )
 
                 return result
 
         except Exception as ex:
 
             logger.exception(
-
-                "[NEWS MANAGER] %s failed : %s",
-
+                "[NEWS MANAGER] "
+                "%s failed : %s",
                 provider.__class__.__name__,
-
                 ex,
-
             )
 
         return None
 
+
 ###############################################################################
-# FETCH ALL PROVIDERS
+# FETCH ALL PROVIDERS FOR ONE STOCK
 ###############################################################################
 
     def _collect_news(
@@ -374,267 +372,282 @@ class NewsManager:
         company: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Collect news from every enabled provider.
+        Collect news from every enabled normal-report provider.
         """
 
         if not self.providers:
 
             return []
 
-        results = []
+        results: List[
+            Dict[str, Any]
+        ] = []
+
+        worker_count = min(
+            MAX_WORKERS,
+            len(self.providers),
+        )
 
         with ThreadPoolExecutor(
-
-            max_workers=min(
-
-                MAX_WORKERS,
-
-                len(self.providers),
-
-            )
-
+            max_workers=worker_count,
         ) as executor:
 
             futures = [
 
                 executor.submit(
-
                     self._fetch_provider,
-
                     provider,
-
                     symbol,
-
                     company,
-
                 )
 
                 for provider in self.providers
 
             ]
 
-            for future in as_completed(futures):
+            for future in as_completed(
+                futures
+            ):
 
-                result = future.result()
+                result = (
+                    future.result()
+                )
 
                 if result:
 
-                    results.append(result)
+                    results.append(
+                        result
+                    )
 
         logger.info(
-
-            "[NEWS MANAGER] %d provider(s) returned news for %s",
-
+            "[NEWS MANAGER] "
+            "%d provider(s) returned news for %s",
             len(results),
-
             symbol,
-
         )
 
         return results
 
+
 ###############################################################################
-# FETCH MULTIPLE STOCKS
+# FETCH MANY STOCKS
 ###############################################################################
 
     def _collect_news_many(
         self,
         stocks: List[Dict[str, str]],
-    ) -> Dict[str, List[Dict[str, Any]]]:
+    ) -> Dict[
+        str,
+        List[Dict[str, Any]],
+    ]:
         """
-        Collect news for multiple stocks.
-
-        Returns
-        -------
-        {
-
-            "RELIANCE":[...],
-
-            "TCS":[...]
-
-        }
+        Collect provider news for multiple stocks.
         """
 
-        news_map: Dict[str, List[Dict[str, Any]]] = {}
+        news_map: Dict[
+            str,
+            List[Dict[str, Any]],
+        ] = {}
 
         if not stocks:
 
             return news_map
 
         with ThreadPoolExecutor(
-
             max_workers=MAX_WORKERS,
-
         ) as executor:
 
             futures = {
 
                 executor.submit(
-
                     self._collect_news,
-
                     stock["Symbol"],
-
                     stock.get("Company"),
-
-                ): stock["Symbol"]
+                ):
+                    stock["Symbol"]
 
                 for stock in stocks
 
             }
 
-            for future in as_completed(futures):
+            for future in as_completed(
+                futures
+            ):
 
-                symbol = futures[future]
+                symbol = futures[
+                    future
+                ]
 
                 try:
 
-                    news_map[symbol] = future.result()
+                    news_map[
+                        symbol
+                    ] = future.result()
 
                 except Exception as ex:
 
-                    logger.exception(ex)
+                    logger.exception(
+                        "[NEWS MANAGER] "
+                        "News collection failed for %s: %s",
+                        symbol,
+                        ex,
+                    )
 
-                    news_map[symbol] = []
+                    news_map[
+                        symbol
+                    ] = []
 
         logger.info(
-
-            "[NEWS MANAGER] News collected for %d stocks.",
-
+            "[NEWS MANAGER] "
+            "News collected for %d stocks.",
             len(news_map),
-
         )
 
         return news_map
 
+
 ###############################################################################
-# FLATTEN RESULTS
+# FLATTEN PROVIDER RESULTS
 ###############################################################################
 
     @staticmethod
     def _flatten(
-        provider_results: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
+        provider_results: List[
+            Dict[str, Any]
+        ],
+    ) -> List[
+        Dict[str, Any]
+    ]:
         """
-        Convert provider output into a flat article list.
+        Convert provider-level results into
+        a unified article list.
         """
 
-        articles = []
+        articles: List[
+            Dict[str, Any]
+        ] = []
 
         for provider in provider_results:
 
             if not provider:
-
                 continue
 
-            recent = provider.get(
-
-                "Recent News",
-
-                [],
-
+            recent_news = (
+                provider.get(
+                    "Recent News",
+                    [],
+                )
+                or []
             )
 
-            for headline in recent:
+            if not isinstance(
+                recent_news,
+                list,
+            ):
+
+                recent_news = [
+                    recent_news
+                ]
+
+            for headline in recent_news:
+
+                if not headline:
+                    continue
 
                 articles.append(
-
                     {
-
-                        "Symbol":
-
-                            provider.get("Symbol"),
-
-                        "Headline":
-
-                            headline,
-
-                        "Top Headline":
-
+                        "Symbol": (
                             provider.get(
+                                "Symbol"
+                            )
+                        ),
 
+                        "Headline": str(
+                            headline
+                        ).strip(),
+
+                        "Top Headline": (
+                            provider.get(
                                 "Top Headline"
+                            )
+                        ),
 
-                            ),
-
-                        "Description":
-
+                        "Description": (
                             provider.get(
-
                                 "Description"
+                            )
+                        ),
 
-                            ),
-
-                        "Headline Link":
-
+                        "Headline Link": (
                             provider.get(
-
                                 "Headline Link"
+                            )
+                        ),
 
-                            ),
-
-                        "Published":
-
+                        "Published": (
                             provider.get(
-
                                 "Published"
+                            )
+                        ),
 
-                            ),
-
-                        "Source":
-
+                        "Source": (
                             provider.get(
-
                                 "Source"
+                            )
+                        ),
 
-                            ),
-
-                        "Provider":
-
+                        "Provider": (
                             provider.get(
-
                                 "Provider"
-
-                            ),
-
+                            )
+                        ),
                     }
-
                 )
 
         return articles
 
-<<<<<<< HEAD
 
 ###############################################################################
-# 15 DAYS FILTER
+# 15-DAY FILTER
 ###############################################################################
 
     @staticmethod
     def _filter_recent_articles(
-        articles: List[Dict[str, Any]],
-        days: int = 15,
-    ) -> List[Dict[str, Any]]:
+        articles: List[
+            Dict[str, Any]
+        ],
+        days: int,
+    ) -> List[
+        Dict[str, Any]
+    ]:
         """
-        Keep only articles published within the last N days.
+        Keep only articles published within
+        the configured lookback window.
 
-        Publication timestamps are normalized to IST before
-        comparison.
+        All timestamps are normalized to IST.
         """
 
         if not articles:
+
             return []
 
         cutoff = (
             now_ist()
-            - timedelta(days=days)
+            - timedelta(
+                days=days
+            )
         )
 
-        filtered: List[Dict[str, Any]] = []
+        filtered: List[
+            Dict[str, Any]
+        ] = []
 
         for article in articles:
 
-            published = article.get(
-                "Published"
+            published = (
+                article.get(
+                    "Published"
+                )
             )
 
             if not published:
@@ -647,41 +660,48 @@ class NewsManager:
                     datetime,
                 ):
 
-                    published_dt = published
+                    published_dt = (
+                        published
+                    )
 
                 else:
 
-                    published_text = str(
-                        published
-                    ).strip()
+                    published_text = (
+                        str(
+                            published
+                        ).strip()
+                    )
 
-                    published_dt = datetime.fromisoformat(
-                        published_text.replace(
-                            "Z",
-                            "+00:00",
+                    published_dt = (
+                        datetime.fromisoformat(
+                            published_text.replace(
+                                "Z",
+                                "+00:00",
+                            )
                         )
                     )
 
                 if published_dt.tzinfo is None:
 
-                    logger.warning(
-                        "[NEWS MANAGER] "
-                        "Naive publication timestamp "
-                        "for article: %s",
-                        article.get("Headline"),
-                    )
-
-                    published_dt = published_dt.replace(
-                        tzinfo=IST
+                    published_dt = (
+                        published_dt.replace(
+                            tzinfo=IST
+                        )
                     )
 
                 else:
 
-                    published_dt = published_dt.astimezone(
-                        IST
+                    published_dt = (
+                        published_dt.astimezone(
+                            IST
+                        )
                     )
 
                 if published_dt >= cutoff:
+
+                    article[
+                        "Published"
+                    ] = published_dt
 
                     filtered.append(
                         article
@@ -697,64 +717,73 @@ class NewsManager:
                     "[NEWS MANAGER] "
                     "Unable to parse publication date "
                     "for article '%s': %s",
-                    article.get("Headline"),
+                    article.get(
+                        "Headline"
+                    ),
                     ex,
                 )
 
         return filtered
 
 
-
-=======
->>>>>>> 263a17d ("13/08/2026")
 ###############################################################################
-# REMOVE DUPLICATE ARTICLES
+# REMOVE DUPLICATES
 ###############################################################################
 
     @staticmethod
     def _deduplicate(
-        articles: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
+        articles: List[
+            Dict[str, Any]
+        ],
+    ) -> List[
+        Dict[str, Any]
+    ]:
         """
-        Remove duplicate articles.
-
-        Duplicate criteria:
-        - Same headline (case-insensitive)
-        - Same article URL
+        Remove duplicate articles using
+        normalized headline + URL.
         """
 
         seen = set()
 
-        cleaned = []
+        cleaned: List[
+            Dict[str, Any]
+        ] = []
 
         for article in articles:
 
+            headline = str(
+                article.get(
+                    "Headline"
+                )
+                or ""
+            ).strip().lower()
+
+            link = str(
+                article.get(
+                    "Headline Link"
+                )
+                or ""
+            ).strip()
+
             key = (
-
-<<<<<<< HEAD
-                str(
-                    article.get("Headline") or ""
-                ).strip().lower(),
-
-                str(
-                    article.get("Headline Link") or ""
-                ).strip(),
-=======
-                article.get("Headline", "").strip().lower(),
-
-                article.get("Headline Link", "").strip(),
->>>>>>> 263a17d ("13/08/2026")
-
+                headline,
+                link,
             )
 
             if key in seen:
+
                 continue
 
-            seen.add(key)
+            seen.add(
+                key
+            )
 
-            cleaned.append(article)
+            cleaned.append(
+                article
+            )
 
         return cleaned
+
 
 ###############################################################################
 # RELEVANCE SCORE
@@ -766,69 +795,52 @@ class NewsManager:
         symbol: str,
     ) -> int:
         """
-        Calculate a unified relevance score.
-<<<<<<< HEAD
-
-        All text inputs are normalized to strings so that
-        missing/None provider fields cannot cause .lower()
-        failures.
-=======
->>>>>>> 263a17d ("13/08/2026")
+        Calculate article relevance score.
         """
 
         score = 0
 
-<<<<<<< HEAD
         symbol_text = str(
             symbol or ""
         ).strip().lower()
 
         headline = str(
-            article.get("Headline") or ""
+            article.get(
+                "Headline"
+            )
+            or ""
         ).strip().lower()
 
         description = str(
-            article.get("Description") or ""
+            article.get(
+                "Description"
+            )
+            or ""
         ).strip().lower()
 
         provider = str(
-            article.get("Provider") or ""
+            article.get(
+                "Provider"
+            )
+            or ""
         ).strip()
 
-        if symbol_text and symbol_text in headline:
+        if (
+            symbol_text
+            and symbol_text in headline
+        ):
+
             score += 40
 
-        if symbol_text and symbol_text in description:
+        if (
+            symbol_text
+            and symbol_text in description
+        ):
+
             score += 20
 
-        KEYWORDS = {
-=======
-        symbol = symbol.lower()
+        keywords = {
 
-        headline = article.get(
-            "Headline",
-            "",
-        ).lower()
-
-        description = article.get(
-            "Description",
-            "",
-        ).lower()
-
-        provider = article.get(
-            "Provider",
-            "",
-        )
-
-        if symbol in headline:
-            score += 40
-
-        if symbol in description:
-            score += 20
-
-        KEYWORDS = {
-
->>>>>>> 263a17d ("13/08/2026")
             "results": 25,
             "earnings": 25,
             "profit": 20,
@@ -846,30 +858,31 @@ class NewsManager:
             "share": 8,
             "nse": 6,
             "bse": 6,
-<<<<<<< HEAD
-=======
 
->>>>>>> 263a17d ("13/08/2026")
         }
 
-        text = f"{headline} {description}"
+        text = (
+            f"{headline} {description}"
+        )
 
-        for word, weight in KEYWORDS.items():
+        for word, weight in (
+            keywords.items()
+        ):
 
             if word in text:
-<<<<<<< HEAD
 
-=======
->>>>>>> 263a17d ("13/08/2026")
                 score += weight
 
         if provider == "GoogleNews":
+
             score += 5
 
-        if provider == "NewsAPIClient":
+        elif provider == "NewsAPIClient":
+
             score += 3
 
         return score
+
 
 ###############################################################################
 # SORT ARTICLES
@@ -877,24 +890,24 @@ class NewsManager:
 
     def _rank_articles(
         self,
-        articles: List[Dict[str, Any]],
+        articles: List[
+            Dict[str, Any]
+        ],
         symbol: str,
-    ) -> List[Dict[str, Any]]:
+    ) -> List[
+        Dict[str, Any]
+    ]:
         """
-        Sort articles by relevance.
+        Sort articles by descending relevance.
         """
 
         articles.sort(
-
             key=lambda article:
-
                 self._score_article(
                     article,
                     symbol,
                 ),
-
             reverse=True,
-
         )
 
         return articles
@@ -906,78 +919,86 @@ class NewsManager:
     def _build_news(
         self,
         symbol: str,
-        articles: List[Dict[str, Any]],
+        articles: List[
+            Dict[str, Any]
+        ],
     ) -> Dict[str, Any]:
         """
-        Build final news object.
+        Build the final per-symbol news record.
         """
 
         if not articles:
 
             return {
-
                 "Symbol": symbol,
-
                 "Top Headline": None,
-
                 "Headline Link": None,
-
                 "Description": None,
-
                 "Source": None,
-
                 "Published": None,
-
                 "Recent News": [],
-
             }
 
         top = articles[0]
 
-        recent_news = []
+        recent_news: List[str] = []
 
         for article in articles:
 
-            headline = article.get("Headline")
+            headline = str(
+                article.get(
+                    "Headline"
+                )
+                or ""
+            ).strip()
 
-            if headline and headline not in recent_news:
+            if (
+                headline
+                and headline not in recent_news
+            ):
 
-                recent_news.append(headline)
+                recent_news.append(
+                    headline
+                )
 
-            if len(recent_news) >= 5:
+            if len(
+                recent_news
+            ) >= 5:
+
                 break
 
         return {
-
-            "Symbol":
-
-                symbol,
+            "Symbol": symbol,
 
             "Top Headline":
-
-                top.get("Headline"),
+                top.get(
+                    "Headline"
+                ),
 
             "Headline Link":
-
-                top.get("Headline Link"),
+                top.get(
+                    "Headline Link"
+                ),
 
             "Description":
-
-                top.get("Description"),
+                top.get(
+                    "Description"
+                ),
 
             "Source":
-
-                top.get("Source"),
+                top.get(
+                    "Source"
+                ),
 
             "Published":
-
-                top.get("Published"),
+                top.get(
+                    "Published"
+                ),
 
             "Recent News":
-
                 recent_news,
-
         }
+
 
 ###############################################################################
 # COMPLETE PROCESSING PIPELINE
@@ -986,34 +1007,23 @@ class NewsManager:
     def _process_news(
         self,
         symbol: str,
-        provider_results: List[Dict[str, Any]],
+        provider_results: List[
+            Dict[str, Any]
+        ],
     ) -> Dict[str, Any]:
         """
-        Complete processing pipeline.
-
-        Provider Results
-              │
-              ▼
-        Flatten Articles
-              │
-              ▼
-        Remove Duplicates
-              │
-              ▼
-        Rank Articles
-              │
-              ▼
-        Final News Object
+        Complete provider -> article -> report pipeline.
         """
 
         articles = self._flatten(
-<<<<<<< HEAD
-            provider_results,
+            provider_results
         )
 
-        articles = self._filter_recent_articles(
-            articles,
-            days=NEWS_LOOKBACK_DAYS,
+        articles = (
+            self._filter_recent_articles(
+                articles,
+                days=NEWS_LOOKBACK_DAYS,
+            )
         )
 
         logger.info(
@@ -1024,57 +1034,40 @@ class NewsManager:
             len(articles),
         )
 
-       
         articles = self._deduplicate(
-            articles,
+            articles
         )
 
         articles = self._rank_articles(
             articles,
             symbol,
-=======
-
-            provider_results,
-
-        )
-
-        articles = self._deduplicate(
-
-            articles,
-
-        )
-
-        articles = self._rank_articles(
-
-            articles,
-
-            symbol,
-
->>>>>>> 263a17d ("13/08/2026")
         )
 
         return self._build_news(
-
             symbol,
-
             articles,
-
         )
 
-    
+
+###############################################################################
+# NEWS UNIVERSE LOADER
+###############################################################################
 
     def load_news_universe(
         self,
         csv_path: Path,
-    ) -> List[Dict[str, str]]:
+    ) -> List[
+        Dict[str, str]
+    ]:
         """
-        Load the full news-scanning universe from CSV.
+        Load the full news-scanning universe.
         """
 
         if not csv_path.exists():
 
             raise FileNotFoundError(
-                f"News universe file not found: {csv_path}"
+                f"News universe file not found: "
+                f"{csv_path}"
             )
 
         df = pd.read_csv(
@@ -1119,12 +1112,17 @@ class NewsManager:
             None,
         )
 
-        stocks: list[Dict[str, str]] = []
+        stocks: List[
+            Dict[str, str]
+        ] = []
 
         for _, row in df.iterrows():
 
             symbol = str(
-                row.get(symbol_column, "")
+                row.get(
+                    symbol_column,
+                    "",
+                )
             ).strip().upper()
 
             if not symbol:
@@ -1144,7 +1142,11 @@ class NewsManager:
                     )
                 ).strip()
 
-                if company.lower() == "nan":
+                if (
+                    company.lower()
+                    == "nan"
+                ):
+
                     company = ""
 
             stocks.append(
@@ -1155,7 +1157,7 @@ class NewsManager:
             )
 
         #######################################################################
-        # DEDUP SYMBOLS
+        # DEDUPLICATE UNIVERSE
         #######################################################################
 
         before_deduplication = len(
@@ -1169,7 +1171,9 @@ class NewsManager:
 
         for stock in stocks:
 
-            symbol = stock["Symbol"]
+            symbol = stock[
+                "Symbol"
+            ]
 
             if symbol in unique:
 
@@ -1205,6 +1209,9 @@ class NewsManager:
         return stocks
 
 
+###############################################################################
+# FULL MARKET NEWS UNIVERSE SCAN
+###############################################################################
 
     def scan_news_universe(
         self,
@@ -1213,8 +1220,8 @@ class NewsManager:
         """
         Scan the full CSV universe using Marketaux.
 
-        Google News remains the provider for the normal
-        40-stock market report.
+        Google News is intentionally kept for the
+        normal 40-stock market report.
         """
 
         stocks = self.load_news_universe(
@@ -1264,10 +1271,12 @@ class NewsManager:
             rows
         )
 
-        news_df.sort_values(
-            by="Symbol",
-            inplace=True,
-        )
+        if "Symbol" in news_df.columns:
+
+            news_df.sort_values(
+                by="Symbol",
+                inplace=True,
+            )
 
         news_df.reset_index(
             drop=True,
@@ -1276,20 +1285,15 @@ class NewsManager:
 
         logger.info(
             "[NEWS UNIVERSE] "
-            "Completed Marketaux scan | "
-            "Symbols=%d",
+            "Completed Marketaux scan | Symbols=%d",
             len(news_df),
         )
 
         return news_df
-    
+
 
 ###############################################################################
-# PUBLIC API
-###############################################################################
-
-###############################################################################
-# PUBLIC API
+# PUBLIC FETCH API
 ###############################################################################
 
     def fetch(
@@ -1298,17 +1302,15 @@ class NewsManager:
         company: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Fetch and process news for one stock
-        using all configured market-report providers.
+        Fetch and process news for one stock.
         """
 
-        symbol = (
-            str(symbol)
-            .strip()
-            .upper()
-        )
+        symbol = str(
+            symbol or ""
+        ).strip().upper()
 
         if not symbol:
+
             raise ValueError(
                 "Symbol cannot be empty."
             )
@@ -1325,9 +1327,16 @@ class NewsManager:
             provider_results,
         )
 
+
+###############################################################################
+# PUBLIC FETCH MANY API
+###############################################################################
+
     def fetch_many(
         self,
-        stocks: List[Dict[str, str]],
+        stocks: List[
+            Dict[str, str]
+        ],
     ) -> pd.DataFrame:
         """
         Fetch and process news for multiple stocks.
@@ -1351,18 +1360,15 @@ class NewsManager:
 
         for stock in stocks:
 
-            symbol = (
-                str(
-                    stock.get(
-                        "Symbol",
-                        "",
-                    )
+            symbol = str(
+                stock.get(
+                    "Symbol",
+                    "",
                 )
-                .strip()
-                .upper()
-            )
+            ).strip().upper()
 
             if not symbol:
+
                 continue
 
             provider_results = (
@@ -1372,9 +1378,11 @@ class NewsManager:
                 )
             )
 
-            result = self._process_news(
-                symbol,
-                provider_results,
+            result = (
+                self._process_news(
+                    symbol,
+                    provider_results,
+                )
             )
 
             rows.append(
@@ -1416,77 +1424,70 @@ class NewsManager:
         return df
 
 ###############################################################################
+# MERGE WITH MARKET REPORT
+###############################################################################
 
     def merge(
         self,
         report_df: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Merge processed news into market report dataframe.
+        Merge processed news into the market report.
         """
 
         if report_df.empty:
 
             logger.warning(
-
-                "[NEWS MANAGER] Empty report dataframe."
-
+                "[NEWS MANAGER] "
+                "Empty report dataframe."
             )
 
             return report_df
 
-        stocks = []
+        stocks: List[
+            Dict[str, str]
+        ] = []
 
         for _, row in report_df.iterrows():
 
             stocks.append(
-
                 {
+                    "Symbol": row[
+                        "Symbol"
+                    ],
 
-                    "Symbol":
-
-                        row["Symbol"],
-
-                    "Company":
-
-                        row.get("Company"),
-
+                    "Company": row.get(
+                        "Company"
+                    ),
                 }
-
             )
 
         news_df = self.fetch_many(
-
-            stocks,
-
+            stocks
         )
 
         if news_df.empty:
 
             logger.warning(
-
-                "[NEWS MANAGER] No news available."
-
+                "[NEWS MANAGER] "
+                "No news available."
             )
 
             return report_df
 
         merged = report_df.merge(
-
             news_df,
-
             on="Symbol",
-
             how="left",
-
-            suffixes=("", "_News"),
-
+            suffixes=(
+                "",
+                "_News",
+            ),
         )
 
         logger.info(
-
-            "[NEWS MANAGER] Report merged successfully."
-
+            "[NEWS MANAGER] "
+            "Report merged successfully."
         )
 
         return merged
@@ -1500,8 +1501,12 @@ class NewsManager:
         self,
     ) -> None:
         """
-        Close all configured news providers.
+        Close all configured providers.
         """
+
+        #######################################################################
+        # NORMAL PROVIDERS
+        #######################################################################
 
         for provider in self.providers:
 
@@ -1513,7 +1518,9 @@ class NewsManager:
                     None,
                 )
 
-                if callable(close_method):
+                if callable(
+                    close_method
+                ):
 
                     close_method()
 
@@ -1526,15 +1533,28 @@ class NewsManager:
                     ex,
                 )
 
-        logger.info(
-            "[NEWS MANAGER] Closed."
-        )
+        #######################################################################
+        # MARKET AUX
+        #######################################################################
 
-        if self.universe_provider is not None:
+        if (
+            self.universe_provider
+            is not None
+        ):
 
             try:
 
-                self.universe_provider.close()
+                close_method = getattr(
+                    self.universe_provider,
+                    "close",
+                    None,
+                )
+
+                if callable(
+                    close_method
+                ):
+
+                    close_method()
 
             except Exception as ex:
 
@@ -1544,21 +1564,32 @@ class NewsManager:
                     ex,
                 )
 
+        logger.info(
+            "[NEWS MANAGER] Closed."
+        )
+
+
+###############################################################################
+# HEALTH CHECK
 ###############################################################################
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(
+        self,
+    ) -> Dict[str, Any]:
         """
-        Return provider health information.
+        Return news service health information.
         """
 
-        status = {
-
+        return {
             "timestamp": self.timestamp,
 
-            "provider_count": self.provider_count,
+            "provider_count":
+                self.provider_count,
 
-            "providers": self.list_providers(),
+            "providers":
+                self.list_providers(),
 
+            "marketaux_enabled":
+                self.universe_provider
+                is not None,
         }
-
-        return status

@@ -100,7 +100,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add NSE_MARKET_REPORT/output/excel/NSE_Market_Report.xlsx
+          git add output/excel/NSE_Market_Report.xlsx
 
           if git diff --cached --quiet; then
             echo "No report changes."

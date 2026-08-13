@@ -556,7 +556,7 @@ class NSEMarketReport:
         """
 
         logger.info(
-<<<<<<< HEAD
+
             "=" * 80
         )
 
@@ -587,12 +587,6 @@ class NSEMarketReport:
         )
 
         return formatted_df
-    
-=======
-
-            "=" * 80
-
-        )
 
         logger.info(
 
@@ -622,7 +616,6 @@ class NSEMarketReport:
 
         return report_df
 
->>>>>>> 263a17d ("13/08/2026")
 ###############################################################################
 # EXCEL EXPORT
 ###############################################################################
@@ -632,7 +625,6 @@ class NSEMarketReport:
         report_df: pd.DataFrame,
     ) -> Path:
         """
-<<<<<<< HEAD
         Export persistent gainers/losers workbook.
         """
 
@@ -659,10 +651,6 @@ class NSEMarketReport:
             "Excel exported : %s",
             excel_file,
         )
-
-=======
-        Export Excel report.
-        """
 
         logger.info(
 
@@ -698,7 +686,6 @@ class NSEMarketReport:
 
         logger.info("")
 
->>>>>>> 263a17d ("13/08/2026")
         return excel_file
 
 ###############################################################################
@@ -761,15 +748,12 @@ class NSEMarketReport:
         Export all reports.
         """
 
-<<<<<<< HEAD
         if not isinstance(report_df, pd.DataFrame):
             raise TypeError(
                 "export_reports() received "
                 f"{type(report_df).__name__}, expected pandas DataFrame."
             )
 
-=======
->>>>>>> 263a17d ("13/08/2026")
         self.excel_file = self.export_excel(
 
             report_df,
@@ -985,7 +969,6 @@ class NSEMarketReport:
             ###################################################################
 
             report_df = self.prepare_report(
-<<<<<<< HEAD
                 report_df,
             )
 
@@ -994,12 +977,6 @@ class NSEMarketReport:
                     "prepare_report() returned "
                     f"{type(report_df).__name__}, expected pandas DataFrame."
                 )
-=======
-
-                report_df,
-
-            )
->>>>>>> 263a17d ("13/08/2026")
 
             self.report_df = report_df
 

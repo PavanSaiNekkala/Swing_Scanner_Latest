@@ -1,233 +1,184 @@
 """
-==============================================================================
-File        : reports/excel_export.py
-Project     : NSE Market Report
+reports/excel_export.py
 
-Description
------------
 Professional Excel Report Exporter.
 
 Responsibilities
 ----------------
-✓ Export report DataFrame to Excel
-✓ Apply professional formatting
-✓ Create worksheets
-✓ Apply styles
-✓ Auto-size columns
-✓ Freeze panes
-✓ Apply filters
-✓ Save workbook
-
-Author      : Your Name
-==============================================================================
+- Export report DataFrame to Excel.
+- Apply professional formatting.
+- Create worksheets.
+- Apply styles.
+- Auto-size columns.
+- Freeze panes.
+- Apply filters.
+- Maintain persistent Gainers / Losers sheets.
+- Prevent same-day duplicate appends.
+- Save workbook.
 """
 
 from __future__ import annotations
 
+import math
+
 from datetime import datetime
+
 from pathlib import Path
+
 from typing import Any
 from typing import Dict
 
 import pandas as pd
-<<<<<<< HEAD
-import math
-=======
->>>>>>> 263a17d ("13/08/2026")
 
 from openpyxl import Workbook
 from openpyxl import load_workbook
 
+from openpyxl.styles import Alignment
+from openpyxl.styles import Border
 from openpyxl.styles import Font
 from openpyxl.styles import PatternFill
-from openpyxl.styles import Border
 from openpyxl.styles import Side
-from openpyxl.styles import Alignment
 
 from openpyxl.utils import get_column_letter
 
-<<<<<<< HEAD
-from config.timezone import now_ist
-
 from config.config import (
+    DATETIME_FORMAT,
+    GAINER_COLOR,
+    HEADER_COLOR,
+    LOSER_COLOR,
     OUTPUT_EXCEL,
     OUTPUT_EXCEL_DIR,
-    HEADER_COLOR,
-    GAINER_COLOR,
-    LOSER_COLOR,
     REPORT_COLUMNS,
-    DATETIME_FORMAT,
-=======
-from config.config import (
-
-    OUTPUT_EXCEL,
-
-    HEADER_COLOR,
-
-    GAINER_COLOR,
-
-    LOSER_COLOR,
-
-    REPORT_COLUMNS,
-
-    DATETIME_FORMAT,
-
->>>>>>> 263a17d ("13/08/2026")
 )
 
 from config.logging_config import logger
+
+from config.timezone import now_ist
+
 
 ###############################################################################
 # STYLES
 ###############################################################################
 
 HEADER_FILL = PatternFill(
-
     fill_type="solid",
-
     fgColor=HEADER_COLOR,
-
 )
 
 HEADER_FONT = Font(
-
     bold=True,
-
     color="FFFFFF",
-
 )
 
 CENTER_ALIGNMENT = Alignment(
-
     horizontal="center",
-
     vertical="center",
-
 )
 
 LEFT_ALIGNMENT = Alignment(
-
     horizontal="left",
-
     vertical="top",
-
     wrap_text=True,
-
 )
 
 THIN_BORDER = Border(
-
     left=Side(style="thin"),
-
     right=Side(style="thin"),
-
     top=Side(style="thin"),
-
     bottom=Side(style="thin"),
-
 )
 
+
 ###############################################################################
-# EXPORTER
+# EXCEL EXPORTER
 ###############################################################################
 
 class ExcelExporter:
     """
-    Excel Export Service.
+    Excel export service.
     """
 
     ###########################################################################
+    # INITIALIZATION
+    ###########################################################################
 
-    def __init__(self):
+    def __init__(
+        self,
+    ) -> None:
 
         logger.info(
-
             "[EXCEL] Initializing exporter..."
-
         )
 
-        self.timestamp = datetime.now()
+        self.timestamp = now_ist()
 
-<<<<<<< HEAD
         OUTPUT_EXCEL_DIR.mkdir(
-=======
-        OUTPUT_EXCEL.mkdir(
->>>>>>> 263a17d ("13/08/2026")
-
             parents=True,
-
             exist_ok=True,
-
         )
 
         logger.info(
-
             "[EXCEL] Ready."
-
         )
 
     ###########################################################################
+    # DEFAULT FILENAME
+    ###########################################################################
 
     @property
-    def filename(self) -> Path:
+    def filename(
+        self,
+    ) -> Path:
         """
-        Default output filename.
+        Default dated output filename.
         """
 
         name = self.timestamp.strftime(
-
             "%Y-%m-%d_NSE_Report.xlsx"
-
         )
 
-<<<<<<< HEAD
-        return OUTPUT_EXCEL_DIR / name
-=======
-        return OUTPUT_EXCEL / name
->>>>>>> 263a17d ("13/08/2026")
+        return (
+            OUTPUT_EXCEL_DIR
+            / name
+        )
 
-###############################################################################
-# VALIDATION
-###############################################################################
+    ###########################################################################
+    # VALIDATION
+    ###########################################################################
 
     @staticmethod
     def validate_dataframe(
         df: pd.DataFrame,
     ) -> None:
         """
-        Validate dataframe.
+        Validate report dataframe.
         """
 
         if not isinstance(
-
             df,
-
             pd.DataFrame,
-
         ):
 
             raise TypeError(
-
                 "Expected pandas DataFrame."
-
             )
 
         if df.empty:
 
             raise ValueError(
-
                 "Report dataframe is empty."
-
             )
 
-###############################################################################
+    ###########################################################################
+    # COLUMN VALIDATION
+    ###########################################################################
 
     @staticmethod
     def validate_columns(
         df: pd.DataFrame,
     ) -> None:
         """
-        Ensure all report columns exist.
+        Ensure all configured report columns exist.
         """
 
         missing = [
@@ -243,27 +194,25 @@ class ExcelExporter:
         if missing:
 
             raise ValueError(
-
-                f"Missing columns: {missing}"
-
+                "Missing columns: "
+                f"{missing}"
             )
 
-###############################################################################
+    ###########################################################################
+    # WORKBOOK
+    ###########################################################################
 
     @staticmethod
     def create_workbook() -> Workbook:
         """
-        Create Excel workbook.
+        Create a new workbook.
         """
 
-        workbook = Workbook()
+        return Workbook()
 
-        return workbook
-
-
-###############################################################################
-# WORKSHEET
-###############################################################################
+    ###########################################################################
+    # WORKSHEET
+    ###########################################################################
 
     @staticmethod
     def create_worksheet(
@@ -274,53 +223,50 @@ class ExcelExporter:
         Create or rename the active worksheet.
         """
 
-        worksheet = workbook.active
+        worksheet = (
+            workbook.active
+        )
 
         worksheet.title = title
 
         return worksheet
 
-###############################################################################
-# WRITE HEADER
-###############################################################################
+    ###########################################################################
+    # HEADER
+    ###########################################################################
 
     @staticmethod
     def write_header(
         worksheet,
     ) -> None:
         """
-        Write report header row.
+        Write and style report header.
         """
 
         for column_index, column_name in enumerate(
-
             REPORT_COLUMNS,
-
             start=1,
-
         ):
 
             cell = worksheet.cell(
-
                 row=1,
-
                 column=column_index,
-
                 value=column_name,
-
             )
 
             cell.fill = HEADER_FILL
 
             cell.font = HEADER_FONT
 
-            cell.alignment = CENTER_ALIGNMENT
+            cell.alignment = (
+                CENTER_ALIGNMENT
+            )
 
             cell.border = THIN_BORDER
 
-###############################################################################
-# WRITE DATA
-###############################################################################
+    ###########################################################################
+    # DATA
+    ###########################################################################
 
     @staticmethod
     def write_data(
@@ -328,42 +274,38 @@ class ExcelExporter:
         df: pd.DataFrame,
     ) -> None:
         """
-        Write dataframe rows.
+        Write report dataframe rows.
         """
 
         for row_index, row in enumerate(
-
-            df.itertuples(index=False),
-
+            df.itertuples(
+                index=False
+            ),
             start=2,
-
         ):
 
             for column_index, value in enumerate(
-
                 row,
-
                 start=1,
-
             ):
 
                 cell = worksheet.cell(
-
                     row=row_index,
-
                     column=column_index,
-
                     value=value,
-
                 )
 
-                cell.border = THIN_BORDER
+                cell.border = (
+                    THIN_BORDER
+                )
 
-                cell.alignment = LEFT_ALIGNMENT
+                cell.alignment = (
+                    LEFT_ALIGNMENT
+                )
 
-###############################################################################
-# FREEZE PANES
-###############################################################################
+    ###########################################################################
+    # FREEZE
+    ###########################################################################
 
     @staticmethod
     def freeze_header(
@@ -375,23 +317,25 @@ class ExcelExporter:
 
         worksheet.freeze_panes = "A2"
 
-###############################################################################
-# AUTO FILTER
-###############################################################################
+    ###########################################################################
+    # FILTER
+    ###########################################################################
 
     @staticmethod
     def apply_filter(
         worksheet,
     ) -> None:
         """
-        Enable Excel filter.
+        Enable worksheet filter.
         """
 
-        worksheet.auto_filter.ref = worksheet.dimensions
+        worksheet.auto_filter.ref = (
+            worksheet.dimensions
+        )
 
-###############################################################################
-# AUTO WIDTH
-###############################################################################
+    ###########################################################################
+    # AUTOFIT
+    ###########################################################################
 
     @staticmethod
     def autofit_columns(
@@ -401,14 +345,16 @@ class ExcelExporter:
         Auto-size worksheet columns.
         """
 
-        for column_cells in worksheet.columns:
+        for column_cells in (
+            worksheet.columns
+        ):
 
             max_length = 0
 
-            column_letter = get_column_letter(
-
-                column_cells[0].column,
-
+            column_letter = (
+                get_column_letter(
+                    column_cells[0].column
+                )
             )
 
             for cell in column_cells:
@@ -416,12 +362,15 @@ class ExcelExporter:
                 try:
 
                     length = len(
-
-                        str(cell.value)
-
+                        str(
+                            cell.value
+                        )
                     )
 
-                    if length > max_length:
+                    if (
+                        length
+                        > max_length
+                    ):
 
                         max_length = length
 
@@ -430,18 +379,15 @@ class ExcelExporter:
                     pass
 
             adjusted_width = min(
-
                 max_length + 3,
-
                 60,
-
             )
 
             worksheet.column_dimensions[
-
                 column_letter
-
-            ].width = adjusted_width
+            ].width = (
+                adjusted_width
+            )
 
 ###############################################################################
 # NUMBER FORMATS
@@ -456,11 +402,8 @@ class ExcelExporter:
         """
 
         headers = {
-
             cell.value: cell.column
-
             for cell in worksheet[1]
-
         }
 
         price_columns = [
@@ -488,60 +431,60 @@ class ExcelExporter:
             col = headers[name]
 
             for row in range(
-
                 2,
-
                 worksheet.max_row + 1,
-
             ):
 
                 worksheet.cell(
-
                     row=row,
-
                     column=col,
+                ).number_format = (
+                    "#,##0.00"
+                )
 
-                ).number_format = "#,##0.00"
+        #######################################################################
+        # CHANGE %
+        #######################################################################
 
         if "1 Day Change %" in headers:
 
-            col = headers["1 Day Change %"]
+            col = headers[
+                "1 Day Change %"
+            ]
 
             for row in range(
-
                 2,
-
                 worksheet.max_row + 1,
-
             ):
 
                 worksheet.cell(
-
                     row=row,
-
                     column=col,
+                ).number_format = (
+                    "0.00"
+                )
 
-                ).number_format = "0.00"
+        #######################################################################
+        # VOLUME
+        #######################################################################
 
         if "Volume" in headers:
 
-            col = headers["Volume"]
+            col = headers[
+                "Volume"
+            ]
 
             for row in range(
-
                 2,
-
                 worksheet.max_row + 1,
-
             ):
 
                 worksheet.cell(
-
                     row=row,
-
                     column=col,
-
-                ).number_format = "#,##0"
+                ).number_format = (
+                    "#,##0"
+                )
 
 
 ###############################################################################
@@ -553,54 +496,51 @@ class ExcelExporter:
         worksheet,
     ) -> None:
         """
-        Color entire row based on Category.
+        Color rows based on Gainer / Loser category.
         """
 
         headers = {
-
             cell.value: cell.column
-
             for cell in worksheet[1]
-
         }
 
         if "Category" not in headers:
 
             return
 
-        category_column = headers["Category"]
+        category_column = headers[
+            "Category"
+        ]
 
         gainer_fill = PatternFill(
-
             fill_type="solid",
-
             fgColor=GAINER_COLOR,
-
         )
 
         loser_fill = PatternFill(
-
             fill_type="solid",
-
             fgColor=LOSER_COLOR,
-
         )
 
-        for row in range(2, worksheet.max_row + 1):
+        for row in range(
+            2,
+            worksheet.max_row + 1,
+        ):
 
-            category = worksheet.cell(
-
-                row=row,
-
-                column=category_column,
-
-            ).value
+            category = (
+                worksheet.cell(
+                    row=row,
+                    column=category_column,
+                ).value
+            )
 
             if category is None:
 
                 continue
 
-            category = str(category).strip().lower()
+            category = str(
+                category
+            ).strip().lower()
 
             if category == "gainer":
 
@@ -614,15 +554,16 @@ class ExcelExporter:
 
                 continue
 
-            for col in range(1, worksheet.max_column + 1):
+            for col in range(
+                1,
+                worksheet.max_column + 1,
+            ):
 
                 worksheet.cell(
-
                     row=row,
-
                     column=col,
-
                 ).fill = fill
+
 
 ###############################################################################
 # SUMMARY SHEET
@@ -634,13 +575,13 @@ class ExcelExporter:
         df: pd.DataFrame,
     ):
         """
-        Create report summary worksheet.
+        Create workbook summary worksheet.
         """
 
-        ws = workbook.create_sheet(
-
-            title="Summary",
-
+        worksheet = (
+            workbook.create_sheet(
+                title="Summary"
+            )
         )
 
         total = len(df)
@@ -651,63 +592,103 @@ class ExcelExporter:
 
         if "Category" in df.columns:
 
-            gainers = (
-
+            category_series = (
                 df["Category"]
-
+                .fillna("")
                 .astype(str)
-
+                .str.strip()
                 .str.lower()
+            )
 
+            gainers = (
+                category_series
                 .eq("gainer")
-
                 .sum()
-
             )
 
             losers = (
-
-                df["Category"]
-
-                .astype(str)
-
-                .str.lower()
-
+                category_series
                 .eq("loser")
-
                 .sum()
-
             )
 
         rows = [
 
-            ("Report Name", "NSE Market Report"),
+            (
+                "Report Name",
+                "NSE Market Report",
+            ),
 
-            ("Generated At", self.timestamp.strftime(DATETIME_FORMAT)),
+            (
+                "Generated At",
+                self.timestamp.strftime(
+                    DATETIME_FORMAT
+                ),
+            ),
 
-            ("Total Stocks", total),
+            (
+                "Total Stocks",
+                total,
+            ),
 
-            ("Top Gainers", gainers),
+            (
+                "Top Gainers",
+                gainers,
+            ),
 
-            ("Top Losers", losers),
+            (
+                "Top Losers",
+                losers,
+            ),
 
         ]
 
-        for r, (label, value) in enumerate(rows, start=1):
+        for row_index, (
+            label,
+            value,
+        ) in enumerate(
+            rows,
+            start=1,
+        ):
 
-            c1 = ws.cell(row=r, column=1, value=label)
-            c2 = ws.cell(row=r, column=2, value=value)
+            label_cell = worksheet.cell(
+                row=row_index,
+                column=1,
+                value=label,
+            )
 
-            c1.font = HEADER_FONT
-            c1.fill = HEADER_FILL
-            c1.border = THIN_BORDER
+            value_cell = worksheet.cell(
+                row=row_index,
+                column=2,
+                value=value,
+            )
 
-            c2.border = THIN_BORDER
+            label_cell.font = (
+                HEADER_FONT
+            )
 
-        ws.column_dimensions["A"].width = 25
-        ws.column_dimensions["B"].width = 35
+            label_cell.fill = (
+                HEADER_FILL
+            )
 
-        return ws
+            label_cell.border = (
+                THIN_BORDER
+            )
+
+            value_cell.border = (
+                THIN_BORDER
+            )
+
+        worksheet.column_dimensions[
+            "A"
+        ].width = 25
+
+        worksheet.column_dimensions[
+            "B"
+        ].width = 35
+
+        return worksheet
+
 
 ###############################################################################
 # DOCUMENT PROPERTIES
@@ -721,17 +702,23 @@ class ExcelExporter:
         Set workbook metadata.
         """
 
-        workbook.properties.creator = "NSE Market Report"
+        workbook.properties.creator = (
+            "NSE Market Report"
+        )
 
-        workbook.properties.title = "NSE Daily Market Report"
+        workbook.properties.title = (
+            "NSE Daily Market Report"
+        )
 
-        workbook.properties.subject = "Top 20 Gainers & Losers"
+        workbook.properties.subject = (
+            "Top 20 Gainers & Losers"
+        )
 
         workbook.properties.description = (
-
-            "Automatically generated NSE Market Report"
-
+            "Automatically generated "
+            "NSE Market Report"
         )
+
 
 ###############################################################################
 # SAVE WORKBOOK
@@ -748,78 +735,129 @@ class ExcelExporter:
 
         if output_path is None:
 
-            output_path = self.filename
+            output_path = (
+                self.filename
+            )
 
-        workbook.save(output_path)
+        output_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        workbook.save(
+            output_path
+        )
 
         logger.info(
-
             "[EXCEL] Saved: %s",
-
             output_path,
-
         )
 
         return output_path
-    
 
-<<<<<<< HEAD
+###############################################################################
+# APPEND GAINERS / LOSERS
+###############################################################################
 
     def export_gainers_losers_append(
         self,
         df: pd.DataFrame,
     ) -> Path:
         """
-        Append current run's gainers and losers to separate
-        persistent Excel worksheets.
+        Append the current run to persistent Gainers and Losers sheets.
 
-        Workbook:
-            NSE_Market_Report.xlsx
+        Workbook
+        --------
+        NSE_Market_Report.xlsx
 
-        Sheets:
-            Gainers
-            Losers
+        Sheets
+        ------
+        Gainers
+        Losers
+
+        Duplicate policy
+        -----------------
+        Existing rows from previous dates are preserved.
+
+        Within the current IST calendar day, an identical row is not
+        appended again. Timestamp is deliberately excluded from the
+        duplicate signature so multiple executions of the workflow
+        during the same day do not create duplicate rows.
         """
 
-        if not isinstance(df, pd.DataFrame):
+        #######################################################################
+        # INPUT VALIDATION
+        #######################################################################
+
+        if not isinstance(
+            df,
+            pd.DataFrame,
+        ):
+
             raise TypeError(
                 "Expected pandas DataFrame."
             )
 
         if df.empty:
+
             raise ValueError(
                 "Cannot append an empty market report."
             )
 
         required_columns = [
+
             "Timestamp",
+
             "Category",
+
             "Symbol",
+
             "Company",
+
             "CMP",
+
             "Open",
+
             "High",
+
             "Low",
+
             "Previous Close",
+
             "Close",
+
             "Volume",
+
             "1 Day Change %",
+
             "Top Headline",
+
             "Recent News",
+
             "Final Remarks",
+
         ]
 
         missing = [
+
             column
+
             for column in required_columns
+
             if column not in df.columns
+
         ]
 
         if missing:
+
             raise ValueError(
                 "Missing required columns: "
                 + ", ".join(missing)
             )
+
+        #######################################################################
+        # WORKBOOK PATH
+        #######################################################################
 
         workbook_path = Path(
             OUTPUT_EXCEL
@@ -830,55 +868,65 @@ class ExcelExporter:
             exist_ok=True,
         )
 
+        #######################################################################
+        # LOAD / CREATE WORKBOOK
+        #######################################################################
+
         if workbook_path.exists():
+
             workbook = load_workbook(
                 workbook_path
             )
+
         else:
+
             workbook = Workbook()
 
-        gainers = df.loc[
+            default_sheet = (
+                workbook.active
+            )
+
+            workbook.remove(
+                default_sheet
+            )
+
+        #######################################################################
+        # SPLIT GAINERS / LOSERS
+        #######################################################################
+
+        category_series = (
             df["Category"]
+            .fillna("")
             .astype(str)
             .str.strip()
             .str.lower()
-            .eq("gainer")
+        )
+
+        gainers = df.loc[
+            category_series.eq(
+                "gainer"
+            )
         ].copy()
 
         losers = df.loc[
-            df["Category"]
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            .eq("loser")
+            category_series.eq(
+                "loser"
+            )
         ].copy()
 
         #######################################################################
-        # OPEN OR CREATE WORKBOOK
+        # NORMALIZATION HELPER
         #######################################################################
-
-        if workbook_path.exists():
-
-            workbook = load_workbook(
-                workbook_path
-            )
-
-        else:
-
-            workbook = Workbook()
-
-            default_sheet = workbook.active
-            workbook.remove(default_sheet)
-
 
         def _normalize_duplicate_value(
             value: Any,
         ) -> str:
             """
-            Normalize a value for duplicate comparison.
+            Normalize values for duplicate comparison.
             """
 
             if value is None:
+
                 return ""
 
             if isinstance(
@@ -886,7 +934,10 @@ class ExcelExporter:
                 float,
             ):
 
-                if math.isnan(value):
+                if math.isnan(
+                    value
+                ):
+
                     return ""
 
                 return f"{value:.10f}"
@@ -901,23 +952,27 @@ class ExcelExporter:
                     for item in value
                 )
 
-            return str(value).strip()
+            return str(
+                value
+            ).strip()
+
+        #######################################################################
+        # EXISTING SAME-DAY SIGNATURES
+        #######################################################################
 
         def _same_day_duplicate_signatures(
             worksheet,
         ) -> set[tuple]:
             """
-            Build signatures for rows already stored in the
-            worksheet for the current IST calendar date.
-
-            Timestamp is intentionally excluded from the
-            signature so repeated runs on the same day can be
-            detected even though execution times differ.
+            Build duplicate signatures for rows already stored today.
             """
 
-            signatures: set[tuple] = set()
+            signatures: set[
+                tuple
+            ] = set()
 
             if worksheet.max_row < 2:
+
                 return signatures
 
             headers = [
@@ -926,27 +981,41 @@ class ExcelExporter:
             ]
 
             header_index = {
+
                 str(header): index
-                for index, header in enumerate(
+
+                for index, header
+                in enumerate(
                     headers
                 )
+
                 if header is not None
+
             }
 
             signature_columns = [
+
                 column
+
                 for column in required_columns
+
                 if column != "Timestamp"
+
             ]
 
-            timestamp_index = header_index.get(
-                "Timestamp"
+            timestamp_index = (
+                header_index.get(
+                    "Timestamp"
+                )
             )
 
             if timestamp_index is None:
+
                 return signatures
 
-            today_ist = now_ist().date()
+            today_ist = (
+                now_ist().date()
+            )
 
             for row in worksheet.iter_rows(
                 min_row=2,
@@ -958,6 +1027,7 @@ class ExcelExporter:
                 ]
 
                 if timestamp_value is None:
+
                     continue
 
                 try:
@@ -968,21 +1038,23 @@ class ExcelExporter:
                     ):
 
                         row_date = (
-                            timestamp_value
-                            .date()
+                            timestamp_value.date()
                         )
 
                     else:
 
-                        timestamp_text = (
-                            str(timestamp_value)
-                            .strip()
-                        )
+                        timestamp_text = str(
+                            timestamp_value
+                        ).strip()
 
-                        row_date = datetime.strptime(
-                            timestamp_text[:10],
-                            "%Y-%m-%d",
-                        ).date()
+                        row_date = (
+                            datetime.strptime(
+                                timestamp_text[
+                                    :10
+                                ],
+                                "%Y-%m-%d",
+                            ).date()
+                        )
 
                 except (
                     ValueError,
@@ -992,16 +1064,24 @@ class ExcelExporter:
                     continue
 
                 if row_date != today_ist:
+
                     continue
 
                 signature = tuple(
+
                     _normalize_duplicate_value(
                         row[
-                            header_index[column]
+                            header_index[
+                                column
+                            ]
                         ]
                     )
+
                     for column in signature_columns
-                    if column in header_index
+
+                    if column
+                    in header_index
+
                 )
 
                 signatures.add(
@@ -1010,7 +1090,6 @@ class ExcelExporter:
 
             return signatures
 
-        
         #######################################################################
         # APPEND HELPER
         #######################################################################
@@ -1019,22 +1098,41 @@ class ExcelExporter:
             sheet_name: str,
             data: pd.DataFrame,
         ) -> None:
+            """
+            Append unique rows to one worksheet.
+            """
 
-            if sheet_name in workbook.sheetnames:
+            if sheet_name in (
+                workbook.sheetnames
+            ):
 
-                worksheet = workbook[sheet_name]
+                worksheet = (
+                    workbook[sheet_name]
+                )
 
             else:
 
-                worksheet = workbook.create_sheet(
-                    sheet_name
+                worksheet = (
+                    workbook.create_sheet(
+                        sheet_name
+                    )
                 )
 
-            if worksheet.max_row == 1 and all(
-                cell.value is None
-                for cell in worksheet[1]
+            ###################################################################
+            # REMOVE EMPTY DEFAULT ROW
+            ###################################################################
+
+            if (
+                worksheet.max_row == 1
+                and all(
+                    cell.value is None
+                    for cell in worksheet[1]
+                )
             ):
-                worksheet.delete_rows(1)
+
+                worksheet.delete_rows(
+                    1
+                )
 
             ###################################################################
             # HEADER
@@ -1046,6 +1144,7 @@ class ExcelExporter:
                     required_columns,
                     start=1,
                 ):
+
                     worksheet.cell(
                         row=1,
                         column=column_index,
@@ -1059,12 +1158,15 @@ class ExcelExporter:
                     for cell in worksheet[1]
                 ]
 
-                if not any(existing_headers):
+                if not any(
+                    existing_headers
+                ):
 
                     for column_index, column in enumerate(
                         required_columns,
                         start=1,
                     ):
+
                         worksheet.cell(
                             row=1,
                             column=column_index,
@@ -1072,7 +1174,7 @@ class ExcelExporter:
                         )
 
             ###################################################################
-            # REMOVE SAME-DAY DUPLICATES
+            # SAME-DAY DUPLICATES
             ###################################################################
 
             existing_signatures = (
@@ -1082,9 +1184,13 @@ class ExcelExporter:
             )
 
             signature_columns = [
+
                 column
+
                 for column in required_columns
+
                 if column != "Timestamp"
+
             ]
 
             rows_to_append = []
@@ -1106,15 +1212,21 @@ class ExcelExporter:
                 )
 
                 signature = tuple(
+
                     _normalize_duplicate_value(
                         row_mapping.get(
                             column
                         )
                     )
-                    for column in signature_columns
+
+                    for column
+                    in signature_columns
+
                 )
 
-                if signature in existing_signatures:
+                if signature in (
+                    existing_signatures
+                ):
 
                     skipped_duplicates += 1
 
@@ -1129,7 +1241,7 @@ class ExcelExporter:
                 )
 
             ###################################################################
-            # APPEND UNIQUE DATA
+            # NOTHING NEW
             ###################################################################
 
             if not rows_to_append:
@@ -1143,6 +1255,10 @@ class ExcelExporter:
                 )
 
                 return
+
+            ###################################################################
+            # APPEND
+            ###################################################################
 
             start_row = (
                 worksheet.max_row + 1
@@ -1163,8 +1279,10 @@ class ExcelExporter:
                     start=1,
                 ):
 
-                    value = row_mapping.get(
-                        column
+                    value = (
+                        row_mapping.get(
+                            column
+                        )
                     )
 
                     if isinstance(
@@ -1172,14 +1290,19 @@ class ExcelExporter:
                         (list, tuple),
                     ):
 
-                        value = " | ".join(
-                            map(
-                                str,
-                                value,
+                        value = (
+                            " | ".join(
+                                map(
+                                    str,
+                                    value,
+                                )
                             )
                         )
 
-                    if pd.isna(value):
+                    if pd.isna(
+                        value
+                    ):
+
                         value = None
 
                     worksheet.cell(
@@ -1198,7 +1321,7 @@ class ExcelExporter:
             )
 
             ###################################################################
-            # HEADER FORMATTING
+            # HEADER STYLE
             ###################################################################
 
             for cell in worksheet[1]:
@@ -1214,7 +1337,7 @@ class ExcelExporter:
             worksheet.freeze_panes = "A2"
 
             ###################################################################
-            # AUTO FILTER
+            # FILTER
             ###################################################################
 
             worksheet.auto_filter.ref = (
@@ -1222,25 +1345,41 @@ class ExcelExporter:
             )
 
             ###################################################################
-            # COLUMN WIDTHS
+            # WIDTHS
             ###################################################################
 
             widths = {
+
                 "Timestamp": 22,
+
                 "Category": 12,
+
                 "Symbol": 16,
+
                 "Company": 32,
+
                 "CMP": 14,
+
                 "Open": 14,
+
                 "High": 14,
+
                 "Low": 14,
+
                 "Previous Close": 18,
+
                 "Close": 14,
+
                 "Volume": 16,
+
                 "1 Day Change %": 18,
+
                 "Top Headline": 50,
+
                 "Recent News": 80,
+
                 "Final Remarks": 60,
+
             }
 
             for index, column in enumerate(
@@ -1249,10 +1388,14 @@ class ExcelExporter:
             ):
 
                 worksheet.column_dimensions[
-                    get_column_letter(index)
-                ].width = widths.get(
-                    column,
-                    18,
+                    get_column_letter(
+                        index
+                    )
+                ].width = (
+                    widths.get(
+                        column,
+                        18,
+                    )
                 )
 
         #######################################################################
@@ -1286,12 +1429,8 @@ class ExcelExporter:
 
         return workbook_path
 
-
-
-=======
->>>>>>> 263a17d ("13/08/2026")
 ###############################################################################
-# EXPORT REPORT
+# STANDARD EXPORT
 ###############################################################################
 
     def export(
@@ -1300,113 +1439,80 @@ class ExcelExporter:
         output_path: Path | None = None,
     ) -> Path:
         """
-        Export DataFrame to formatted Excel workbook.
-
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Formatted report dataframe.
-
-        output_path : Path, optional
-            Output Excel path.
-
-        Returns
-        -------
-        Path
-            Saved Excel file.
+        Export the formatted report to a standalone Excel workbook.
         """
 
         logger.info(
-
             "[EXCEL] Starting Excel export..."
-
         )
 
-        self.validate_dataframe(df)
+        self.validate_dataframe(
+            df
+        )
 
-        self.validate_columns(df)
+        self.validate_columns(
+            df
+        )
 
-        workbook = self.create_workbook()
+        workbook = (
+            self.create_workbook()
+        )
 
-        worksheet = self.create_worksheet(
-
-            workbook,
-
+        worksheet = (
+            self.create_worksheet(
+                workbook
+            )
         )
 
         self.write_header(
-
-            worksheet,
-
+            worksheet
         )
 
         self.write_data(
-
             worksheet,
-
             df,
-
         )
 
         self.freeze_header(
-
-            worksheet,
-
+            worksheet
         )
 
         self.apply_filter(
-
-            worksheet,
-
+            worksheet
         )
 
         self.apply_number_formats(
-
-            worksheet,
-
+            worksheet
         )
 
         self.autofit_columns(
-
-            worksheet,
-
+            worksheet
         )
 
         self.apply_conditional_formatting(
-
-            worksheet,
-
+            worksheet
         )
 
         self.create_summary_sheet(
-
             workbook,
-
             df,
-
         )
 
         self.apply_document_properties(
-
-            workbook,
-
+            workbook
         )
 
         path = self.save(
-
             workbook,
-
             output_path,
-
         )
 
         logger.info(
-
             "[EXCEL] Export completed."
-
         )
 
         return path
+
 
 ###############################################################################
 # EXPORT STATISTICS
@@ -1420,89 +1526,94 @@ class ExcelExporter:
         Return export statistics.
         """
 
+        self.validate_dataframe(
+            df
+        )
+
         return {
 
-            "rows": len(df),
+            "rows":
+                len(df),
 
-            "columns": len(df.columns),
+            "columns":
+                len(df.columns),
 
-            "generated_at": self.timestamp.strftime(
+            "generated_at":
+                self.timestamp.strftime(
+                    DATETIME_FORMAT
+                ),
 
-                DATETIME_FORMAT,
-
-            ),
-
-            "output_directory": str(
-
-<<<<<<< HEAD
-                OUTPUT_EXCEL_DIR,
-=======
-                OUTPUT_EXCEL,
->>>>>>> 263a17d ("13/08/2026")
-
-            ),
+            "output_directory":
+                str(
+                    OUTPUT_EXCEL_DIR
+                ),
 
         }
+
 
 ###############################################################################
 # HEALTH CHECK
 ###############################################################################
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(
+        self,
+    ) -> Dict[str, Any]:
         """
-        Exporter status.
+        Return exporter health status.
         """
 
         return {
 
-            "component": "ExcelExporter",
+            "component":
+                "ExcelExporter",
 
-            "status": "ready",
+            "status":
+                "ready",
 
-            "timestamp": self.timestamp.strftime(
+            "timestamp":
+                self.timestamp.strftime(
+                    DATETIME_FORMAT
+                ),
 
-                DATETIME_FORMAT,
-
-            ),
-
-            "output_directory": str(
-
-<<<<<<< HEAD
-                OUTPUT_EXCEL_DIR,
-=======
-                OUTPUT_EXCEL,
->>>>>>> 263a17d ("13/08/2026")
-
-            ),
+            "output_directory":
+                str(
+                    OUTPUT_EXCEL_DIR
+                ),
 
         }
+
 
 ###############################################################################
 # RESET
 ###############################################################################
 
-    def reset(self) -> None:
+    def reset(
+        self,
+    ) -> None:
         """
         Reset exporter timestamp.
         """
 
-        self.timestamp = datetime.now()
+        self.timestamp = (
+            now_ist()
+        )
 
         logger.info(
-
             "[EXCEL] Exporter reset."
-
         )
+
 
 ###############################################################################
 # CLOSE
 ###############################################################################
 
-    def close(self) -> None:
+    def close(
+        self,
+    ) -> None:
         """
-        Cleanup resources.
+        Cleanup exporter resources.
         """
 
         logger.info(
-
-            "[EXCEL] Exporter closed.")
+            "[EXCEL] Exporter closed."
+        )

@@ -1,62 +1,65 @@
 """
-==============================================================================
-File        : ai/summarizer.py
-Project     : NSE Market Report
+ai/summarizer.py
 
-Description
------------
-AI Summarization Engine.
+AI Summarization Engine for NSE Market Report.
 
 Responsibilities
 ----------------
-✓ Initialize AI provider
-✓ Build prompts
-✓ Call Gemini/OpenAI
-✓ Validate responses
-✓ Batch summarization
-✓ Error handling
-✓ Logging
-
-Author      : Your Name
-==============================================================================
+- Initialize configured AI provider.
+- Build prompts.
+- Call Gemini.
+- Validate responses.
+- Generate single and batch summaries.
+- Apply shared Gemini rate limiting.
+- Handle failures safely.
+- Merge summaries into market report.
 """
 
 from __future__ import annotations
 
 import time
 
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
+
 from datetime import datetime
 from typing import Any
-from typing import Any, Optional
 from typing import Optional
 
 import pandas as pd
 
 import google.generativeai as genai
 
-from config.config import (
-    AI_PROVIDER,
-    GEMINI_API_KEY,
-    OPENAI_API_KEY,
-    MODEL_NAME,
-    TEMPERATURE,
-    MAX_TOKENS,
-    DEFAULT_RETRIES,
-    DEFAULT_BACKOFF,
-    REQUEST_DELAY,
+from ai.prompts import (
+    build_summary_prompt,
 )
 
 from ai.rate_limiter import (
     GEMINI_RATE_LIMITER,
 )
 
-from config.config import MAX_WORKERS
+from config.config import (
+    AI_PROVIDER,
+    GEMINI_API_KEY,
+    MAX_TOKENS,
+    MODEL_NAME,
+    OPENAI_API_KEY,
+    TEMPERATURE,
+)
+
+from config.config import (
+    DEFAULT_BACKOFF,
+    DEFAULT_RETRIES,
+    MAX_WORKERS,
+    REQUEST_DELAY,
+)
 
 from config.logging_config import logger
 
-from ai.prompts import (
-    build_summary_prompt,
+from config.timezone import (
+    now_ist,
 )
+
 
 ###############################################################################
 # EXCEPTIONS
@@ -87,6 +90,7 @@ OUTPUT_COLUMNS = [
 
 ]
 
+
 ###############################################################################
 # AI SUMMARIZER
 ###############################################################################
@@ -99,46 +103,61 @@ class AISummarizer:
     Public Methods
     --------------
     summarize()
-
     summarize_many()
-
+    merge()
     health_check()
+    statistics()
+    test_connection()
+    info()
+    reset()
+    close()
     """
 
     ###########################################################################
+    # INITIALIZATION
+    ###########################################################################
 
-    def __init__(self):
+    def __init__(
+        self,
+    ) -> None:
 
         logger.info(
-
             "[AI] Initializing summarizer..."
-
         )
 
-        self.timestamp = datetime.now()
+        self.timestamp = now_ist()
 
-        self.provider = AI_PROVIDER.lower()
+        self.provider = (
+            str(
+                AI_PROVIDER or ""
+            )
+            .strip()
+            .lower()
+        )
 
-        self.model = self._initialize_model()
+        self.model = (
+            self._initialize_model()
+        )
 
         logger.info(
-
             "[AI] %s initialized.",
-
             self.provider,
-
         )
 
     ###########################################################################
+    # MODEL INITIALIZATION
+    ###########################################################################
 
-    def _initialize_model(self):
+    def _initialize_model(
+        self,
+    ) -> Any:
         """
         Initialize the configured AI provider.
 
         Returns
         -------
-        GenerativeModel | None
-            Configured AI model, or None if AI is disabled.
+        object | None
+            Configured AI model or None when disabled.
         """
 
         if self.provider == "gemini":
@@ -166,9 +185,13 @@ class AISummarizer:
                     "max_output_tokens": MAX_TOKENS,
                 }
 
-                model = genai.GenerativeModel(
-                    model_name=MODEL_NAME,
-                    generation_config=generation_config,
+                model = (
+                    genai.GenerativeModel(
+                        model_name=MODEL_NAME,
+                        generation_config=(
+                            generation_config
+                        ),
+                    )
                 )
 
                 logger.info(
@@ -177,10 +200,11 @@ class AISummarizer:
 
                 return model
 
-            except Exception:
+            except Exception as ex:
 
                 logger.exception(
-                    "Failed to initialize Gemini model."
+                    "Failed to initialize Gemini model: %s",
+                    ex,
                 )
 
                 logger.warning(
@@ -189,7 +213,13 @@ class AISummarizer:
 
                 return None
 
-        elif self.provider == "openai":
+        if self.provider == "openai":
+
+            if not OPENAI_API_KEY:
+
+                logger.warning(
+                    "OPENAI_API_KEY not configured."
+                )
 
             logger.warning(
                 "OpenAI provider is not implemented yet."
@@ -205,20 +235,26 @@ class AISummarizer:
         return None
 
     ###########################################################################
+    # PROVIDER INFORMATION
+    ###########################################################################
 
     @property
-    def provider_name(self) -> str:
+    def provider_name(
+        self,
+    ) -> str:
         """
-        Active AI provider.
+        Return active AI provider.
         """
 
         return self.provider
 
     ###########################################################################
 
-    def health_check(self) -> dict[str, Any]:
+    def health_check(
+        self,
+    ) -> dict[str, Any]:
         """
-        Return AI service information.
+        Return AI service health information.
         """
 
         return {
@@ -229,52 +265,66 @@ class AISummarizer:
 
             "timestamp": self.timestamp,
 
-            "status": "ready" if self.model else "disabled",
+            "status": (
+                "ready"
+                if self.model is not None
+                else "disabled"
+            ),
 
         }
 
     ###########################################################################
+    # REFRESH
+    ###########################################################################
 
-    def refresh(self) -> None:
+    def refresh(
+        self,
+    ) -> None:
         """
-        Reinitialize AI model.
+        Reinitialize the configured AI model.
         """
 
-        self.timestamp = datetime.now()
+        self.timestamp = now_ist()
 
-        self.model = self._initialize_model()
-
-        logger.info(
-
-            "[AI] Model refreshed (%s).",
-            "enabled" if self.model else "disabled",
-
+        self.model = (
+            self._initialize_model()
         )
 
-###############################################################################
-# PROMPT LAYER
-###############################################################################
+        logger.info(
+            "[AI] Model refreshed (%s).",
+            (
+                "enabled"
+                if self.model is not None
+                else "disabled"
+            ),
+        )
+
+    ###########################################################################
+    # PROMPT LAYER
+    ###########################################################################
 
     def _build_prompt(
         self,
         stock: dict[str, Any],
     ) -> str:
         """
-        Build AI prompt for a stock.
+        Build AI summary prompt.
         """
 
-        return build_summary_prompt(stock)
+        return build_summary_prompt(
+            stock
+        )
 
-###############################################################################
-# RESPONSE VALIDATION
-###############################################################################
+    ###########################################################################
+    # RESPONSE VALIDATION
+    ###########################################################################
 
     @staticmethod
     def _validate_response(
         text: Optional[str],
     ) -> str:
         """
-        Validate AI response.
+        Validate Gemini response text.
         """
 
         if text is None:
@@ -283,7 +333,9 @@ class AISummarizer:
                 "AI returned an empty response."
             )
 
-        text = text.strip()
+        text = str(
+            text
+        ).strip()
 
         if not text:
 
@@ -293,9 +345,9 @@ class AISummarizer:
 
         return text
 
-###############################################################################
-# CLEAN RESPONSE
-###############################################################################
+    ###########################################################################
+    # CLEAN RESPONSE
+    ###########################################################################
 
     @staticmethod
     def _clean_response(
@@ -305,26 +357,31 @@ class AISummarizer:
         Normalize AI output.
         """
 
-        text = text.replace("\r", "")
+        text = text.replace(
+            "\r",
+            "",
+        )
 
         while "\n\n\n" in text:
-            text = text.replace("\n\n\n", "\n\n")
+
+            text = text.replace(
+                "\n\n\n",
+                "\n\n",
+            )
 
         return text.strip()
 
-###############################################################################
-# GEMINI REQUEST
-###############################################################################
+    ###########################################################################
+    # GEMINI REQUEST
+    ###########################################################################
 
     def _call_gemini(
         self,
         prompt: str,
     ) -> str:
         """
-        Call Gemini model with retry support.
+        Call Gemini with shared rate limiting and retry support.
         """
-
-        last_exception = None
 
         if self.model is None:
 
@@ -332,28 +389,53 @@ class AISummarizer:
                 "Gemini model is not initialized."
             )
 
-        for attempt in range(1, DEFAULT_RETRIES + 1):
+        last_exception: Optional[
+            Exception
+        ] = None
+
+        for attempt in range(
+            1,
+            DEFAULT_RETRIES + 1,
+        ):
 
             try:
 
-                time.sleep(REQUEST_DELAY)
+                ################################################################
+                # GLOBAL GEMINI RATE LIMITER
+                ################################################################
 
-                response = self.model.generate_content(
-                    prompt
+                GEMINI_RATE_LIMITER.wait()
+
+                ################################################################
+                # REQUEST
+                ################################################################
+
+                response = (
+                    self.model.generate_content(
+                        prompt
+                    )
                 )
 
-                if not hasattr(response, "text"):
+                if not hasattr(
+                    response,
+                    "text",
+                ):
 
                     raise AIResponseError(
-                        "Gemini returned an invalid response."
+                        "Gemini returned "
+                        "an invalid response."
                     )
 
-                text = self._validate_response(
-                    response.text
+                text = (
+                    self._validate_response(
+                        response.text
+                    )
                 )
 
-                return self._clean_response(
-                    text
+                return (
+                    self._clean_response(
+                        text
+                    )
                 )
 
             except Exception as ex:
@@ -361,34 +443,30 @@ class AISummarizer:
                 last_exception = ex
 
                 logger.warning(
-
                     "[AI] Attempt %d/%d failed: %s",
-
                     attempt,
-
                     DEFAULT_RETRIES,
-
                     ex,
-
                 )
 
-                if attempt < DEFAULT_RETRIES:
+                if (
+                    attempt
+                    < DEFAULT_RETRIES
+                ):
 
                     time.sleep(
-
-                        DEFAULT_BACKOFF ** attempt
-
+                        DEFAULT_BACKOFF
+                        ** attempt
                     )
 
         raise AIConnectionError(
-
-            f"Gemini request failed: {last_exception}"
-
+            "Gemini request failed: "
+            f"{last_exception}"
         )
 
-###############################################################################
-# PROVIDER ROUTER
-###############################################################################
+    ###########################################################################
+    # PROVIDER ROUTER
+    ###########################################################################
 
     def _call_model(
         self,
@@ -407,56 +485,51 @@ class AISummarizer:
                     "(Gemini API key not configured)."
                 )
 
-            return self._call_gemini(prompt)
+            return self._call_gemini(
+                prompt
+            )
 
         raise AIError(
-
-            f"Unsupported provider: {self.provider}"
-
+            f"Unsupported provider: "
+            f"{self.provider}"
         )
 
-###############################################################################
-# SINGLE STOCK SUMMARIZATION
-###############################################################################
+    ###########################################################################
+    # SINGLE STOCK SUMMARIZATION
+    ###########################################################################
 
     def summarize(
         self,
         stock: dict[str, Any],
     ) -> dict[str, Any]:
         """
-        Generate AI summary for a single stock.
-
-        Parameters
-        ----------
-        stock : dict
-
-        Returns
-        -------
-        dict
+        Generate AI summary for one stock.
         """
 
-        symbol = stock.get("Symbol", "UNKNOWN")
+        symbol = str(
+            stock.get(
+                "Symbol",
+                "UNKNOWN",
+            )
+        ).strip()
 
         logger.info(
-
             "[AI] Summarizing %s",
-
             symbol,
-
         )
 
         try:
 
-            prompt = self._build_prompt(
-
-                stock,
-
+            prompt = (
+                self._build_prompt(
+                    stock
+                )
             )
 
-            summary = self._call_model(
-
-                prompt,
-
+            summary = (
+                self._call_model(
+                    prompt
+                )
             )
 
             return {
@@ -470,170 +543,139 @@ class AISummarizer:
         except Exception as ex:
 
             logger.exception(
-
                 "[AI] Failed for %s : %s",
-
                 symbol,
-
                 ex,
-
             )
 
             return {
 
                 "Symbol": symbol,
 
-                "AI Summary": "Summary unavailable.",
+                "AI Summary":
+                    "Summary unavailable.",
 
             }
 
-###############################################################################
-# WORKER
-###############################################################################
+    ###########################################################################
+    # WORKER
+    ###########################################################################
 
     def _summarize_worker(
         self,
         stock: dict[str, Any],
     ) -> dict[str, Any]:
         """
-        Thread worker.
+        Worker for one stock.
         """
 
         return self.summarize(
-
-            stock,
-
+            stock
         )
 
-###############################################################################
-# MULTIPLE STOCKS
-###############################################################################
+    ###########################################################################
+    # MULTIPLE STOCKS
+    ###########################################################################
 
     def summarize_many(
         self,
-        stocks: list[dict[str, Any]],
+        stocks: list[
+            dict[str, Any]
+        ],
     ) -> pd.DataFrame:
         """
-        Generate summaries for multiple stocks.
-
-        Parameters
-        ----------
-        stocks : list
-
-        Returns
-        -------
-        DataFrame
+        Generate AI summaries for multiple stocks.
         """
 
         if not stocks:
 
             return pd.DataFrame(
-
-                columns=OUTPUT_COLUMNS,
-
+                columns=OUTPUT_COLUMNS
             )
 
         logger.info(
-
             "[AI] Summarizing %d stocks.",
-
             len(stocks),
-
         )
 
-        rows: list[dict[str, Any]] = []
-
-        from concurrent.futures import ThreadPoolExecutor
-        from concurrent.futures import as_completed
+        rows: list[
+            dict[str, Any]
+        ] = []
 
         with ThreadPoolExecutor(
-
             max_workers=MAX_WORKERS,
-
         ) as executor:
 
             futures = {
 
                 executor.submit(
-
                     self._summarize_worker,
-
                     stock,
-
-                ): stock.get("Symbol")
+                ):
+                    stock.get(
+                        "Symbol"
+                    )
 
                 for stock in stocks
 
             }
 
             for future in as_completed(
-
-                futures,
-
+                futures
             ):
 
-                symbol = futures[future]
+                symbol = futures[
+                    future
+                ]
 
                 try:
 
-                    result = future.result()
+                    result = (
+                        future.result()
+                    )
 
-                    rows.append(result)
+                    rows.append(
+                        result
+                    )
 
                 except Exception as ex:
 
                     logger.exception(
-
                         "[AI] %s : %s",
-
                         symbol,
-
                         ex,
-
                     )
 
                     rows.append(
-
                         {
+                            "Symbol":
+                                symbol,
 
-                            "Symbol": symbol,
-
-                            "AI Summary": "Summary unavailable.",
-
+                            "AI Summary":
+                                "Summary unavailable.",
                         }
-
                     )
 
         df = pd.DataFrame(
-
             rows,
-
             columns=OUTPUT_COLUMNS,
-
         )
 
-        df.sort_values(
+        if not df.empty:
 
-            by="Symbol",
+            df.sort_values(
+                by="Symbol",
+                inplace=True,
+            )
 
-            inplace=True,
-
-        )
-
-        df.reset_index(
-
-            drop=True,
-
-            inplace=True,
-
-        )
+            df.reset_index(
+                drop=True,
+                inplace=True,
+            )
 
         logger.info(
-
             "[AI] Generated %d summaries.",
-
             len(df),
-
         )
 
         return df
@@ -647,69 +689,62 @@ class AISummarizer:
         report_df: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Merge AI summaries into report dataframe.
+        Merge AI summaries into market report dataframe.
         """
 
         if report_df.empty:
 
             logger.warning(
-
                 "[AI] Empty report dataframe."
-
             )
 
             return report_df
 
-        stocks = report_df.to_dict(
-
-            orient="records",
-
+        stocks = (
+            report_df.to_dict(
+                orient="records"
+            )
         )
 
-        summary_df = self.summarize_many(
-
-            stocks,
-
+        summary_df = (
+            self.summarize_many(
+                stocks
+            )
         )
 
         if summary_df.empty:
 
             logger.warning(
-
                 "[AI] No summaries generated."
-
             )
 
             return report_df
 
-        if "AI Summary" in report_df.columns:
+        if "AI Summary" in (
+            report_df.columns
+        ):
 
-            report_df = report_df.drop(
-                columns=["AI Summary"]
+            report_df = (
+                report_df.drop(
+                    columns=[
+                        "AI Summary"
+                    ]
+                )
             )
 
         merged = report_df.merge(
-
             summary_df,
-
             on="Symbol",
-
             how="left",
-
         )
 
         logger.info(
-
             "[AI] Report merged."
-
         )
 
         return merged
 
-<<<<<<< HEAD
-    
-=======
->>>>>>> 263a17d ("13/08/2026")
+
 ###############################################################################
 # STATISTICS
 ###############################################################################
@@ -720,69 +755,87 @@ class AISummarizer:
     ) -> dict[str, Any]:
         """
         Return summary generation statistics.
-
-        Parameters
-        ----------
-        summary_df : DataFrame
-
-        Returns
-        -------
-        dict
         """
 
-<<<<<<< HEAD
         if summary_df is None:
 
             return {
+
                 "total": 0,
+
                 "generated": 0,
+
                 "failed": 0,
+
                 "provider": self.provider,
+
                 "model": MODEL_NAME,
+
                 "status": "unavailable",
+
             }
 
         if summary_df.empty:
 
             return {
+
                 "total": 0,
+
                 "generated": 0,
+
                 "failed": 0,
+
                 "provider": self.provider,
+
                 "model": MODEL_NAME,
+
                 "status": "empty",
+
             }
 
         #######################################################################
-        # AI SUMMARY COLUMN NOT PRESENT
+        # COLUMN VALIDATION
         #######################################################################
 
-        if "AI Summary" not in summary_df.columns:
+        if "AI Summary" not in (
+            summary_df.columns
+        ):
 
             logger.warning(
-                "[AI] AI Summary column not present in dataframe. "
-                "AI summary statistics unavailable."
+                "[AI] AI Summary column not present "
+                "in dataframe."
             )
 
             return {
-                "total": len(summary_df),
+
+                "total": len(
+                    summary_df
+                ),
+
                 "generated": 0,
+
                 "failed": 0,
+
                 "provider": self.provider,
+
                 "model": MODEL_NAME,
+
                 "status": (
                     "ready"
                     if self.model is not None
                     else "disabled"
                 ),
+
             }
 
         #######################################################################
-        # CALCULATE STATISTICS
+        # FAILURE DETECTION
         #######################################################################
 
         summary_series = (
-            summary_df["AI Summary"]
+            summary_df[
+                "AI Summary"
+            ]
             .fillna("")
             .astype(str)
         )
@@ -798,53 +851,28 @@ class AISummarizer:
         )
 
         return {
-            "total": len(summary_df),
-            "generated": len(summary_df) - failed,
+
+            "total": len(
+                summary_df
+            ),
+
+            "generated":
+                len(summary_df) - failed,
+
             "failed": failed,
+
             "provider": self.provider,
+
             "model": MODEL_NAME,
+
             "status": (
                 "ready"
                 if self.model is not None
                 else "disabled"
             ),
-=======
-        if summary_df.empty:
 
-            return {
-
-                "total": 0,
-
-                "generated": 0,
-
-                "failed": 0,
-
-                "provider": self.provider,
-
-                "model": MODEL_NAME,
-
-            }
-
-        failed = summary_df["AI Summary"].str.contains(
-            "unavailable",
-            case=False,
-            na=False,
-        ).sum()
-
-        return {
-
-            "total": len(summary_df),
-
-            "generated": len(summary_df) - failed,
-
-            "failed": failed,
-
-            "provider": self.provider,
-
-            "model": MODEL_NAME,
-
->>>>>>> 263a17d ("13/08/2026")
         }
+
 
 ###############################################################################
 # CONNECTION TEST
@@ -861,7 +889,6 @@ class AISummarizer:
             "[AI] Testing AI connection..."
         )
 
-        # AI is disabled
         if self.model is None:
 
             logger.warning(
@@ -873,8 +900,10 @@ class AISummarizer:
 
         try:
 
-            response = self._call_model(
-                "Reply with exactly one word: OK"
+            response = (
+                self._call_model(
+                    "Reply with exactly one word: OK"
+                )
             )
 
             if not response:
@@ -885,7 +914,10 @@ class AISummarizer:
 
                 return False
 
-            if "OK" in response.upper():
+            if (
+                "OK"
+                in response.upper()
+            ):
 
                 logger.info(
                     "[AI] Connection successful."
@@ -909,59 +941,73 @@ class AISummarizer:
 
             return False
 
+
 ###############################################################################
 # SERVICE INFORMATION
 ###############################################################################
 
-    def info(self) -> dict[str, Any]:
+    def info(
+        self,
+    ) -> dict[str, Any]:
         """
         Return AI service information.
         """
 
         return {
 
-            "provider": self.provider,
+            "provider":
+                self.provider,
 
-            "model": MODEL_NAME,
+            "model":
+                MODEL_NAME,
 
-            "temperature": TEMPERATURE,
+            "temperature":
+                TEMPERATURE,
 
-            "max_tokens": MAX_TOKENS,
+            "max_tokens":
+                MAX_TOKENS,
 
-            "timestamp": self.timestamp,
+            "timestamp":
+                self.timestamp,
 
-            "status": "ready" if self.model else "disabled",
+            "status": (
+                "ready"
+                if self.model is not None
+                else "disabled"
+            ),
 
         }
+
 
 ###############################################################################
 # RESET
 ###############################################################################
 
-    def reset(self) -> None:
+    def reset(
+        self,
+    ) -> None:
         """
         Reinitialize AI service.
         """
 
         logger.info(
-
             "[AI] Resetting service..."
-
         )
 
         self.refresh()
+
 
 ###############################################################################
 # CLOSE
 ###############################################################################
 
-    def close(self) -> None:
+    def close(
+        self,
+    ) -> None:
         """
-        Cleanup resources.
+        Cleanup AI service resources.
         """
 
         logger.info(
-
             "[AI] Service closed."
-
         )

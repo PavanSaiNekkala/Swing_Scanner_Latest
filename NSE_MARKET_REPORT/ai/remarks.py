@@ -233,7 +233,11 @@ class AIRemarks:
 
             "timestamp": self.timestamp,
 
-            "status": "ready",
+            "status": (
+                "ready"
+                if self.model is not None
+                else "disabled"
+            ),
 
         }
 
@@ -329,8 +333,8 @@ class AIRemarks:
 
         if self.model is None:
 
-            raise AIRemarkError(
-                "Gemini model is not initialized."
+            raise AIConnectionError(
+                "Gemini API key not configured."
             )
         
         last_exception = None
@@ -616,30 +620,52 @@ class AIRemarks:
         """
         Generate AI remarks for multiple stocks.
 
-        Parameters
-        ----------
-        stocks : List[dict]
-
-        Returns
-        -------
-        DataFrame
+        If the AI model is unavailable, return fallback remarks
+        immediately without creating unnecessary model requests.
         """
 
         if not stocks:
 
             return pd.DataFrame(
-
                 columns=OUTPUT_COLUMNS,
-
             )
 
         logger.info(
-
             "[REMARKS] Processing %d stocks.",
-
             len(stocks),
-
         )
+
+        #######################################################################
+        # AI UNAVAILABLE
+        #######################################################################
+
+        if self.model is None:
+
+            logger.warning(
+                "[REMARKS] AI model unavailable. "
+                "Using fallback remarks for %d stocks.",
+                len(stocks),
+            )
+
+            rows = [
+                {
+                    "Symbol": stock.get("Symbol"),
+                    "Sentiment": "Unknown",
+                    "Strength Score": None,
+                    "Risk": "Unknown",
+                    "Final Remarks": "AI remarks unavailable.",
+                }
+                for stock in stocks
+            ]
+
+            return pd.DataFrame(
+                rows,
+                columns=OUTPUT_COLUMNS,
+            )
+
+        #######################################################################
+        # PARALLEL AI GENERATION
+        #######################################################################
 
         rows: List[Dict[str, Any]] = []
 
@@ -649,29 +675,19 @@ class AIRemarks:
         )
 
         with ThreadPoolExecutor(
-
             max_workers=MAX_WORKERS,
-
         ) as executor:
 
             futures = {
-
                 executor.submit(
-
                     self._generate_worker,
-
                     stock,
-
                 ): stock.get("Symbol")
-
                 for stock in stocks
-
             }
 
             for future in as_completed(
-
                 futures,
-
             ):
 
                 symbol = futures[future]
@@ -679,73 +695,52 @@ class AIRemarks:
                 try:
 
                     rows.append(
-
                         future.result()
-
                     )
 
                 except Exception as ex:
 
-                    logger.exception(
-
-                        "[REMARKS] %s : %s",
-
+                    logger.error(
+                        "[REMARKS] Failed for %s: %s",
                         symbol,
-
                         ex,
-
                     )
 
                     rows.append(
-
                         {
-
                             "Symbol": symbol,
-
                             "Sentiment": "Unknown",
-
                             "Strength Score": None,
-
                             "Risk": "Unknown",
-
                             "Final Remarks":
-
                                 "Unable to generate AI remarks.",
-
                         }
-
                     )
 
+        #######################################################################
+        # BUILD RESULT
+        #######################################################################
+
         df = pd.DataFrame(
-
             rows,
-
             columns=OUTPUT_COLUMNS,
-
         )
 
-        df.sort_values(
+        if not df.empty:
 
-            by="Symbol",
+            df.sort_values(
+                by="Symbol",
+                inplace=True,
+            )
 
-            inplace=True,
-
-        )
-
-        df.reset_index(
-
-            drop=True,
-
-            inplace=True,
-
-        )
+            df.reset_index(
+                drop=True,
+                inplace=True,
+            )
 
         logger.info(
-
             "[REMARKS] Completed for %d stocks.",
-
             len(df),
-
         )
 
         return df
@@ -904,19 +899,14 @@ class AIRemarks:
         """
 
         return {
-
             "provider": self.provider,
-
             "model": MODEL_NAME,
-
-            "temperature": TEMPERATURE,
-
-            "max_tokens": MAX_TOKENS,
-
             "timestamp": self.timestamp,
-
-            "status": "ready",
-
+            "status": (
+                "ready"
+                if self.model is not None
+                else "disabled"
+            ),
         }
 
 ###############################################################################

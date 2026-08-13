@@ -30,6 +30,7 @@ from typing import Any
 from typing import Dict
 
 import pandas as pd
+import math
 
 from openpyxl import Workbook
 from openpyxl import load_workbook
@@ -42,20 +43,16 @@ from openpyxl.styles import Alignment
 
 from openpyxl.utils import get_column_letter
 
+from config.timezone import now_ist
+
 from config.config import (
-
     OUTPUT_EXCEL,
-
+    OUTPUT_EXCEL_DIR,
     HEADER_COLOR,
-
     GAINER_COLOR,
-
     LOSER_COLOR,
-
     REPORT_COLUMNS,
-
     DATETIME_FORMAT,
-
 )
 
 from config.logging_config import logger
@@ -131,7 +128,7 @@ class ExcelExporter:
 
         self.timestamp = datetime.now()
 
-        OUTPUT_EXCEL.mkdir(
+        OUTPUT_EXCEL_DIR.mkdir(
 
             parents=True,
 
@@ -159,7 +156,7 @@ class ExcelExporter:
 
         )
 
-        return OUTPUT_EXCEL / name
+        return OUTPUT_EXCEL_DIR / name
 
 ###############################################################################
 # VALIDATION
@@ -738,6 +735,530 @@ class ExcelExporter:
         return output_path
     
 
+
+    def export_gainers_losers_append(
+        self,
+        df: pd.DataFrame,
+    ) -> Path:
+        """
+        Append current run's gainers and losers to separate
+        persistent Excel worksheets.
+
+        Workbook:
+            NSE_Market_Report.xlsx
+
+        Sheets:
+            Gainers
+            Losers
+        """
+
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError(
+                "Expected pandas DataFrame."
+            )
+
+        if df.empty:
+            raise ValueError(
+                "Cannot append an empty market report."
+            )
+
+        required_columns = [
+            "Timestamp",
+            "Category",
+            "Symbol",
+            "Company",
+            "CMP",
+            "Open",
+            "High",
+            "Low",
+            "Previous Close",
+            "Close",
+            "Volume",
+            "1 Day Change %",
+            "Top Headline",
+            "Recent News",
+            "Final Remarks",
+        ]
+
+        missing = [
+            column
+            for column in required_columns
+            if column not in df.columns
+        ]
+
+        if missing:
+            raise ValueError(
+                "Missing required columns: "
+                + ", ".join(missing)
+            )
+
+        workbook_path = Path(
+            OUTPUT_EXCEL
+        )
+
+        workbook_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        if workbook_path.exists():
+            workbook = load_workbook(
+                workbook_path
+            )
+        else:
+            workbook = Workbook()
+
+        gainers = df.loc[
+            df["Category"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .eq("gainer")
+        ].copy()
+
+        losers = df.loc[
+            df["Category"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .eq("loser")
+        ].copy()
+
+        #######################################################################
+        # OPEN OR CREATE WORKBOOK
+        #######################################################################
+
+        if workbook_path.exists():
+
+            workbook = load_workbook(
+                workbook_path
+            )
+
+        else:
+
+            workbook = Workbook()
+
+            default_sheet = workbook.active
+            workbook.remove(default_sheet)
+
+
+        def _normalize_duplicate_value(
+            value: Any,
+        ) -> str:
+            """
+            Normalize a value for duplicate comparison.
+            """
+
+            if value is None:
+                return ""
+
+            if isinstance(
+                value,
+                float,
+            ):
+
+                if math.isnan(value):
+                    return ""
+
+                return f"{value:.10f}"
+
+            if isinstance(
+                value,
+                (list, tuple),
+            ):
+
+                return " | ".join(
+                    str(item).strip()
+                    for item in value
+                )
+
+            return str(value).strip()
+
+        def _same_day_duplicate_signatures(
+            worksheet,
+        ) -> set[tuple]:
+            """
+            Build signatures for rows already stored in the
+            worksheet for the current IST calendar date.
+
+            Timestamp is intentionally excluded from the
+            signature so repeated runs on the same day can be
+            detected even though execution times differ.
+            """
+
+            signatures: set[tuple] = set()
+
+            if worksheet.max_row < 2:
+                return signatures
+
+            headers = [
+                cell.value
+                for cell in worksheet[1]
+            ]
+
+            header_index = {
+                str(header): index
+                for index, header in enumerate(
+                    headers
+                )
+                if header is not None
+            }
+
+            signature_columns = [
+                column
+                for column in required_columns
+                if column != "Timestamp"
+            ]
+
+            timestamp_index = header_index.get(
+                "Timestamp"
+            )
+
+            if timestamp_index is None:
+                return signatures
+
+            today_ist = now_ist().date()
+
+            for row in worksheet.iter_rows(
+                min_row=2,
+                values_only=True,
+            ):
+
+                timestamp_value = row[
+                    timestamp_index
+                ]
+
+                if timestamp_value is None:
+                    continue
+
+                try:
+
+                    if isinstance(
+                        timestamp_value,
+                        datetime,
+                    ):
+
+                        row_date = (
+                            timestamp_value
+                            .date()
+                        )
+
+                    else:
+
+                        timestamp_text = (
+                            str(timestamp_value)
+                            .strip()
+                        )
+
+                        row_date = datetime.strptime(
+                            timestamp_text[:10],
+                            "%Y-%m-%d",
+                        ).date()
+
+                except (
+                    ValueError,
+                    TypeError,
+                ):
+
+                    continue
+
+                if row_date != today_ist:
+                    continue
+
+                signature = tuple(
+                    _normalize_duplicate_value(
+                        row[
+                            header_index[column]
+                        ]
+                    )
+                    for column in signature_columns
+                    if column in header_index
+                )
+
+                signatures.add(
+                    signature
+                )
+
+            return signatures
+
+        
+        #######################################################################
+        # APPEND HELPER
+        #######################################################################
+
+        def append_sheet(
+            sheet_name: str,
+            data: pd.DataFrame,
+        ) -> None:
+
+            if sheet_name in workbook.sheetnames:
+
+                worksheet = workbook[sheet_name]
+
+            else:
+
+                worksheet = workbook.create_sheet(
+                    sheet_name
+                )
+
+            if worksheet.max_row == 1 and all(
+                cell.value is None
+                for cell in worksheet[1]
+            ):
+                worksheet.delete_rows(1)
+
+            ###################################################################
+            # HEADER
+            ###################################################################
+
+            if worksheet.max_row == 0:
+
+                for column_index, column in enumerate(
+                    required_columns,
+                    start=1,
+                ):
+                    worksheet.cell(
+                        row=1,
+                        column=column_index,
+                        value=column,
+                    )
+
+            elif worksheet.max_row == 1:
+
+                existing_headers = [
+                    cell.value
+                    for cell in worksheet[1]
+                ]
+
+                if not any(existing_headers):
+
+                    for column_index, column in enumerate(
+                        required_columns,
+                        start=1,
+                    ):
+                        worksheet.cell(
+                            row=1,
+                            column=column_index,
+                            value=column,
+                        )
+
+            ###################################################################
+            # REMOVE SAME-DAY DUPLICATES
+            ###################################################################
+
+            existing_signatures = (
+                _same_day_duplicate_signatures(
+                    worksheet
+                )
+            )
+
+            signature_columns = [
+                column
+                for column in required_columns
+                if column != "Timestamp"
+            ]
+
+            rows_to_append = []
+
+            skipped_duplicates = 0
+
+            for values in data[
+                required_columns
+            ].itertuples(
+                index=False,
+                name=None,
+            ):
+
+                row_mapping = dict(
+                    zip(
+                        required_columns,
+                        values,
+                    )
+                )
+
+                signature = tuple(
+                    _normalize_duplicate_value(
+                        row_mapping.get(
+                            column
+                        )
+                    )
+                    for column in signature_columns
+                )
+
+                if signature in existing_signatures:
+
+                    skipped_duplicates += 1
+
+                    continue
+
+                existing_signatures.add(
+                    signature
+                )
+
+                rows_to_append.append(
+                    row_mapping
+                )
+
+            ###################################################################
+            # APPEND UNIQUE DATA
+            ###################################################################
+
+            if not rows_to_append:
+
+                logger.info(
+                    "[EXCEL] %s | "
+                    "No new rows to append. "
+                    "Skipped duplicates=%d",
+                    sheet_name,
+                    skipped_duplicates,
+                )
+
+                return
+
+            start_row = (
+                worksheet.max_row + 1
+            )
+
+            for row_offset, row_mapping in enumerate(
+                rows_to_append,
+                start=0,
+            ):
+
+                excel_row = (
+                    start_row
+                    + row_offset
+                )
+
+                for column_index, column in enumerate(
+                    required_columns,
+                    start=1,
+                ):
+
+                    value = row_mapping.get(
+                        column
+                    )
+
+                    if isinstance(
+                        value,
+                        (list, tuple),
+                    ):
+
+                        value = " | ".join(
+                            map(
+                                str,
+                                value,
+                            )
+                        )
+
+                    if pd.isna(value):
+                        value = None
+
+                    worksheet.cell(
+                        row=excel_row,
+                        column=column_index,
+                        value=value,
+                    )
+
+            logger.info(
+                "[EXCEL] %s | "
+                "Appended=%d | "
+                "Skipped duplicates=%d",
+                sheet_name,
+                len(rows_to_append),
+                skipped_duplicates,
+            )
+
+            ###################################################################
+            # HEADER FORMATTING
+            ###################################################################
+
+            for cell in worksheet[1]:
+
+                cell.font = cell.font.copy(
+                    bold=True
+                )
+
+            ###################################################################
+            # FREEZE HEADER
+            ###################################################################
+
+            worksheet.freeze_panes = "A2"
+
+            ###################################################################
+            # AUTO FILTER
+            ###################################################################
+
+            worksheet.auto_filter.ref = (
+                worksheet.dimensions
+            )
+
+            ###################################################################
+            # COLUMN WIDTHS
+            ###################################################################
+
+            widths = {
+                "Timestamp": 22,
+                "Category": 12,
+                "Symbol": 16,
+                "Company": 32,
+                "CMP": 14,
+                "Open": 14,
+                "High": 14,
+                "Low": 14,
+                "Previous Close": 18,
+                "Close": 14,
+                "Volume": 16,
+                "1 Day Change %": 18,
+                "Top Headline": 50,
+                "Recent News": 80,
+                "Final Remarks": 60,
+            }
+
+            for index, column in enumerate(
+                required_columns,
+                start=1,
+            ):
+
+                worksheet.column_dimensions[
+                    get_column_letter(index)
+                ].width = widths.get(
+                    column,
+                    18,
+                )
+
+        #######################################################################
+        # APPEND BOTH SHEETS
+        #######################################################################
+
+        append_sheet(
+            "Gainers",
+            gainers,
+        )
+
+        append_sheet(
+            "Losers",
+            losers,
+        )
+
+        #######################################################################
+        # SAVE
+        #######################################################################
+
+        workbook.save(
+            workbook_path
+        )
+
+        logger.info(
+            "[EXCEL] Appended %d gainers and %d losers | File=%s",
+            len(gainers),
+            len(losers),
+            workbook_path,
+        )
+
+        return workbook_path
+
+
+
 ###############################################################################
 # EXPORT REPORT
 ###############################################################################
@@ -882,7 +1403,7 @@ class ExcelExporter:
 
             "output_directory": str(
 
-                OUTPUT_EXCEL,
+                OUTPUT_EXCEL_DIR,
 
             ),
 
@@ -911,7 +1432,7 @@ class ExcelExporter:
 
             "output_directory": str(
 
-                OUTPUT_EXCEL,
+                OUTPUT_EXCEL_DIR,
 
             ),
 

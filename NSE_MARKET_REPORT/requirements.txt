@@ -26,3 +26,5 @@ schedule
 tqdm
 
 tenacity
+
+nselib

@@ -30,8 +30,6 @@ from __future__ import annotations
 import threading
 import time
 
-from datetime import datetime
-
 from typing import Any
 from typing import Dict
 from typing import List
@@ -39,15 +37,12 @@ from typing import Optional
 
 import pandas as pd
 
-from requests import Session
-
 from config.logging_config import logger
+from config.timezone import now_ist
 
-from data.nse_data import (
-    NSEData,
-    NSEConnectionError,
-    NSEDataError,
-)
+from data.nse_data import NSEDataError
+
+from nselib.capital_market import price_volume_data
 
 ###############################################################################
 # CONFIGURATION
@@ -175,13 +170,9 @@ class OHLCData:
 
         logger.info("Initializing OHLCData...")
 
-        self.nse = NSEData()
-
-        self.session: Session = self.nse.session
-
         self.cache = QuoteCache()
 
-        self.timestamp = datetime.now()
+        self.timestamp = now_ist()
 
         logger.info("OHLCData initialized successfully.")
 
@@ -204,346 +195,158 @@ class OHLCData:
     def _request(
         self,
         symbol: str,
-        timeout: int = DEFAULT_TIMEOUT,
-    ) -> Dict[str, Any]:
+    ) -> pd.DataFrame:
         """
-        Download quote JSON for a single NSE symbol.
-
-        Features
-        --------
-        ✓ Cache lookup
-        ✓ Retry
-        ✓ Cookie refresh
-        ✓ Rate limiting
-        ✓ JSON validation
+        Download OHLCV data using nselib.
 
         Parameters
         ----------
         symbol : str
+            NSE equity symbol.
 
         Returns
         -------
-        dict
+        pandas.DataFrame
+            OHLCV data returned by nselib.
         """
 
         symbol = symbol.strip().upper()
-
-        # -------------------------------------------------------------
-        # Cache Lookup
-        # -------------------------------------------------------------
 
         cached = self.cache.get(symbol)
 
         if cached is not None:
 
-            logger.debug("Cache hit : %s", symbol)
+            logger.debug(
+                "Cache hit : %s",
+                symbol,
+            )
 
             return cached
 
-        logger.info("Downloading quote : %s", symbol)
-
-        # -------------------------------------------------------------
-        # Retry Loop
-        # -------------------------------------------------------------
-
-        for attempt in range(1, DEFAULT_RETRIES + 1):
-
-            try:
-
-                # Small delay prevents NSE rate limiting
-                time.sleep(REQUEST_DELAY)
-
-                payload = self.nse._request(
-
-                    QUOTE_ENDPOINT,
-
-                    params={
-
-                        "symbol": symbol
-
-                    },
-
-                    timeout=timeout,
-
-                )
-
-                if not payload:
-
-                    raise NSEDataError(
-
-                        f"Empty payload received for {symbol}"
-
-                    )
-
-                if not isinstance(payload, dict):
-
-                    raise NSEDataError(
-
-                        f"Invalid JSON received for {symbol}"
-
-                    )
-
-                # Save to cache
-
-                self.cache.set(
-
-                    symbol,
-
-                    payload,
-
-                )
-
-                logger.info(
-
-                    "Quote downloaded : %s",
-
-                    symbol,
-
-                )
-
-                return payload
-
-            except NSEConnectionError:
-
-                logger.warning(
-
-                    "Retry %d/%d : %s",
-
-                    attempt,
-
-                    DEFAULT_RETRIES,
-
-                    symbol,
-
-                )
-
-                if attempt == DEFAULT_RETRIES:
-
-                    raise
-
-                time.sleep(
-
-                    DEFAULT_BACKOFF ** attempt
-
-                )
-
-            except Exception as ex:
-
-                logger.exception(ex)
-
-                if attempt == DEFAULT_RETRIES:
-
-                    raise
-
-                time.sleep(
-
-                    DEFAULT_BACKOFF ** attempt
-
-                )
-
-        raise NSEConnectionError(
-
-            f"Unable to download quote for {symbol}"
-
+        logger.info(
+            "Downloading OHLC via nselib : %s",
+            symbol,
         )
+
+        try:
+
+            time.sleep(REQUEST_DELAY)
+
+            df = price_volume_data(
+                symbol=symbol,
+                period="1D",
+            )
+
+            if df is None:
+
+                raise NSEDataError(
+                    f"No OHLC data returned for {symbol}"
+                )
+
+            if not isinstance(df, pd.DataFrame):
+
+                df = pd.DataFrame(df)
+
+            if df.empty:
+
+                raise NSEDataError(
+                    f"Empty OHLC dataframe for {symbol}"
+                )
+
+            self.cache.set(
+                symbol,
+                df,
+            )
+
+            logger.info(
+                "OHLC downloaded : %s",
+                symbol,
+            )
+
+            return df
+
+        except Exception as ex:
+
+            logger.exception(
+                "OHLC download failed for %s : %s",
+                symbol,
+                ex,
+            )
+
+            raise NSEDataError(
+                f"Unable to download OHLC for {symbol}: {ex}"
+            )
 
     ###########################################################################
     # RAW JSON EXTRACTION
     ###########################################################################
 
-    @staticmethod
-    def _safe_get(
-        data: Dict[str, Any],
-        *keys: str,
-        default: Any = None,
-    ) -> Any:
-        """
-        Safely retrieve nested dictionary values.
-
-        Example
-        -------
-        _safe_get(payload, "priceInfo", "lastPrice")
-        """
-
-        value: Any = data
-
-        for key in keys:
-
-            if not isinstance(value, dict):
-
-                return default
-
-            value = value.get(key)
-
-            if value is None:
-
-                return default
-
-        return value
-
-    ###########################################################################
-
     def _download_quote(
         self,
         symbol: str,
-    ) -> Dict[str, Any]:
+    ) -> pd.DataFrame:
         """
-        Returns validated quote JSON.
+        Return validated OHLC dataframe.
         """
 
-        payload = self._request(symbol)
-
-        required_sections = [
-
-            "priceInfo",
-
-            "metadata",
-
-        ]
-
-        missing = [
-
-            section
-
-            for section in required_sections
-
-            if section not in payload
-
-        ]
-
-        if missing:
-
-            raise NSEDataError(
-
-                f"{symbol} missing sections: {missing}"
-
-            )
-
-        logger.debug(
-
-            "Quote JSON validated : %s",
-
+        return self._request(
             symbol,
-
         )
-
-        return payload
 
 
     ###########################################################################
     # JSON PARSING
     ###########################################################################
 
+    @staticmethod
     def _parse_quote(
-        self,
-        payload: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        payload: pd.DataFrame,
+    ) -> pd.DataFrame:
         """
-        Parse NSE quote JSON into a flat dictionary.
-
-        Parameters
-        ----------
-        payload : dict
-
-        Returns
-        -------
-        dict
+        Convert nselib OHLCV dataframe into the
+        project's standard OHLC schema.
         """
 
-        record = {
+        if payload is None or payload.empty:
 
-            "Symbol": self._safe_get(
-                payload,
-                "metadata",
-                "symbol"
-            ),
+            return pd.DataFrame()
 
-            "CMP": self._safe_get(
-                payload,
-                "priceInfo",
-                "lastPrice"
-            ),
+        df = payload.copy()
 
-            "Open": self._safe_get(
-                payload,
-                "priceInfo",
-                "open"
-            ),
-
-            "High": self._safe_get(
-                payload,
-                "priceInfo",
-                "intraDayHighLow",
-                "max"
-            ),
-
-            "Low": self._safe_get(
-                payload,
-                "priceInfo",
-                "intraDayHighLow",
-                "min"
-            ),
-
-            "Close": self._safe_get(
-                payload,
-                "priceInfo",
-                "close"
-            ),
-
-            "Previous Close": self._safe_get(
-                payload,
-                "priceInfo",
-                "previousClose"
-            ),
-
-            "Volume": self._safe_get(
-                payload,
-                "securityWiseDP",
-                "quantityTraded"
-            ),
-
-            "VWAP": self._safe_get(
-                payload,
-                "priceInfo",
-                "vwap"
-            ),
-
-            "52 Week High": self._safe_get(
-                payload,
-                "priceInfo",
-                "weekHighLow",
-                "max"
-            ),
-
-            "52 Week Low": self._safe_get(
-                payload,
-                "priceInfo",
-                "weekHighLow",
-                "min"
-            ),
-
-            "Upper Circuit": self._safe_get(
-                payload,
-                "securityInfo",
-                "upperCP"
-            ),
-
-            "Lower Circuit": self._safe_get(
-                payload,
-                "securityInfo",
-                "lowerCP"
-            ),
-
-            "Face Value": self._safe_get(
-                payload,
-                "securityInfo",
-                "faceValue"
-            )
-
+        rename_map = {
+            "Symbol": "Symbol",
+            "symbol": "Symbol",
+            "Open": "Open",
+            "open": "Open",
+            "open_price": "Open",
+            "High": "High",
+            "high": "High",
+            "high_price": "High",
+            "Low": "Low",
+            "low": "Low",
+            "low_price": "Low",
+            "Close": "Close",
+            "close": "Close",
+            "ltp": "CMP",
+            "LTP": "CMP",
+            "prev_close": "Previous Close",
+            "previous_close": "Previous Close",
+            "prev_price": "Previous Close",
+            "volume": "Volume",
+            "trade_quantity": "Volume",
         }
 
-        return record
+        df.rename(
+            columns=rename_map,
+            inplace=True,
+        )
 
+        if "Symbol" not in df.columns:
+
+            df["Symbol"] = None
+
+        return df
+    
     ###########################################################################
     # NORMALIZATION
     ###########################################################################
@@ -688,21 +491,43 @@ class OHLCData:
 
     def _prepare_dataframe(
         self,
-        payload: Dict[str, Any],
+        payload: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Complete processing pipeline.
+        Complete OHLC processing pipeline.
         """
 
-        record = self._parse_quote(payload)
+        df = self._parse_quote(
+            payload,
+        )
 
-        df = self._normalize(record)
+        if df.empty:
 
-        df = self._convert_numeric(df)
+            return pd.DataFrame(
+                columns=OUTPUT_COLUMNS,
+            )
 
-        df = self._validate(df)
+        df = self._convert_numeric(
+            df,
+        )
 
-        df = self._clean(df)
+        required_columns = [
+            column
+            for column in OUTPUT_COLUMNS
+            if column not in df.columns
+        ]
+
+        for column in required_columns:
+
+            df[column] = None
+
+        df = df[
+            OUTPUT_COLUMNS
+        ]
+
+        df = self._clean(
+            df,
+        )
 
         return df
 
@@ -717,22 +542,21 @@ class OHLCData:
     ) -> pd.DataFrame:
         """
         Fetch OHLC data for a single symbol.
-
-        Parameters
-        ----------
-        symbol : str
-
-        Returns
-        -------
-        pandas.DataFrame
         """
 
-        logger.info("Fetching OHLC : %s", symbol)
+        logger.info(
+            "Fetching OHLC : %s",
+            symbol,
+        )
 
-        payload = self._download_quote(symbol)
+        payload = self._download_quote(
+            symbol,
+        )
 
-        return self._prepare_dataframe(payload)
-
+        return self._prepare_dataframe(
+            payload,
+        )
+    
     ###########################################################################
 
     def _fetch_worker(
@@ -942,7 +766,7 @@ class OHLCData:
         Refresh timestamp and clear cache.
         """
 
-        self.timestamp = datetime.now()
+        self.timestamp = now_ist()
 
         self.clear_cache()
 
@@ -957,9 +781,9 @@ class OHLCData:
         return {
             "component": "OHLCData",
             "status": "ready",
-            "session_initialized": self.nse.cookies_initialized,
+            "provider": "nselib",
             "cache_enabled": self.cache is not None,
             "timestamp": self.timestamp.strftime(
-                "%Y-%m-%d %H:%M:%S"
+                "%Y-%m-%d %H:%M:%S IST"
             ),
         }

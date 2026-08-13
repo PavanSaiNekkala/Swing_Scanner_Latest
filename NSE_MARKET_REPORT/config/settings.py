@@ -62,4 +62,4 @@ DEFAULT_ENCODING = "utf-8"
 DEFAULT_TIMEZONE = "Asia/Kolkata"
 
 
-MARKET_PROVIDER = "nse"
+MARKET_PROVIDER = "nselib"

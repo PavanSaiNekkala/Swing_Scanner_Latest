@@ -2,7 +2,7 @@ from config.settings import MARKET_PROVIDER
 
 from data.providers.mock_provider import MockProvider
 from data.providers.nse_provider import NSEProvider
-
+from data.providers.nselib_provider import NSELibProvider
 
 class MarketData:
 
@@ -11,6 +11,7 @@ class MarketData:
         providers = {
             "mock": MockProvider,
             "nse": NSEProvider,
+            "nselib": NSELibProvider,
         }
 
         provider_cls = providers.get(MARKET_PROVIDER.lower())

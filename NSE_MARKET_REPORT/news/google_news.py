@@ -41,7 +41,16 @@ from requests.adapters import HTTPAdapter
 
 from urllib3.util.retry import Retry
 
+from datetime import timedelta
+
 from config.logging_config import logger
+
+from email.utils import parsedate_to_datetime
+
+from config.timezone import (
+    IST,
+    now_ist,
+)
 
 ###############################################################################
 # CONFIGURATION
@@ -201,7 +210,7 @@ class GoogleNews:
             "Initializing GoogleNews..."
         )
 
-        self.timestamp = datetime.now()
+        self.timestamp = now_ist()
 
         self.cache = NewsCache()
 
@@ -338,15 +347,13 @@ class GoogleNews:
             return cached["xml"]
 
         params = {
-
-            "q": f"{symbol} NSE OR {symbol} stock",
-
+            "q": (
+                f"({symbol} NSE OR {symbol} stock) "
+                "when:15d"
+            ),
             "hl": LANGUAGE,
-
             "gl": COUNTRY,
-
-            "ceid": f"{COUNTRY}:{LANGUAGE}"
-
+            "ceid": f"{COUNTRY}:{LANGUAGE}",
         }
 
         logger.info("Downloading Google News RSS : %s", symbol)
@@ -392,13 +399,9 @@ class GoogleNews:
                     symbol,
 
                     {
-
                         "xml": xml,
-
-                        "timestamp": datetime.now(),
-
+                        "timestamp": now_ist(),
                     }
-
                 )
 
                 logger.info(
@@ -416,11 +419,8 @@ class GoogleNews:
                 logger.warning(
 
                     "Timeout (%d/%d) : %s",
-
                     attempt,
-
                     DEFAULT_RETRIES,
-
                     symbol,
 
                 )
@@ -430,11 +430,8 @@ class GoogleNews:
                 logger.warning(
 
                     "Connection Error (%d/%d) : %s",
-
                     attempt,
-
                     DEFAULT_RETRIES,
-
                     symbol,
 
                 )
@@ -456,6 +453,36 @@ class GoogleNews:
             f"Unable to download news for {symbol}"
 
         )
+
+
+
+    @staticmethod
+    def _filter_recent_articles(
+        articles: List[Dict[str, Any]],
+        days: int = 15,
+    ) -> List[Dict[str, Any]]:
+        """
+        Keep only articles published within the last N days.
+        """
+
+        if not articles:
+            return []
+
+        cutoff = (
+            now_ist()
+            - timedelta(days=days)
+        )
+
+        return [
+            article
+            for article in articles
+            if (
+                article.get("Published") is not None
+                and article["Published"] >= cutoff
+            )
+        ]
+
+    
 
 ###############################################################################
 # XML VALIDATION
@@ -519,6 +546,54 @@ class GoogleNews:
 
         return xml
 
+
+
+    @staticmethod
+    def _parse_published_date(
+        value: str,
+    ) -> Optional[datetime]:
+        """
+        Parse RSS publication date and normalize it to IST.
+        """
+
+        if not value:
+            return None
+
+        try:
+
+            published = parsedate_to_datetime(
+                value
+            )
+
+            if published.tzinfo is None:
+
+                published = published.replace(
+                    tzinfo=IST
+                )
+
+            else:
+
+                published = published.astimezone(
+                    IST
+                )
+
+            return published
+
+        except (
+            TypeError,
+            ValueError,
+            OverflowError,
+        ):
+
+            logger.warning(
+                "Unable to parse publication date: %s",
+                value,
+            )
+
+            return None
+
+        
+
 ###############################################################################
 # XML PARSING
 ###############################################################################
@@ -527,21 +602,10 @@ class GoogleNews:
         self,
         xml: str,
         symbol: str,
-    ) -> List[Dict[str, str]]:
+    ) -> List[Dict[str, Any]]:
         """
-        Parse Google News RSS feed.
-
-        Parameters
-        ----------
-        xml : str
-            RSS XML document.
-
-        symbol : str
-            NSE Symbol.
-
-        Returns
-        -------
-        List[Dict]
+        Parse Google News RSS feed and retain only articles
+        published within the last 15 days.
         """
 
         import xml.etree.ElementTree as ET
@@ -558,7 +622,7 @@ class GoogleNews:
                 "Unable to parse RSS XML."
             )
 
-        articles = []
+        articles: List[Dict[str, Any]] = []
 
         channel = root.find("channel")
 
@@ -568,41 +632,71 @@ class GoogleNews:
                 "RSS channel missing."
             )
 
+        raw_count = 0
+
         for item in channel.findall("item"):
 
-            articles.append({
+            raw_count += 1
 
+            published = self._parse_published_date(
+                item.findtext(
+                    "pubDate",
+                    default="",
+                ).strip()
+            )
+
+            # Skip articles where publication time
+            # cannot be verified.
+            if published is None:
+                continue
+
+            article = {
                 "Symbol": symbol,
 
                 "Headline":
-
-                    item.findtext("title", default="").strip(),
+                    item.findtext(
+                        "title",
+                        default="",
+                    ).strip(),
 
                 "Link":
-
-                    item.findtext("link", default="").strip(),
+                    item.findtext(
+                        "link",
+                        default="",
+                    ).strip(),
 
                 "Published":
-
-                    item.findtext("pubDate", default="").strip(),
+                    published,
 
                 "Source":
+                    item.findtext(
+                        "source",
+                        default="Google News",
+                    ).strip(),
+            }
 
-                    item.findtext("source", default="Google News").strip()
+            articles.append(
+                article
+            )
 
-            })
+        #######################################################################
+        # 15-DAY FILTER
+        #######################################################################
 
-        logger.info(
-
-            "%d articles parsed for %s",
-
-            len(articles),
-
-            symbol,
-
+        recent_articles = self._filter_recent_articles(
+            articles,
+            days=15,
         )
 
-        return articles
+        logger.info(
+            "Google News RSS : %s | "
+            "Raw=%d | Last15Days=%d",
+            symbol,
+            raw_count,
+            len(recent_articles),
+        )
+
+        return recent_articles
 
 ###############################################################################
 # DEDUPLICATION
@@ -803,31 +897,21 @@ class GoogleNews:
         """
 
         articles = self._parse_feed(
-
             xml,
-
             symbol,
-
         )
 
         articles = self._deduplicate(
-
             articles
-
         )
 
         articles = self._rank_articles(
-
             articles,
-
             symbol,
-
         )
 
         return self._prepare_news(
-
             articles
-
         )
 
 ###############################################################################
@@ -1093,7 +1177,7 @@ class GoogleNews:
         Reset cache and timestamp.
         """
 
-        self.timestamp = datetime.now()
+        self.timestamp = now_ist()
 
         self.clear_cache()
 

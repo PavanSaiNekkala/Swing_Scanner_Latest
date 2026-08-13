@@ -37,6 +37,8 @@ from config.config import (
 
 from config.logging_config import logger
 
+from config.timezone import format_ist
+
 ###############################################################################
 # DEFAULT VALUES
 ###############################################################################
@@ -44,41 +46,23 @@ from config.logging_config import logger
 DEFAULT_VALUES = {
 
     "Timestamp": "",
-
     "Category": "",
-
     "Symbol": "",
-
     "Company": "",
-
     "CMP": 0.0,
-
     "Open": 0.0,
-
     "High": 0.0,
-
     "Low": 0.0,
-
     "Previous Close": 0.0,
-
     "Close": 0.0,
-
     "Volume": 0,
-
     "1 Day Change %": 0.0,
-
     "Top Headline": "",
-
     "Recent News": "",
-
     "AI Summary": "",
-
     "Sentiment": "",
-
     "Strength Score": "",
-
     "Risk": "",
-
     "Final Remarks": "",
 
 }
@@ -120,9 +104,7 @@ class ReportFormatter:
         """
 
         return self.timestamp.strftime(
-
             DATETIME_FORMAT,
-
         )
 
 ###############################################################################
@@ -138,17 +120,12 @@ class ReportFormatter:
         """
 
         if not isinstance(
-
             df,
-
             pd.DataFrame,
-
         ):
 
             raise TypeError(
-
                 "Expected pandas DataFrame."
-
             )
 
 ###############################################################################
@@ -164,13 +141,9 @@ class ReportFormatter:
         for column in REPORT_COLUMNS:
 
             if column not in df.columns:
-
                 df[column] = DEFAULT_VALUES.get(
-
                     column,
-
                     "",
-
                 )
 
         return df
@@ -209,10 +182,15 @@ class ReportFormatter:
         df: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Add report generation timestamp.
+        Add current IST timestamp to every report row.
         """
 
-        df["Timestamp"] = self.generated_at
+        if df.empty:
+            return df
+
+        timestamp = format_ist()
+
+        df["Timestamp"] = timestamp
 
         return df
 
@@ -229,19 +207,12 @@ class ReportFormatter:
         """
 
         price_columns = [
-
             "CMP",
-
             "Open",
-
             "High",
-
             "Low",
-
             "Previous Close",
-
             "Close",
-
         ]
 
         for column in price_columns:
@@ -255,15 +226,11 @@ class ReportFormatter:
                 pd.to_numeric(
 
                     df[column],
-
                     errors="coerce",
 
                 )
-
                 .fillna(0)
-
                 .round(2)
-
             )
 
         return df
@@ -287,15 +254,11 @@ class ReportFormatter:
                 pd.to_numeric(
 
                     df["1 Day Change %"],
-
                     errors="coerce",
 
                 )
-
                 .fillna(0)
-
                 .round(2)
-
             )
 
         return df
@@ -321,15 +284,12 @@ class ReportFormatter:
             pd.to_numeric(
 
                 df["Volume"],
-
                 errors="coerce",
 
             )
 
             .fillna(0)
-
             .astype("int64")
-
         )
 
         return df
@@ -355,9 +315,7 @@ class ReportFormatter:
             pd.to_numeric(
 
                 df["Strength Score"],
-
                 errors="coerce",
-
             )
 
             .fillna(0)
@@ -365,13 +323,10 @@ class ReportFormatter:
             .clip(
 
                 lower=0,
-
                 upper=100,
 
             )
-
             .astype(int)
-
         )
 
         return df
@@ -465,53 +420,80 @@ class ReportFormatter:
 # SORT REPORT
 ###############################################################################
 
-    @staticmethod
     def sort_report(
+        self,
         df: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Sort report by category and percentage change.
-
-        Gainers:
-            Highest % change first
-
-        Losers:
-            Lowest % change first
+        Sort the final report without filtering out valid rows.
         """
 
-        if (
-            "Category" not in df.columns
-            or "1 Day Change %" not in df.columns
-        ):
+        if df.empty:
             return df
 
-        gainers = df[
-            df["Category"].str.lower() == "gainer"
-        ].sort_values(
-            by="1 Day Change %",
-            ascending=False,
-        )
+        sort_columns = []
+        ascending = []
 
-        losers = df[
-            df["Category"].str.lower() == "loser"
-        ].sort_values(
-            by="1 Day Change %",
-            ascending=True,
-        )
+        if "Category" in df.columns:
+            category_order = {
+                "Gainer": 0,
+                "Loser": 1,
+            }
 
-        return pd.concat(
+            df["_CategoryOrder"] = (
+                df["Category"]
+                .astype(str)
+                .map(category_order)
+                .fillna(99)
+            )
 
-            [
+            sort_columns.append("_CategoryOrder")
+            ascending.append(True)
 
-                gainers,
+        if "Change %" in df.columns:
+            df["_ChangeSort"] = pd.to_numeric(
+                df["Change %"],
+                errors="coerce",
+            ).fillna(0)
 
-                losers,
+            sort_columns.append("_ChangeSort")
+            ascending.append(False)
 
+        elif "1 Day Change %" in df.columns:
+            df["_ChangeSort"] = pd.to_numeric(
+                df["1 Day Change %"],
+                errors="coerce",
+            ).fillna(0)
+
+            sort_columns.append("_ChangeSort")
+            ascending.append(False)
+
+        if "Symbol" in df.columns:
+            sort_columns.append("Symbol")
+            ascending.append(True)
+
+        if sort_columns:
+            df = df.sort_values(
+                by=sort_columns,
+                ascending=ascending,
+                kind="stable",
+            )
+
+        df.drop(
+            columns=[
+                "_CategoryOrder",
+                "_ChangeSort",
             ],
-
-            ignore_index=True,
-
+            errors="ignore",
+            inplace=True,
         )
+
+        df.reset_index(
+            drop=True,
+            inplace=True,
+        )
+
+        return df
 
 ###############################################################################
 # PREPARE REPORT
@@ -541,87 +523,114 @@ class ReportFormatter:
         """
 
         logger.info(
-
             "[FORMATTER] Preparing report..."
-
         )
 
         self.validate_dataframe(
-
             report_df,
-
         )
 
         df = self.copy_dataframe(
-
             report_df,
-
-        )
-
-        df = self.ensure_columns(
-
-            df,
-
-        )
-
-        df = self.fill_missing_values(
-
-            df,
-
-        )
-
-        df = self.add_timestamp(
-
-            df,
-
-        )
-
-        df = self.format_prices(
-
-            df,
-
-        )
-
-        df = self.format_percentages(
-
-            df,
-
-        )
-
-        df = self.format_volume(
-
-            df,
-
-        )
-
-        df = self.format_strength_score(
-
-            df,
-
-        )
-
-        df = self.clean_text(
-
-            df,
-
-        )
-
-        df = self.sort_report(
-
-            df,
-
-        )
-
-        df = self.reorder_columns(
-
-            df,
-
         )
 
         logger.info(
+            "[FORMATTER] After copy: %d rows",
+            len(df),
+        )
 
+        df = self.ensure_columns(
+            df,
+        )
+
+        logger.info(
+            "[FORMATTER] After ensure_columns: %d rows",
+            len(df),
+        )
+
+        df = self.fill_missing_values(
+            df,
+        )
+
+        logger.info(
+            "[FORMATTER] After fill_missing_values: %d rows",
+            len(df),
+        )
+
+        df = self.add_timestamp(
+            df,
+        )
+
+        logger.info(
+            "[FORMATTER] After add_timestamp: %d rows",
+            len(df),
+        )
+
+        df = self.format_prices(
+            df,
+        )
+
+        logger.info(
+            "[FORMATTER] After format_prices: %d rows",
+            len(df),
+        )
+
+        df = self.format_percentages(
+            df,
+        )
+
+        logger.info(
+            "[FORMATTER] After format_percentages: %d rows",
+            len(df),
+        )
+
+        df = self.format_volume(
+            df,
+        )
+
+        logger.info(
+            "[FORMATTER] After format_volume: %d rows",
+            len(df),
+        )
+
+        df = self.format_strength_score(
+            df,
+        )
+
+        logger.info(
+            "[FORMATTER] After format_strength_score: %d rows",
+            len(df),
+        )
+
+        df = self.clean_text(
+            df,
+        )
+
+        logger.info(
+            "[FORMATTER] After clean_text: %d rows",
+            len(df),
+        )
+
+        df = self.sort_report(
+            df,
+        )
+
+        logger.info(
+            "[FORMATTER] After sort_report: %d rows",
+            len(df),
+        )
+
+        df = self.reorder_columns(
+            df,
+        )
+
+        logger.info(
+            "[FORMATTER] After reorder_columns: %d rows",
+            len(df),
+        )
+
+        logger.info(
             "[FORMATTER] Report ready."
-
         )
 
         return df

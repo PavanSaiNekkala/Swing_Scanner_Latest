@@ -556,39 +556,37 @@ class NSEMarketReport:
         """
 
         logger.info(
-
             "=" * 80
-
         )
 
         logger.info(
-
             "FORMATTING REPORT"
-
         )
 
         logger.info(
-
             "=" * 80
-
         )
 
-        report_df = self.formatter.prepare_report(
-
+        formatted_df = self.formatter.prepare_report(
             report_df,
-
         )
+
+        if not isinstance(formatted_df, pd.DataFrame):
+
+            raise TypeError(
+                "formatter.prepare_report() returned "
+                f"{type(formatted_df).__name__}, "
+                "expected pandas DataFrame."
+            )
 
         logger.info(
-
-            "Report formatting completed."
-
+            "Report formatting completed | rows=%d | columns=%d",
+            len(formatted_df),
+            len(formatted_df.columns),
         )
 
-        logger.info("")
-
-        return report_df
-
+        return formatted_df
+    
 ###############################################################################
 # EXCEL EXPORT
 ###############################################################################
@@ -598,42 +596,32 @@ class NSEMarketReport:
         report_df: pd.DataFrame,
     ) -> Path:
         """
-        Export Excel report.
+        Export persistent gainers/losers workbook.
         """
 
         logger.info(
-
             "=" * 80
-
         )
 
         logger.info(
-
             "EXPORTING EXCEL"
-
         )
 
         logger.info(
-
             "=" * 80
-
         )
 
-        excel_file = self.excel.export(
-
-            report_df,
-
+        excel_file = (
+            self.excel
+            .export_gainers_losers_append(
+                report_df,
+            )
         )
 
         logger.info(
-
             "Excel exported : %s",
-
             excel_file,
-
         )
-
-        logger.info("")
 
         return excel_file
 
@@ -696,6 +684,12 @@ class NSEMarketReport:
         """
         Export all reports.
         """
+
+        if not isinstance(report_df, pd.DataFrame):
+            raise TypeError(
+                "export_reports() received "
+                f"{type(report_df).__name__}, expected pandas DataFrame."
+            )
 
         self.excel_file = self.export_excel(
 
@@ -912,10 +906,14 @@ class NSEMarketReport:
             ###################################################################
 
             report_df = self.prepare_report(
-
                 report_df,
-
             )
+
+            if not isinstance(report_df, pd.DataFrame):
+                raise TypeError(
+                    "prepare_report() returned "
+                    f"{type(report_df).__name__}, expected pandas DataFrame."
+                )
 
             self.report_df = report_df
 

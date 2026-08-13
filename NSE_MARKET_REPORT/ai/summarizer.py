@@ -702,6 +702,7 @@ class AISummarizer:
 
         return merged
 
+    
 ###############################################################################
 # STATISTICS
 ###############################################################################
@@ -722,40 +723,83 @@ class AISummarizer:
         dict
         """
 
+        if summary_df is None:
+
+            return {
+                "total": 0,
+                "generated": 0,
+                "failed": 0,
+                "provider": self.provider,
+                "model": MODEL_NAME,
+                "status": "unavailable",
+            }
+
         if summary_df.empty:
 
             return {
-
                 "total": 0,
-
                 "generated": 0,
-
                 "failed": 0,
-
                 "provider": self.provider,
-
                 "model": MODEL_NAME,
-
+                "status": "empty",
             }
 
-        failed = summary_df["AI Summary"].str.contains(
-            "unavailable",
-            case=False,
-            na=False,
-        ).sum()
+        #######################################################################
+        # AI SUMMARY COLUMN NOT PRESENT
+        #######################################################################
+
+        if "AI Summary" not in summary_df.columns:
+
+            logger.warning(
+                "[AI] AI Summary column not present in dataframe. "
+                "AI summary statistics unavailable."
+            )
+
+            return {
+                "total": len(summary_df),
+                "generated": 0,
+                "failed": 0,
+                "provider": self.provider,
+                "model": MODEL_NAME,
+                "status": (
+                    "ready"
+                    if self.model is not None
+                    else "disabled"
+                ),
+            }
+
+        #######################################################################
+        # CALCULATE STATISTICS
+        #######################################################################
+
+        summary_series = (
+            summary_df["AI Summary"]
+            .fillna("")
+            .astype(str)
+        )
+
+        failed = (
+            summary_series
+            .str.contains(
+                "unavailable",
+                case=False,
+                na=False,
+            )
+            .sum()
+        )
 
         return {
-
             "total": len(summary_df),
-
             "generated": len(summary_df) - failed,
-
             "failed": failed,
-
             "provider": self.provider,
-
             "model": MODEL_NAME,
-
+            "status": (
+                "ready"
+                if self.model is not None
+                else "disabled"
+            ),
         }
 
 ###############################################################################

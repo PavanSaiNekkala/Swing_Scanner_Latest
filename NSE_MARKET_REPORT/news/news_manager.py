@@ -27,6 +27,8 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
 
 from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 
 from typing import Any
 from typing import Dict
@@ -38,6 +40,11 @@ import pandas as pd
 from config.config import (
     MAX_WORKERS,
     ENABLED_NEWS_PROVIDERS,
+)
+
+from config.timezone import (
+    IST,
+    now_ist,
 )
 
 from config.logging_config import logger
@@ -132,7 +139,7 @@ class NewsManager:
 
         )
 
-        self.timestamp = datetime.now()
+        self.timestamp = now_ist()
 
         self.providers = self._load_providers()
 
@@ -221,7 +228,7 @@ class NewsManager:
         Refresh all providers.
         """
 
-        self.timestamp = datetime.now()
+        self.timestamp = now_ist()
 
         for provider in self.providers:
 
@@ -547,6 +554,107 @@ class NewsManager:
 
         return articles
 
+
+###############################################################################
+# 15 DAYS FILTER
+###############################################################################
+
+    @staticmethod
+    def _filter_recent_articles(
+        articles: List[Dict[str, Any]],
+        days: int = 15,
+    ) -> List[Dict[str, Any]]:
+        """
+        Keep only articles published within the last N days.
+
+        Publication timestamps are normalized to IST before
+        comparison.
+        """
+
+        if not articles:
+            return []
+
+        cutoff = (
+            now_ist()
+            - timedelta(days=days)
+        )
+
+        filtered: List[Dict[str, Any]] = []
+
+        for article in articles:
+
+            published = article.get(
+                "Published"
+            )
+
+            if not published:
+                continue
+
+            try:
+
+                if isinstance(
+                    published,
+                    datetime,
+                ):
+
+                    published_dt = published
+
+                else:
+
+                    published_text = str(
+                        published
+                    ).strip()
+
+                    published_dt = datetime.fromisoformat(
+                        published_text.replace(
+                            "Z",
+                            "+00:00",
+                        )
+                    )
+
+                if published_dt.tzinfo is None:
+
+                    logger.warning(
+                        "[NEWS MANAGER] "
+                        "Naive publication timestamp "
+                        "for article: %s",
+                        article.get("Headline"),
+                    )
+
+                    published_dt = published_dt.replace(
+                        tzinfo=IST
+                    )
+
+                else:
+
+                    published_dt = published_dt.astimezone(
+                        IST
+                    )
+
+                if published_dt >= cutoff:
+
+                    filtered.append(
+                        article
+                    )
+
+            except (
+                ValueError,
+                TypeError,
+                OverflowError,
+            ) as ex:
+
+                logger.warning(
+                    "[NEWS MANAGER] "
+                    "Unable to parse publication date "
+                    "for article '%s': %s",
+                    article.get("Headline"),
+                    ex,
+                )
+
+        return filtered
+
+
+
 ###############################################################################
 # REMOVE DUPLICATE ARTICLES
 ###############################################################################
@@ -571,9 +679,13 @@ class NewsManager:
 
             key = (
 
-                article.get("Headline", "").strip().lower(),
+                str(
+                    article.get("Headline") or ""
+                ).strip().lower(),
 
-                article.get("Headline Link", "").strip(),
+                str(
+                    article.get("Headline Link") or ""
+                ).strip(),
 
             )
 
@@ -597,35 +709,37 @@ class NewsManager:
     ) -> int:
         """
         Calculate a unified relevance score.
+
+        All text inputs are normalized to strings so that
+        missing/None provider fields cannot cause .lower()
+        failures.
         """
 
         score = 0
 
-        symbol = symbol.lower()
+        symbol_text = str(
+            symbol or ""
+        ).strip().lower()
 
-        headline = article.get(
-            "Headline",
-            "",
-        ).lower()
+        headline = str(
+            article.get("Headline") or ""
+        ).strip().lower()
 
-        description = article.get(
-            "Description",
-            "",
-        ).lower()
+        description = str(
+            article.get("Description") or ""
+        ).strip().lower()
 
-        provider = article.get(
-            "Provider",
-            "",
-        )
+        provider = str(
+            article.get("Provider") or ""
+        ).strip()
 
-        if symbol in headline:
+        if symbol_text and symbol_text in headline:
             score += 40
 
-        if symbol in description:
+        if symbol_text and symbol_text in description:
             score += 20
 
         KEYWORDS = {
-
             "results": 25,
             "earnings": 25,
             "profit": 20,
@@ -643,7 +757,6 @@ class NewsManager:
             "share": 8,
             "nse": 6,
             "bse": 6,
-
         }
 
         text = f"{headline} {description}"
@@ -651,6 +764,7 @@ class NewsManager:
         for word, weight in KEYWORDS.items():
 
             if word in text:
+
                 score += weight
 
         if provider == "GoogleNews":
@@ -797,23 +911,28 @@ class NewsManager:
         """
 
         articles = self._flatten(
-
             provider_results,
-
         )
 
-        articles = self._deduplicate(
-
+        articles = self._filter_recent_articles(
             articles,
+            days=15,
+        )
 
+        logger.info(
+            "[NEWS MANAGER] %s | "
+            "Articles within last 15 days: %d",
+            symbol,
+            len(articles),
+        )
+        
+        articles = self._deduplicate(
+            articles,
         )
 
         articles = self._rank_articles(
-
             articles,
-
             symbol,
-
         )
 
         return self._build_news(

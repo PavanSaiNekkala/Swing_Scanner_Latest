@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
 
   schedule:
-    # 08:30 IST = 03:00 UTC
+    # 08:30 IST
     - cron: "0 3 * * 1-5"
 
-    # 16:00 IST = 10:30 UTC
+    # 16:00 IST
     - cron: "30 10 * * 1-5"
 
 permissions:
@@ -19,6 +19,7 @@ concurrency:
 
 defaults:
   run:
+    shell: bash
     working-directory: NSE_MARKET_REPORT
 
 jobs:
@@ -27,20 +28,24 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    ##########################################################################
+    # Steps
+    ##########################################################################
+
     steps:
 
-      #########################################################################
-      # CHECKOUT
-      #########################################################################
+      ##########################################################################
+      # Checkout
+      ##########################################################################
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      #########################################################################
-      # PYTHON
-      #########################################################################
+      ##########################################################################
+      # Python
+      ##########################################################################
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -49,22 +54,20 @@ jobs:
           cache: pip
           cache-dependency-path: NSE_MARKET_REPORT/requirements.txt
 
-      #########################################################################
-      # INSTALL DEPENDENCIES
-      #########################################################################
+      ##########################################################################
+      # Dependencies
+      ##########################################################################
 
       - name: Install dependencies
-        shell: bash
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      #########################################################################
-      # ENVIRONMENT
-      #########################################################################
+      ##########################################################################
+      # Environment
+      ##########################################################################
 
-      - name: Create environment file
-        shell: bash
+      - name: Create .env
         run: |
           cat > .env <<EOF
           GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
@@ -73,66 +76,117 @@ jobs:
           FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}
           EOF
 
-      #########################################################################
-      # GENERATE REPORT
-      #########################################################################
+      ##########################################################################
+      # Generate Report
+      ##########################################################################
 
-      - name: Generate NSE market report
-        shell: bash
+      - name: Generate NSE Market Report
         run: |
           python -m main
 
-      #########################################################################
-      # VERIFY REPORT
-      #########################################################################
+      ##########################################################################
+      # Verify Report
+      ##########################################################################
 
-      - name: Verify report
-        shell: bash
+      - name: Verify Report
         run: |
           test -f output/excel/NSE_Market_Report.xlsx
           ls -lh output/excel/NSE_Market_Report.xlsx
 
-      #########################################################################
-      # COMMIT UPDATED REPORT
-      #########################################################################
+      ##########################################################################
+      # Git Diagnostics
+      ##########################################################################
+
+      - name: Git Status
+        working-directory: .
+        run: |
+          echo "========== GIT STATUS =========="
+          git status
+
+          echo
+          echo "========== MODIFIED FILES =========="
+          git diff --name-only
+
+          echo
+          echo "========== UNTRACKED FILES =========="
+          git ls-files --others --exclude-standard
+
+      ##########################################################################
+      # Commit & Push
+      ##########################################################################
 
       - name: Commit updated report
-        shell: bash
+        working-directory: .
         run: |
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          echo "Synchronizing with remote..."
+          ####################################################################
+          # Stage report
+          ####################################################################
+
+          git add NSE_MARKET_REPORT/output/excel/NSE_Market_Report.xlsx
+
+          if git diff --cached --quiet; then
+            echo "No report changes."
+            exit 0
+          fi
+
+          ####################################################################
+          # Save generated report
+          ####################################################################
+
+          git stash push --include-untracked
+
+          ####################################################################
+          # Sync with remote
+          ####################################################################
 
           git fetch origin main
 
           git rebase origin/main
 
-          git add output/excel/NSE_Market_Report.xlsx
+          ####################################################################
+          # Restore generated report
+          ####################################################################
 
-          if git diff --cached --quiet; then
-              echo "No report changes."
-              exit 0
-          fi
+          git stash pop || true
+
+          ####################################################################
+          # Stage again
+          ####################################################################
+
+          git add NSE_MARKET_REPORT/output/excel/NSE_Market_Report.xlsx
+
+          ####################################################################
+          # Commit
+          ####################################################################
 
           git commit -m "Update NSE market report"
 
-          for attempt in 1 2 3; do
+          ####################################################################
+          # Push with retry
+          ####################################################################
 
-              echo "Push attempt ${attempt}/3"
+          for attempt in 1 2 3
+          do
 
-              if git push origin HEAD:main; then
-                  echo "Push successful."
-                  exit 0
-              fi
+            echo "Push attempt ${attempt}/3"
 
-              echo "Push failed. Rebasing..."
+            if git push origin HEAD:main
+            then
+              echo "Push successful."
+              exit 0
+            fi
 
-              git fetch origin main
-              git rebase origin/main
+            echo "Push failed."
 
-              sleep 5
+            git fetch origin main
+
+            git rebase origin/main
+
+            sleep 5
 
           done
 

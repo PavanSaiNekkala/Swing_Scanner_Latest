@@ -93,7 +93,7 @@ jobs:
           ls -lh output/excel/NSE_Market_Report.xlsx
 
       #########################################################################
-      # COMMIT & PUSH REPORT
+      # COMMIT UPDATED REPORT
       #########################################################################
 
       - name: Commit updated report
@@ -102,6 +102,12 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          echo "Synchronizing with remote..."
+
+          git fetch origin main
+
+          git rebase origin/main
 
           git add output/excel/NSE_Market_Report.xlsx
 
@@ -112,14 +118,6 @@ jobs:
 
           git commit -m "Update NSE market report"
 
-          echo "Synchronizing with remote..."
-
-          git fetch origin main
-
-          git pull --rebase origin main
-
-          echo "Pushing changes..."
-
           for attempt in 1 2 3; do
 
               echo "Push attempt ${attempt}/3"
@@ -129,15 +127,15 @@ jobs:
                   exit 0
               fi
 
-              echo "Push failed."
+              echo "Push failed. Rebasing..."
 
               git fetch origin main
-              git pull --rebase origin main
+              git rebase origin/main
 
               sleep 5
 
           done
 
-          echo "Failed to push after 3 attempts."
+          echo "Push failed after 3 attempts."
 
           exit 1

@@ -1,0 +1,113 @@
+ticker,company_name,category,sector
+360ONE,360 ONE WAM Ltd,MidCap,Financial Services
+3MINDIA,3M India Ltd,MidCap,Diversified
+ABB,ABB India Ltd,LargeCap,Capital Goods
+ABCAPITAL,Aditya Birla Capital Ltd,LargeCap,Financial Services
+ABFRL,Aditya Birla Fashion and Retail Ltd,MidCap,Consumer Discretionary
+ACC,ACC Ltd,LargeCap,Construction Materials
+ADANIENT,Adani Enterprises Ltd,LargeCap,Industrials
+ADANIGREEN,Adani Green Energy Ltd,LargeCap,Power
+ADANIPORTS,Adani Ports and Special Economic Zone Ltd,LargeCap,Infrastructure
+ADANIPOWER,Adani Power Ltd,LargeCap,Power
+ADANITRANS,Adani Energy Solutions Ltd,LargeCap,Power
+ALKEM,Alkem Laboratories Ltd,LargeCap,Healthcare
+AMBUJACEM,Ambuja Cements Ltd,LargeCap,Construction Materials
+APOLLOHOSP,Apollo Hospitals Enterprise Ltd,LargeCap,Healthcare
+APOLLOTYRE,Apollo Tyres Ltd,MidCap,Automobile
+ASHOKLEY,Ashok Leyland Ltd,LargeCap,Automobile
+ASIANPAINT,Asian Paints Ltd,LargeCap,Chemicals
+ASTRAL,Astral Ltd,LargeCap,Chemicals
+ATUL,Atul Ltd,MidCap,Chemicals
+AUBANK,AU Small Finance Bank Ltd,LargeCap,Banking
+AUROPHARMA,Aurobindo Pharma Ltd,LargeCap,Healthcare
+AXISBANK,Axis Bank Ltd,LargeCap,Banking
+BAJAJ-AUTO,Bajaj Auto Ltd,LargeCap,Automobile
+BAJAJFINSV,Bajaj Finserv Ltd,LargeCap,Financial Services
+BAJFINANCE,Bajaj Finance Ltd,LargeCap,Financial Services
+BALKRISIND,Balkrishna Industries Ltd,LargeCap,Automobile
+BANKBARODA,Bank of Baroda,LargeCap,Banking
+BEL,Bharat Electronics Ltd,LargeCap,Defence
+BERGEPAINT,Berger Paints India Ltd,LargeCap,Chemicals
+BHARATFORG,Bharat Forge Ltd,LargeCap,Capital Goods
+BHARTIARTL,Bharti Airtel Ltd,LargeCap,Telecommunication
+BHEL,Bharat Heavy Electricals Ltd,LargeCap,Capital Goods
+BIOCON,Biocon Ltd,LargeCap,Healthcare
+BOSCHLTD,Bosch Ltd,LargeCap,Automobile
+BPCL,Bharat Petroleum Corporation Ltd,LargeCap,Oil & Gas
+BRITANNIA,Britannia Industries Ltd,LargeCap,FMCG
+CANBK,Canara Bank,LargeCap,Banking
+CHOLAFIN,Cholamandalam Investment and Finance Company Ltd,LargeCap,Financial Services
+CIPLA,Cipla Ltd,LargeCap,Healthcare
+COALINDIA,Coal India Ltd,LargeCap,Mining
+COFORGE,Coforge Ltd,LargeCap,Information Technology
+COLPAL,Colgate-Palmolive (India) Ltd,LargeCap,FMCG
+CONCOR,Container Corporation of India Ltd,LargeCap,Logistics
+CROMPTON,Crompton Greaves Consumer Electricals Ltd,MidCap,Consumer Durables
+CUMMINSIND,Cummins India Ltd,LargeCap,Capital Goods
+DABUR,Dabur India Ltd,LargeCap,FMCG
+DALBHARAT,Dalmia Bharat Ltd,LargeCap,Construction Materials
+DEEPAKNTR,Deepak Nitrite Ltd,LargeCap,Chemicals
+DIVISLAB,Divi's Laboratories Ltd,LargeCap,Healthcare
+DLF,DLF Ltd,LargeCap,Real Estate
+DRREDDY,Dr. Reddy's Laboratories Ltd,LargeCap,Healthcare
+EICHERMOT,Eicher Motors Ltd,LargeCap,Automobile
+ESCORTS,Escorts Kubota Ltd,LargeCap,Capital Goods
+FEDERALBNK,Federal Bank Ltd,LargeCap,Banking
+GAIL,GAIL (India) Ltd,LargeCap,Oil & Gas
+GLENMARK,Glenmark Pharmaceuticals Ltd,MidCap,Healthcare
+GMRINFRA,GMR Airports Infrastructure Ltd,MidCap,Infrastructure
+GODREJCP,Godrej Consumer Products Ltd,LargeCap,FMCG
+GRASIM,Grasim Industries Ltd,LargeCap,Diversified
+HAVELLS,Havells India Ltd,LargeCap,Consumer Durables
+HCLTECH,HCL Technologies Ltd,LargeCap,Information Technology
+HDFCBANK,HDFC Bank Ltd,LargeCap,Banking
+HDFCLIFE,HDFC Life Insurance Company Ltd,LargeCap,Insurance
+HEROMOTOCO,Hero MotoCorp Ltd,LargeCap,Automobile
+HINDALCO,Hindalco Industries Ltd,LargeCap,Metals
+HINDPETRO,Hindustan Petroleum Corporation Ltd,LargeCap,Oil & Gas
+HINDUNILVR,Hindustan Unilever Ltd,LargeCap,FMCG
+ICICIBANK,ICICI Bank Ltd,LargeCap,Banking
+ICICIGI,ICICI Lombard General Insurance Company Ltd,LargeCap,Insurance
+ICICIPRULI,ICICI Prudential Life Insurance Company Ltd,LargeCap,Insurance
+IDFCFIRSTB,IDFC First Bank Ltd,LargeCap,Banking
+INDHOTEL,The Indian Hotels Company Ltd,LargeCap,Hospitality
+INDIGO,InterGlobe Aviation Ltd,LargeCap,Aviation
+INDUSINDBK,IndusInd Bank Ltd,LargeCap,Banking
+INDUSTOWER,Indus Towers Ltd,LargeCap,Telecommunication
+INFY,Infosys Ltd,LargeCap,Information Technology
+IOC,Indian Oil Corporation Ltd,LargeCap,Oil & Gas
+IRCTC,Indian Railway Catering and Tourism Corporation Ltd,LargeCap,Railways
+ITC,ITC Ltd,LargeCap,FMCG
+JINDALSTEL,Jindal Steel & Power Ltd,LargeCap,Metals
+JSWENERGY,JSW Energy Ltd,LargeCap,Power
+JSWSTEEL,JSW Steel Ltd,LargeCap,Metals
+JUBLFOOD,Jubilant FoodWorks Ltd,LargeCap,Consumer Discretionary
+KOTAKBANK,Kotak Mahindra Bank Ltd,LargeCap,Banking
+LT,Larsen & Toubro Ltd,LargeCap,Capital Goods
+LTIM,LTIMindtree Ltd,LargeCap,Information Technology
+M&M,Mahindra & Mahindra Ltd,LargeCap,Automobile
+MARICO,Marico Ltd,LargeCap,FMCG
+MARUTI,Maruti Suzuki India Ltd,LargeCap,Automobile
+MOTHERSON,Samvardhana Motherson International Ltd,LargeCap,Automobile
+MPHASIS,Mphasis Ltd,LargeCap,Information Technology
+NESTLEIND,Nestle India Ltd,LargeCap,FMCG
+NTPC,NTPC Ltd,LargeCap,Power
+ONGC,Oil and Natural Gas Corporation Ltd,LargeCap,Oil & Gas
+PFC,Power Finance Corporation Ltd,LargeCap,Financial Services
+PIDILITIND,Pidilite Industries Ltd,LargeCap,Chemicals
+PNB,Punjab National Bank,LargeCap,Banking
+POWERGRID,Power Grid Corporation of India Ltd,LargeCap,Power
+RECLTD,REC Ltd,LargeCap,Financial Services
+RELIANCE,Reliance Industries Ltd,LargeCap,Oil & Gas
+SBILIFE,SBI Life Insurance Company Ltd,LargeCap,Insurance
+SBIN,State Bank of India,LargeCap,Banking
+SHREECEM,Shree Cement Ltd,LargeCap,Construction Materials
+SUNPHARMA,Sun Pharmaceutical Industries Ltd,LargeCap,Healthcare
+TATACONSUM,Tata Consumer Products Ltd,LargeCap,FMCG
+TATAMOTORS,Tata Motors Ltd,LargeCap,Automobile
+TATASTEEL,Tata Steel Ltd,LargeCap,Metals
+TCS,Tata Consultancy Services Ltd,LargeCap,Information Technology
+TECHM,Tech Mahindra Ltd,LargeCap,Information Technology
+TITAN,Titan Company Ltd,LargeCap,Consumer Durables
+ULTRACEMCO,UltraTech Cement Ltd,LargeCap,Construction Materials
+WIPRO,Wipro Ltd,LargeCap,Information Technology

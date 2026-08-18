@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
 
   schedule:
-    # Monday-Friday 08:00 AM IST (02:30 UTC)
-    - cron: "30 2 * * 1-5"
+    # Monday-Friday 08:30 AM IST (03:00 UTC)
+    - cron: "00 3 * * 1-5"
 
     # Monday-Friday 04:00 PM IST (10:30 UTC)
     - cron: "30 10 * * 1-5"

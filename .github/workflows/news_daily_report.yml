@@ -1,4 +1,4 @@
-name: 📈 NSE Daily Report
+name: 📈 NEWS Daily Report
 
 on:
   workflow_dispatch:
@@ -14,11 +14,11 @@ permissions:
   contents: write
 
 concurrency:
-  group: nse-daily-report
+  group: NEWS-daily-report
   cancel-in-progress: false
 
 env:
-  PROJECT_DIR: Swing_Scanner_Latest/NSE_Daily_Report
+  PROJECT_DIR: NEWS_Daily_Report
   PYTHONUNBUFFERED: "1"
   TZ: Asia/Kolkata
 
@@ -26,7 +26,7 @@ jobs:
 
   generate-report:
 
-    name: Generate NSE Daily Report
+    name: Generate NEWS Daily Report
 
     if: github.actor != 'github-actions[bot]'
 
@@ -42,7 +42,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: Swing_Scanner_Latest/NSE_Daily_Report
+        working-directory: NEWS_Daily_Report
 
     steps:
 
@@ -74,7 +74,7 @@ jobs:
           path: ~/.cache/pip
           key: >
             ${{ runner.os }}-pip-${{
-            hashFiles('Swing_Scanner_Latest/NSE_Daily_Report/requirements.txt')
+            hashFiles('NEWS_Daily_Report/requirements.txt')
             }}
           restore-keys: |
             ${{ runner.os }}-pip-
@@ -93,7 +93,7 @@ jobs:
       # Execute
       ########################################################################
 
-      - name: Run NSE Daily Report
+      - name: Run NEWS Daily Report
 
         run: |
           echo "Starting report generation..."
@@ -125,8 +125,8 @@ jobs:
             "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add \
-            Swing_Scanner_Latest/NSE_Daily_Report/output/latest \
-            Swing_Scanner_Latest/NSE_Daily_Report/output/history
+            Swing_Scanner_Latest/NEWS_Daily_Report/output/latest \
+            Swing_Scanner_Latest/NEWS_Daily_Report/output/history
 
           if git diff --cached --quiet; then
 
@@ -135,7 +135,7 @@ jobs:
           else
 
             git commit \
-              -m "chore(report): auto-update NSE Daily Report [skip ci]"
+              -m "chore(report): auto-update NEWS Daily Report [skip ci]"
 
             git push origin main
 
@@ -154,7 +154,7 @@ jobs:
           name: logs
 
           path: |
-            Swing_Scanner_Latest/NSE_Daily_Report/logs/
+            Swing_Scanner_Latest/NEWS_Daily_Report/logs/
 
           retention-days: 7
 
@@ -171,8 +171,8 @@ jobs:
           name: reports
 
           path: |
-            Swing_Scanner_Latest/NSE_Daily_Report/output/latest
-            Swing_Scanner_Latest/NSE_Daily_Report/output/history
+            Swing_Scanner_Latest/NEWS_Daily_Report/output/latest
+            Swing_Scanner_Latest/NEWS_Daily_Report/output/history
 
           retention-days: 7
 
@@ -186,7 +186,7 @@ jobs:
 
         run: |
 
-          echo "## NSE Daily Report" >> $GITHUB_STEP_SUMMARY
+          echo "## NEWS Daily Report" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- Python : ${{ matrix.python-version }}" >> $GITHUB_STEP_SUMMARY
           echo "- Run Time : $(date)" >> $GITHUB_STEP_SUMMARY

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import sys
 import time
+from typing import Callable, Any
 
 from modules.logger import logger
 
@@ -35,18 +36,47 @@ from modules.excel_writer import create_excel_report
 
 
 ###############################################################################
-# Main Application
+# Application
 ###############################################################################
 
 
 class DailyReportApplication:
-    """
-    Main application class.
-    """
 
     def __init__(self):
 
         self.start_time = time.perf_counter()
+
+    ###########################################################################
+
+    @staticmethod
+    def execute_step(
+        step_name: str,
+        func: Callable[..., Any],
+        *args,
+        **kwargs,
+    ):
+        """
+        Execute one pipeline step and measure execution time.
+        """
+
+        logger.info("=" * 80)
+        logger.info("START : %s", step_name)
+
+        start = time.perf_counter()
+
+        result = func(*args, **kwargs)
+
+        elapsed = time.perf_counter() - start
+
+        logger.info(
+            "END   : %s (%.2f sec)",
+            step_name,
+            elapsed,
+        )
+
+        logger.info("=" * 80)
+
+        return result
 
     ###########################################################################
 
@@ -62,72 +92,99 @@ class DailyReportApplication:
             # Load Universe
             # -----------------------------------------------------------------
 
-            logger.info("Loading NSE Universe...")
-
-            symbols = load_universe()
+            symbols = self.execute_step(
+                "Load NSE Universe",
+                load_universe,
+            )
 
             logger.info(
-                "Loaded %d symbols.",
+                "Symbols Loaded : %d",
                 len(symbols),
             )
 
             # -----------------------------------------------------------------
-            # Download Market Data
+            # Market Data
             # -----------------------------------------------------------------
 
-            logger.info("Downloading Market Data...")
+            market_df = self.execute_step(
+                "Download Market Data",
+                fetch_market_data,
+                symbols,
+            )
 
-            market_df = fetch_market_data(symbols)
+            logger.info(
+                "Market Data Rows : %d",
+                len(market_df),
+            )
 
             # -----------------------------------------------------------------
-            # Calculate Returns
+            # Returns
             # -----------------------------------------------------------------
 
-            logger.info("Calculating Returns...")
-
-            market_df = calculate_returns(market_df)
+            market_df = self.execute_step(
+                "Calculate Returns",
+                calculate_returns,
+                market_df,
+            )
 
             # -----------------------------------------------------------------
             # Ranking
             # -----------------------------------------------------------------
 
-            logger.info("Creating Rankings...")
-
-            ranking = rank_stocks(market_df)
+            ranking = self.execute_step(
+                "Rank Stocks",
+                rank_stocks,
+                market_df,
+            )
 
             gainers = ranking.gainers
-
             losers = ranking.losers
 
+            logger.info("Top Gainers : %d", len(gainers))
+            logger.info("Top Losers  : %d", len(losers))
+
             # -----------------------------------------------------------------
-            # Fetch News
+            # News
             # -----------------------------------------------------------------
 
-            logger.info("Fetching News for Gainers...")
+            gainers = self.execute_step(
+                "Fetch News - Gainers",
+                enrich_news,
+                gainers,
+            )
 
-            gainers = enrich_news(gainers)
-
-            logger.info("Fetching News for Losers...")
-
-            losers = enrich_news(losers)
+            losers = self.execute_step(
+                "Fetch News - Losers",
+                enrich_news,
+                losers,
+            )
 
             # -----------------------------------------------------------------
             # Excel
             # -----------------------------------------------------------------
 
-            logger.info("Generating Excel Report...")
-
-            create_excel_report(
-                gainers=gainers,
-                losers=losers,
+            self.execute_step(
+                "Generate Excel Report",
+                create_excel_report,
+                gainers,
+                losers,
             )
 
-            elapsed = time.perf_counter() - self.start_time
+            # -----------------------------------------------------------------
+            # Summary
+            # -----------------------------------------------------------------
 
-            logger.info(
-                "Completed successfully in %.2f seconds.",
-                elapsed,
-            )
+            total = time.perf_counter() - self.start_time
+
+            logger.info("=" * 80)
+            logger.info("PIPELINE COMPLETED")
+            logger.info("=" * 80)
+
+            logger.info("Symbols Processed : %d", len(symbols))
+            logger.info("Rows Processed    : %d", len(market_df))
+            logger.info("Top Gainers       : %d", len(gainers))
+            logger.info("Top Losers        : %d", len(losers))
+            logger.info("Total Runtime     : %.2f sec", total)
 
             logger.info("=" * 80)
 
@@ -148,9 +205,7 @@ class DailyReportApplication:
 
 def main():
 
-    app = DailyReportApplication()
-
-    app.run()
+    DailyReportApplication().run()
 
 
 if __name__ == "__main__":

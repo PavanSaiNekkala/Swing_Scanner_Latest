@@ -480,9 +480,7 @@ class MarketDataService:
                 symbol,
 
             MarketColumns.COMPANY.value:
-                self.get_company_name(
-                    symbol,
-                ),
+                symbol.replace(".NS", ""),
 
             MarketColumns.OPEN.value:
                 float(latest["Open"]),
@@ -602,9 +600,42 @@ class MarketDataService:
             symbols,
         )
 
+        ###############################################################################
+        # Build Records
+        ###############################################################################
+
         records = []
 
-        for symbol in symbols:
+        total_symbols = len(
+            symbols,
+        )
+
+        logger.info(
+            "Processing %d downloaded symbols...",
+            total_symbols,
+        )
+
+        for index, symbol in enumerate(
+            symbols,
+            start=1,
+        ):
+
+            #
+            # Progress logging every 100 symbols.
+            #
+
+            if (
+                index == 1
+                or index % 100 == 0
+                or index == total_symbols
+            ):
+
+                logger.info(
+                    "Progress: %d/%d (%.1f%%)",
+                    index,
+                    total_symbols,
+                    (index / total_symbols) * 100,
+                )
 
             record = self.process_symbol(
                 downloaded,
@@ -618,6 +649,13 @@ class MarketDataService:
             records.append(
                 record,
             )
+
+        logger.info(
+            "Finished processing %d records.",
+            len(
+                records,
+            ),
+        )
 
         if not records:
 

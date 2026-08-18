@@ -1,0 +1,25 @@
+-r requirements.txt
+
+# Testing
+pytest>=8.3.2
+pytest-cov>=5.0.0
+pytest-mock>=3.14.0
+
+# Formatting
+black>=24.8.0
+isort>=5.13.2
+
+# Linting
+ruff>=0.6.4
+flake8>=7.1.1
+
+# Type Checking
+mypy>=1.11.2
+types-openpyxl
+
+# Git Hooks
+pre-commit>=3.8.0
+
+# Interactive Development
+ipython>=8.27.0
+jupyter>=1.1.1

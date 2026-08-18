@@ -30,3 +30,6 @@ tenacity
 
 nselib
 
+dotenv
+
+feedparser

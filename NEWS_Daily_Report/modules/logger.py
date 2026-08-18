@@ -1,7 +1,7 @@
 """
 logger.py
 
-Centralized logging configuration for the NSE Daily Report project.
+Centralized logging configuration for the NEWS Daily Report project.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 from config import LOG_DIR, LOG_FILE, LOG_LEVEL
 
 
-def setup_logger(name: str = "NSE_Daily_Report") -> logging.Logger:
+def setup_logger(name: str = "NEWS_Daily_Report") -> logging.Logger:
     """
     Create and return a configured logger.
 

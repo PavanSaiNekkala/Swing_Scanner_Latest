@@ -3,7 +3,7 @@
 File: exceptions.py
 
 Description:
-    Custom exceptions for the NSE Daily Report application.
+    Custom exceptions for the NEWS Daily Report application.
 
 Author:
     Pavan Sai
@@ -13,7 +13,7 @@ Author:
 from __future__ import annotations
 
 
-class NSEReportError(Exception):
+class NEWSReportError(Exception):
     """
     Base exception for the application.
 
@@ -30,7 +30,7 @@ class NSEReportError(Exception):
 # =============================================================================
 
 
-class ConfigurationError(NSEReportError):
+class ConfigurationError(NEWSReportError):
     """Raised when configuration is invalid."""
 
 
@@ -39,7 +39,7 @@ class ConfigurationError(NSEReportError):
 # =============================================================================
 
 
-class FileError(NSEReportError):
+class FileError(NEWSReportError):
     """Base class for file-related errors."""
 
 
@@ -60,7 +60,7 @@ class OutputWriteError(FileError):
 # =============================================================================
 
 
-class ValidationError(NSEReportError):
+class ValidationError(NEWSReportError):
     """Raised when validation fails."""
 
 
@@ -81,7 +81,7 @@ class InvalidSymbolError(ValidationError):
 # =============================================================================
 
 
-class MarketDataError(NSEReportError):
+class MarketDataError(NEWSReportError):
     """Base exception for market data."""
 
 
@@ -98,7 +98,7 @@ class NoMarketDataError(MarketDataError):
 # =============================================================================
 
 
-class NewsError(NSEReportError):
+class NewsError(NEWSReportError):
     """Base exception for news."""
 
 
@@ -115,7 +115,7 @@ class NoNewsFoundError(NewsError):
 # =============================================================================
 
 
-class ExcelError(NSEReportError):
+class ExcelError(NEWSReportError):
     """Base Excel exception."""
 
 
@@ -132,7 +132,7 @@ class WorksheetError(ExcelError):
 # =============================================================================
 
 
-class RankingError(NSEReportError):
+class RankingError(NEWSReportError):
     """Raised during ranking operations."""
 
 
@@ -141,7 +141,7 @@ class RankingError(NSEReportError):
 # =============================================================================
 
 
-class ReturnCalculationError(NSEReportError):
+class ReturnCalculationError(NEWSReportError):
     """Raised when return calculation fails."""
 
 
@@ -150,7 +150,7 @@ class ReturnCalculationError(NSEReportError):
 # =============================================================================
 
 
-class RetryLimitExceededError(NSEReportError):
+class RetryLimitExceededError(NEWSReportError):
     """Raised after all retry attempts fail."""
 
 
@@ -159,7 +159,7 @@ class RetryLimitExceededError(NSEReportError):
 # =============================================================================
 
 
-class NetworkError(NSEReportError):
+class NetworkError(NEWSReportError):
     """Raised for HTTP/network failures."""
 
 

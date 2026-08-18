@@ -1,7 +1,7 @@
 """
 config.py
 
-Global configuration for the NSE Daily Report Generator.
+Global configuration for the NEWS Daily Report Generator.
 """
 
 from pathlib import Path
@@ -39,7 +39,7 @@ INPUT_CSV = DATA_DIR / "nse_universe.csv"
 
 TODAY = datetime.now().strftime("%Y%m%d")
 
-OUTPUT_FILE = OUTPUT_EXCEL_DIR / f"NSE_Daily_Report_{TODAY}.xlsx"
+OUTPUT_FILE = OUTPUT_EXCEL_DIR / f"NEWS_Daily_Report_{TODAY}.xlsx"
 
 # Backward compatibility
 OUTPUT_EXCEL = OUTPUT_FILE

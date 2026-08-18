@@ -3,7 +3,7 @@
 File: main.py
 
 Description:
-    NSE Daily Report Generator
+    NEWS Daily Report Generator
 
 Pipeline
 --------
@@ -53,7 +53,7 @@ class DailyReportApplication:
     def run(self):
 
         logger.info("=" * 80)
-        logger.info("NSE DAILY REPORT STARTED")
+        logger.info("NEWS DAILY REPORT STARTED")
         logger.info("=" * 80)
 
         try:

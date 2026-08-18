@@ -3,7 +3,7 @@
 File: constants.py
 
 Description:
-    Centralized constants used throughout the NSE Daily Report application.
+    Centralized constants used throughout the NEWS Daily Report application.
 
 Author:
     Pavan Sai
@@ -135,7 +135,7 @@ DATA_ROW_HEIGHT = 20
 # Logging
 # =============================================================================
 
-LOGGER_NAME = "NSE_DAILY_REPORT"
+LOGGER_NAME = "NEWS_DAILY_REPORT"
 
 # =============================================================================
 # Date Formats

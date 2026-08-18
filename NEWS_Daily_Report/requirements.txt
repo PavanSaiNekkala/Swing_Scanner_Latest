@@ -5,6 +5,7 @@
 # Data Processing
 pandas>=2.2.2,<3.0.0
 numpy>=2.1.0,<3.0.0
+feedparser
 
 # Market Data
 yfinance>=0.2.54,<1.0.0

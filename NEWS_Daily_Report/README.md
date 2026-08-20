@@ -1,4 +1,4 @@
-# NSE Daily Report
+# NEWS Daily Report
 
 A production-ready Python application that scans the NSE universe, downloads daily OHLCV data from Yahoo Finance, calculates 1-day returns, ranks the top gainers and losers, fetches recent news, and generates a formatted Excel report.
 

@@ -1,32 +1,30 @@
+from __future__ import annotations
+
 import pandas as pd
-from .base import MarketProvider
+
+from .base import MarketDataProvider
 
 
-class MockProvider(MarketProvider):
+class MockProvider(MarketDataProvider):
 
-    def fetch_quotes(self):
-        return pd.DataFrame([
-            {
-                "Symbol": "RELIANCE",
-                "Company": "Reliance Industries",
-                "CMP": 1520.5,
-                "1 Day Change %": 2.35,
-                "Volume": 1200000,
-            },
-            {
-                "Symbol": "INFY",
-                "Company": "Infosys",
-                "CMP": 1822.4,
-                "1 Day Change %": -1.24,
-                "Volume": 800000,
-            },
-        ])
+    def fetch_quotes(
+        self,
+    ) -> pd.DataFrame:
 
-    def fetch_ohlc(self):
         return pd.DataFrame()
 
-    def health(self):
+    def fetch_ohlc(
+        self,
+    ) -> pd.DataFrame:
+
+        return pd.DataFrame()
+
+    def health(
+        self,
+    ) -> dict:
+
         return {
             "provider": "Mock",
-            "status": "healthy",
+            "status": "OK",
+            "message": "Mock provider available.",
         }

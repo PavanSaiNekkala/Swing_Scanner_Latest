@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 from typing import Dict
 from typing import Optional
+from tqdm import tqdm
 
 import pandas as pd
 
@@ -182,7 +183,7 @@ class NSEMarketReport:
 
         services = {
 
-            "NSE Data": self.market,
+            "Market Data": self.market,
 
             "OHLC": self.ohlc,
 
@@ -205,40 +206,29 @@ class NSEMarketReport:
             try:
 
                 status = service.health_check()
-
                 logger.info(
-
                     "%-20s : %s",
-
                     name,
-
                     status,
-
                 )
 
             except Exception as ex:
 
                 logger.exception(
-
                     "Health check failed for %s",
-
                     name,
-
                 )
 
                 raise RuntimeError(
-
                     f"{name} initialization failed."
-
                 ) from ex
 
         logger.info(
-
             "Health check completed successfully."
-
         )
 
         logger.info("")
+
 
 ###############################################################################
 # MARKET DATA
@@ -248,70 +238,85 @@ class NSEMarketReport:
         self,
     ) -> pd.DataFrame:
         """
-        Download today's NSE gainers and losers.
+        Download today's market movers from Yahoo Finance.
 
         Returns
         -------
-        DataFrame
+        pd.DataFrame
         """
 
         logger.info(
-
             "=" * 80
-
         )
 
         logger.info(
-
             "COLLECTING MARKET DATA"
-
         )
 
         logger.info(
-
             "=" * 80
-
         )
 
         #######################################################################
-        # TOP GAINERS
+        # WORKFLOW
         #######################################################################
 
-        logger.info(
+        tasks = [
 
-            "Fetching Top Gainers..."
+            (
+                "Fetching Top Gainers",
+                self.market.fetch_top_gainers,
+            ),
 
-        )
+            (
+                "Fetching Top Losers",
+                self.market.fetch_top_losers,
+            ),
 
-        gainers = self.market.fetch_top_gainers()
+        ]
 
-        logger.info(
+        results = {}
 
-            "Fetched %d gainers.",
+        with tqdm(
 
-            len(gainers),
+            total=len(tasks),
+            desc="Market Data",
+            unit="task",
+            colour="blue",
+            ncols=100,
 
-        )
+        ) as progress:
+
+            for title, function in tasks:
+
+                logger.info(
+                    "%s...",
+                    title,
+                )
+
+                df = function()
+
+                results[title] = df
+
+                logger.info(
+                    "%s completed (%d stocks).",
+                    title,
+                    len(df),
+                )
+
+                progress.update(1)
 
         #######################################################################
-        # TOP LOSERS
+        # ASSIGN RESULTS
         #######################################################################
 
-        logger.info(
+        gainers = results[
+            "Fetching Top Gainers"
+        ]
 
-            "Fetching Top Losers..."
-
-        )
-
-        losers = self.market.fetch_top_losers()
-
-        logger.info(
-
-            "Fetched %d losers.",
-
-            len(losers),
-
-        )
+        losers = results[
+            "Fetching Top Losers"
+        ]
 
         #######################################################################
         # MERGE
@@ -320,36 +325,69 @@ class NSEMarketReport:
         report_df = pd.concat(
 
             [
-
                 gainers,
-
                 losers,
-
             ],
-
             ignore_index=True,
-
-        )
-
-        report_df.drop_duplicates(
-
-            subset="Symbol",
-
-            inplace=True,
-
-        )
-
-        report_df.reset_index(
-
-            drop=True,
-
-            inplace=True,
-
         )
 
         logger.info(
+            "Merged DataFrame columns: %s",
+            report_df.columns.tolist(),
+        )
 
-            "Total stocks collected : %d",
+        #######################################################################
+        # NORMALIZE COLUMN NAMES
+        #######################################################################
+
+        report_df.rename(
+
+            columns={
+                "Stock": "Symbol",
+                "ticker": "Symbol",
+                "Ticker": "Symbol",
+                "symbol": "Symbol",
+                "SYMBOL": "Symbol",
+            },
+            inplace=True,
+        )
+
+        #######################################################################
+        # VALIDATE
+        #######################################################################
+
+        if "Symbol" not in report_df.columns:
+
+            raise RuntimeError(
+
+                "Market data does not contain "
+                "'Symbol' column.\n"
+                f"Available columns: "
+                f"{report_df.columns.tolist()}"
+
+            )
+
+        #######################################################################
+        # REMOVE DUPLICATES
+        #######################################################################
+
+        report_df.drop_duplicates(
+            subset=["Symbol"],
+            inplace=True,
+        )
+
+        report_df.reset_index(
+            drop=True,
+            inplace=True,
+        )
+
+        #######################################################################
+        # COMPLETE
+        #######################################################################
+
+        logger.info(
+
+            "Total unique stocks collected : %d",
 
             len(report_df),
 
@@ -358,6 +396,7 @@ class NSEMarketReport:
         logger.info("")
 
         return report_df
+
 
 ###############################################################################
 # OHLC ENRICHMENT

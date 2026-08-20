@@ -16,64 +16,107 @@ from pathlib import Path
 import logging
 from logging.handlers import RotatingFileHandler
 
-from config.config import LOG_LEVEL, LOG_FILE
+from config.config import (
+    LOG_FILE,
+    LOG_LEVEL,
+)
 
+###############################################################################
+# LOGGER SETUP
+###############################################################################
 
 def setup_logger(
-    logger_name: str = "NSE_MARKET_REPORT"
+    logger_name: str = "NSE_MARKET_REPORT",
 ) -> logging.Logger:
     """
-    Creates and returns a configured logger.
-
-    Parameters
-    ----------
-    logger_name : str
-
-    Returns
-    -------
-    logging.Logger
+    Configure and return an application logger.
     """
 
-    logger = logging.getLogger(logger_name)
+    logger = logging.getLogger(
+        logger_name
+    )
 
-    # Prevent duplicate handlers
     if logger.handlers:
         return logger
 
-    logger.setLevel(getattr(logging, LOG_LEVEL.upper()))
+    logger.setLevel(
+        getattr(
+            logging,
+            LOG_LEVEL.upper(),
+        )
+    )
 
     formatter = logging.Formatter(
         fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # ----------------------------
-    # Console Handler
-    # ----------------------------
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
+    ###########################################################################
+    # Console
+    ###########################################################################
 
-    # ----------------------------
-    # Rotating File Handler
-    # ----------------------------
-    Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
+    console_handler = logging.StreamHandler()
+
+    console_handler.setFormatter(
+        formatter
+    )
+
+    ###########################################################################
+    # File
+    ###########################################################################
+
+    Path(
+        LOG_FILE
+    ).parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     file_handler = RotatingFileHandler(
         filename=LOG_FILE,
-        maxBytes=5 * 1024 * 1024,  # 5 MB
+        maxBytes=5 * 1024 * 1024,
         backupCount=5,
         encoding="utf-8",
     )
 
-    file_handler.setFormatter(formatter)
+    file_handler.setFormatter(
+        formatter
+    )
 
-    logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
+    logger.addHandler(
+        console_handler
+    )
+
+    logger.addHandler(
+        file_handler
+    )
 
     logger.propagate = False
 
     return logger
 
 
-# Default project logger
+###############################################################################
+# LOGGER ACCESSOR
+###############################################################################
+
+def get_logger(
+    logger_name: str,
+) -> logging.Logger:
+    """
+    Return a configured logger.
+
+    Automatically initializes the logger if it
+    has not already been created.
+    """
+
+    return setup_logger(
+        logger_name
+    )
+
+
+###############################################################################
+# DEFAULT LOGGER
+###############################################################################
+
 logger = setup_logger()

@@ -1,571 +1,86 @@
 """
-==============================================================================
-File        : data/ohlc.py
-Project     : NSE Market Report
-
-Description
------------
-Downloads detailed quote data (OHLC) for NSE stocks and enriches the
-Top Gainers / Top Losers report.
-
-Features
---------
-✓ Production-ready architecture
-✓ Shared HTTP session
-✓ Automatic cookie handling
-✓ In-memory cache
-✓ Thread-safe design
-✓ Retry support
-✓ Rate limiting
-✓ Parallel downloads (Part 4)
-✓ Data validation
-✓ Data normalization
-
-Author      : Your Name
-==============================================================================
+===============================================================================
+Module    : ohlc.py
+Package   : data
+Purpose   : OHLC data service
+Architecture : Foundation Layer
+Provider  : Yahoo Finance
+===============================================================================
 """
 
 from __future__ import annotations
 
-import threading
-import time
-
+from dataclasses import dataclass
 from datetime import datetime
-
-from typing import Any
-from typing import Dict
-from typing import List
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 
-from config.timezone import now_ist
+from config.logging_config import get_logger
+from config.timezone import ist_now
+from data.providers.yfinance_provider import YahooFinanceProvider
 
-from nselib.capital_market import price_volume_data
-
-from requests import Session
-
-from config.logging_config import logger
-
-from data.nse_data import (
-    NSEData,
-    NSEConnectionError,
-    NSEDataError,
-)
+logger = get_logger(__name__)
 
 
 ###############################################################################
 # CONFIGURATION
 ###############################################################################
 
-QUOTE_ENDPOINT = "https://www.nseindia.com/api/quote-equity"
+DEFAULT_PERIOD = "6mo"
+DEFAULT_INTERVAL = "1d"
 
-DEFAULT_TIMEOUT = 20
+CACHE_DIR = Path("cache/ohlc")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_RETRIES = 3
-
-DEFAULT_BACKOFF = 2
-
-REQUEST_DELAY = 0.25
-
-MAX_WORKERS = 5
 
 ###############################################################################
-# OUTPUT SCHEMA
+# DATA MODEL
 ###############################################################################
 
-OUTPUT_COLUMNS = [
-
-    "Symbol",
-
-    "CMP",
-
-    "Open",
-
-    "High",
-
-    "Low",
-
-    "Close",
-
-    "Previous Close",
-
-    "Volume",
-
-    "VWAP",
-
-    "52 Week High",
-
-    "52 Week Low",
-
-    "Upper Circuit",
-
-    "Lower Circuit",
-
-    "Face Value",
-
-]
-
-###############################################################################
-# CACHE
-###############################################################################
-
-class QuoteCache:
+@dataclass(slots=True)
+class OHLCRequest:
     """
-    Thread-safe in-memory cache.
-
-    Prevents duplicate HTTP requests for
-    the same symbol during execution.
+    Represents one OHLC download request.
     """
 
-    def __init__(self):
+    symbol: str
+    period: str = DEFAULT_PERIOD
+    interval: str = DEFAULT_INTERVAL
+    use_cache: bool = True
 
-        self._cache: Dict[str, Dict[str, Any]] = {}
-
-        self._lock = threading.Lock()
-
-    ###########################################################################
-
-    def get(
-        self,
-        symbol: str,
-    ) -> Optional[Dict[str, Any]]:
-
-        with self._lock:
-
-            return self._cache.get(symbol)
-
-    ###########################################################################
-
-    def set(
-        self,
-        symbol: str,
-        payload: Dict[str, Any],
-    ) -> None:
-
-        with self._lock:
-
-            self._cache[symbol] = payload
-
-    ###########################################################################
-
-    def clear(self) -> None:
-
-        with self._lock:
-
-            self._cache.clear()
 
 ###############################################################################
-# MAIN CLASS
+# OHLC SERVICE
 ###############################################################################
 
 class OHLCData:
     """
-    Fetches detailed quote information from NSE.
+    Central OHLC service.
 
-    Public Methods
-
-    fetch(symbol)
-
-    fetch_many(symbols)
-
-    merge(report_dataframe)
-
-    clear_cache()
+    Responsibilities
+    ----------------
+    • Download historical candles
+    • Normalize Yahoo Finance output
+    • Maintain cache
+    • Health monitoring
     """
 
-    ###########################################################################
-
-    def __init__(self):
+    def __init__(
+        self,
+        provider: Optional[YahooFinanceProvider] = None,
+    ) -> None:
 
         logger.info("Initializing OHLCData...")
 
-        self.cache = QuoteCache()
+        self.provider = provider or YahooFinanceProvider()
 
-        self.timestamp = now_ist()
+        self.cache_dir = CACHE_DIR
 
-        self.nse = NSEData()
-
-        self.session: Session = self.nse.session
+        self.cache_enabled = True
 
         logger.info("OHLCData initialized successfully.")
-
-    ###########################################################################
-
-    def clear_cache(self) -> None:
-        """
-        Clear cached quote responses.
-        """
-
-        self.cache.clear()
-
-        logger.info("Quote cache cleared.")
-
-
-    ###########################################################################
-    # HTTP REQUEST LAYER
-    ###########################################################################
-
-    def _request(
-        self,
-        symbol: str,
-    ) -> pd.DataFrame:
-        """
-        Download OHLCV data using nselib.
-        """
-
-        symbol = (
-            str(symbol or "")
-            .strip()
-            .upper()
-        )
-
-        if not symbol:
-            raise NSEDataError(
-                "OHLC symbol cannot be empty."
-            )
-
-        cached = self.cache.get(
-            symbol
-        )
-
-        if cached is not None:
-
-            logger.debug(
-                "OHLC cache hit : %s",
-                symbol,
-            )
-
-            return cached
-
-        logger.info(
-            "Downloading OHLC via nselib : %s",
-            symbol,
-        )
-
-        for attempt in range(
-            1,
-            DEFAULT_RETRIES + 1,
-        ):
-
-            try:
-
-                time.sleep(
-                    REQUEST_DELAY
-                )
-
-                df = price_volume_data(
-                    symbol=symbol,
-                    period="1D",
-                )
-
-                if df is None:
-
-                    raise NSEDataError(
-                        f"No OHLC data returned for {symbol}"
-                    )
-
-                if not isinstance(
-                    df,
-                    pd.DataFrame,
-                ):
-
-                    df = pd.DataFrame(
-                        df
-                    )
-
-                if df.empty:
-
-                    raise NSEDataError(
-                        f"Empty OHLC dataframe for {symbol}"
-                    )
-
-                self.cache.set(
-                    symbol,
-                    df,
-                )
-
-                logger.info(
-                    "OHLC downloaded : %s",
-                    symbol,
-                )
-
-                return df
-
-            except Exception as ex:
-
-                logger.warning(
-                    "OHLC request failed "
-                    "(%d/%d) : %s | %s",
-                    attempt,
-                    DEFAULT_RETRIES,
-                    symbol,
-                    ex,
-                )
-
-                if attempt >= DEFAULT_RETRIES:
-
-                    raise NSEDataError(
-                        f"Unable to download OHLC "
-                        f"for {symbol}: {ex}"
-                    ) from ex
-
-                time.sleep(
-                    DEFAULT_BACKOFF ** attempt
-                )
-
-        raise NSEDataError(
-            f"Unable to download OHLC for {symbol}"
-        )
-        
-
-    ###########################################################################
-
-    def _download_quote(
-        self,
-        symbol: str,
-    ) -> pd.DataFrame:
-        """
-        Return validated OHLC dataframe.
-        """
-
-        return self._request(
-            symbol
-        )
-
-    ###########################################################################
-    # JSON PARSING
-    ###########################################################################
-
-    @staticmethod
-    @staticmethod
-    def _parse_quote(
-        payload: pd.DataFrame,
-    ) -> pd.DataFrame:
-
-        if (
-            payload is None
-            or payload.empty
-        ):
-
-            return pd.DataFrame()
-
-        df = payload.copy()
-
-        rename_map = {
-            "Symbol": "Symbol",
-            "symbol": "Symbol",
-            "Open": "Open",
-            "open": "Open",
-            "open_price": "Open",
-            "High": "High",
-            "high": "High",
-            "high_price": "High",
-            "Low": "Low",
-            "low": "Low",
-            "low_price": "Low",
-            "Close": "Close",
-            "close": "Close",
-            "ltp": "CMP",
-            "LTP": "CMP",
-            "prev_close": "Previous Close",
-            "previous_close": "Previous Close",
-            "prev_price": "Previous Close",
-            "volume": "Volume",
-            "trade_quantity": "Volume",
-        }
-
-        df.rename(
-            columns=rename_map,
-            inplace=True,
-        )
-
-        if "Symbol" not in df.columns:
-
-            df["Symbol"] = None
-
-        return df
-
-    ###########################################################################
-    # NORMALIZATION
-    ###########################################################################
-
-    @staticmethod
-    def _normalize(
-        record: Dict[str, Any],
-    ) -> pd.DataFrame:
-        """
-        Convert parsed record into DataFrame.
-        """
-
-        df = pd.DataFrame([record])
-
-        return df
-
-    ###########################################################################
-    # NUMERIC CONVERSION
-    ###########################################################################
-
-    @staticmethod
-    def _convert_numeric(
-        df: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """
-        Convert numeric columns safely.
-        """
-
-        numeric_columns = [
-
-            "CMP",
-
-            "Open",
-
-            "High",
-
-            "Low",
-
-            "Close",
-
-            "Previous Close",
-
-            "Volume",
-
-            "VWAP",
-
-            "52 Week High",
-
-            "52 Week Low",
-
-            "Upper Circuit",
-
-            "Lower Circuit",
-
-            "Face Value",
-
-        ]
-
-        for column in numeric_columns:
-
-            if column in df.columns:
-
-                df[column] = pd.to_numeric(
-
-                    df[column],
-
-                    errors="coerce"
-
-                )
-
-        return df
-
-    ###########################################################################
-    # VALIDATION
-    ###########################################################################
-
-    @staticmethod
-    def _validate(
-        df: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """
-        Validate dataframe schema.
-        """
-
-        missing = [
-
-            column
-
-            for column in OUTPUT_COLUMNS
-
-            if column not in df.columns
-
-        ]
-
-        if missing:
-
-            raise NSEDataError(
-
-                f"Missing columns : {missing}"
-
-            )
-
-        return df
-
-    ###########################################################################
-    # CLEANING
-    ###########################################################################
-
-    @staticmethod
-    def _clean(
-        df: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """
-        Clean dataframe.
-        """
-
-        if df.empty:
-
-            return df
-
-        df = df.drop_duplicates(
-
-            subset=["Symbol"],
-
-            keep="first",
-
-        )
-
-        df.reset_index(
-
-            drop=True,
-
-            inplace=True,
-
-        )
-
-        return df
-
-    ###########################################################################
-    # COMPLETE PIPELINE
-    ###########################################################################
-
-    def _prepare_dataframe(
-        self,
-        payload: pd.DataFrame,
-    ) -> pd.DataFrame:
-
-        df = self._parse_quote(
-            payload,
-        )
-
-        if df.empty:
-
-            return pd.DataFrame(
-                columns=OUTPUT_COLUMNS
-            )
-
-        df = self._convert_numeric(
-            df,
-        )
-
-        required_columns = [
-            column
-            for column in OUTPUT_COLUMNS
-            if column not in df.columns
-        ]
-
-        for column in required_columns:
-
-            df[column] = None
-
-        df = df[
-            OUTPUT_COLUMNS
-        ]
-
-        df = self._clean(
-            df,
-        )
-
-        return df
 
 
 ###############################################################################
@@ -575,257 +90,475 @@ class OHLCData:
     def fetch(
         self,
         symbol: str,
+        period: str = DEFAULT_PERIOD,
+        interval: str = DEFAULT_INTERVAL,
     ) -> pd.DataFrame:
         """
-        Fetch OHLC data for a single symbol.
+        Fetch OHLC history for one symbol.
         """
 
-        symbol = (
-            str(symbol or "")
-            .strip()
-            .upper()
+        request = OHLCRequest(
+            symbol=symbol,
+            period=period,
+            interval=interval,
         )
 
-        logger.info(
-            "Fetching OHLC : %s",
-            symbol,
-        )
+        return self._load_history(request)
 
-        payload = self._download_quote(
-            symbol,
-        )
 
-        return self._prepare_dataframe(
-            payload,
-        )
+    def fetch_many(
+        self,
+        symbols: list[str],
+        period: str = DEFAULT_PERIOD,
+        interval: str = DEFAULT_INTERVAL,
+    ) -> dict[str, pd.DataFrame]:
+        """
+        Download OHLC for multiple symbols.
+        """
 
-    ###########################################################################
+        result: dict[str, pd.DataFrame] = {}
 
-    def _fetch_worker(
+        for symbol in symbols:
+
+            try:
+
+                result[symbol] = self.fetch(
+                    symbol=symbol,
+                    period=period,
+                    interval=interval,
+                )
+
+            except Exception:
+
+                logger.exception(
+                    "Unable to fetch OHLC for %s",
+                    symbol,
+                )
+
+                result[symbol] = pd.DataFrame()
+
+        return result
+
+
+###############################################################################
+# CACHE
+###############################################################################
+
+    def cache_file(
         self,
         symbol: str,
+        period: str,
+        interval: str,
+    ) -> Path:
+
+        filename = (
+            f"{symbol}_{period}_{interval}.parquet"
+        )
+
+        return self.cache_dir / filename
+
+
+    def clear_cache(self) -> None:
+
+        if not self.cache_dir.exists():
+            return
+
+        for file in self.cache_dir.glob("*.parquet"):
+
+            try:
+
+                file.unlink()
+
+            except Exception:
+
+                logger.exception(
+                    "Unable to remove cache %s",
+                    file,
+                )
+
+
+###############################################################################
+# HEALTH
+###############################################################################
+
+    def health_check(self) -> dict:
+
+        return {
+
+            "component": "OHLCData",
+
+            "status": "ready",
+
+            "provider": "YahooFinance",
+
+            "cache_enabled": self.cache_enabled,
+
+            "timestamp": ist_now(),
+
+        }
+
+
+###############################################################################
+# INTERNAL API (implemented in Part 2)
+###############################################################################
+
+    def _load_history(
+        self,
+        request: OHLCRequest,
+    ) -> pd.DataFrame:
+        """
+        Implemented in Part 2.
+        """
+        raise NotImplementedError
+
+
+    def _download_history(
+        self,
+        request: OHLCRequest,
+    ) -> pd.DataFrame:
+        """
+        Implemented in Part 2.
+        """
+        raise NotImplementedError
+
+
+    def _normalize_dataframe(
+        self,
+        df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Implemented in Part 2.
+        """
+        raise NotImplementedError
+
+
+    def _read_cache(
+        self,
+        path: Path,
     ) -> Optional[pd.DataFrame]:
         """
-        Worker method used by ThreadPoolExecutor.
+        Implemented in Part 2.
+        """
+        raise NotImplementedError
+
+
+    def _write_cache(
+        self,
+        path: Path,
+        df: pd.DataFrame,
+    ) -> None:
+        """
+        Implemented in Part 2.
+        """
+        raise NotImplementedError
+
+###############################################################################
+# INTERNAL IMPLEMENTATION
+###############################################################################
+
+    def _load_history(
+        self,
+        request: OHLCRequest,
+    ) -> pd.DataFrame:
+        """
+        Load OHLC data from cache or provider.
+        """
+
+        cache_path = self.cache_file(
+            request.symbol,
+            request.period,
+            request.interval,
+        )
+
+        if request.use_cache and cache_path.exists():
+
+            cached = self._read_cache(cache_path)
+
+            if cached is not None and not cached.empty:
+
+                logger.debug(
+                    "Loaded %s from cache.",
+                    request.symbol,
+                )
+
+                return cached
+
+        logger.info(
+            "Downloading OHLC : %s",
+            request.symbol,
+        )
+
+        df = self._download_history(request)
+
+        if request.use_cache:
+
+            self._write_cache(
+                cache_path,
+                df,
+            )
+
+        return df
+
+
+###############################################################################
+# DOWNLOAD
+###############################################################################
+
+    def _download_history(
+        self,
+        request: OHLCRequest,
+    ) -> pd.DataFrame:
+        """
+        Download historical candles from Yahoo Finance.
         """
 
         try:
 
-            return self.fetch(symbol)
+            df = self.provider.fetch_history(
+                symbol=request.symbol,
+                period=request.period,
+                interval=request.interval,
+            )
 
-        except Exception as ex:
+        except Exception:
 
             logger.exception(
-                "Failed downloading %s : %s",
-                symbol,
-                ex,
+                "Yahoo download failed for %s",
+                request.symbol,
+            )
+
+            raise
+
+        if df is None or df.empty:
+
+            raise RuntimeError(
+                f"No OHLC data returned for {request.symbol}"
+            )
+
+        return self._normalize_dataframe(df)
+
+
+###############################################################################
+# NORMALIZATION
+###############################################################################
+
+    def _normalize_dataframe(
+        self,
+        df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Convert Yahoo dataframe into project standard.
+        """
+
+        df = df.copy()
+
+        if "Date" not in df.columns:
+
+            df = df.reset_index()
+
+        rename = {
+
+            "Date": "date",
+
+            "Datetime": "date",
+
+            "Open": "open",
+
+            "High": "high",
+
+            "Low": "low",
+
+            "Close": "close",
+
+            "Adj Close": "adj_close",
+
+            "Volume": "volume",
+
+        }
+
+        df.rename(
+            columns=rename,
+            inplace=True,
+        )
+
+        required = [
+
+            "date",
+
+            "open",
+
+            "high",
+
+            "low",
+
+            "close",
+
+            "volume",
+
+        ]
+
+        missing = [
+
+            col
+            for col in required
+            if col not in df.columns
+        ]
+
+        if missing:
+
+            raise RuntimeError(
+                f"Missing OHLC columns : {missing}"
+            )
+
+        numeric = [
+
+            "open",
+
+            "high",
+
+            "low",
+
+            "close",
+
+            "volume",
+
+        ]
+
+        for column in numeric:
+
+            df[column] = pd.to_numeric(
+                df[column],
+                errors="coerce",
+            )
+
+        if "adj_close" not in df.columns:
+
+            df["adj_close"] = df["close"]
+
+        df["symbol"] = ""
+
+        df["retrieved_at"] = ist_now()
+
+        df.dropna(
+            subset=["close"],
+            inplace=True,
+        )
+
+        df.sort_values(
+            "date",
+            inplace=True,
+        )
+
+        df.reset_index(
+            drop=True,
+            inplace=True,
+        )
+
+        return df
+
+
+###############################################################################
+# CACHE
+###############################################################################
+
+    def _read_cache(
+        self,
+        path: Path,
+    ) -> Optional[pd.DataFrame]:
+        """
+        Read cached parquet.
+        """
+
+        try:
+
+            return pd.read_parquet(path)
+
+        except Exception:
+
+            logger.warning(
+                "Ignoring corrupted cache %s",
+                path.name,
             )
 
             return None
 
-    ###########################################################################
 
-    def fetch_many(
+    def _write_cache(
         self,
-        symbols: List[str],
-    ) -> pd.DataFrame:
+        path: Path,
+        df: pd.DataFrame,
+    ) -> None:
         """
-        Fetch OHLC data for multiple symbols in parallel.
-
-        Parameters
-        ----------
-        symbols : List[str]
-
-        Returns
-        -------
-        pandas.DataFrame
+        Persist cache.
         """
 
-        from concurrent.futures import ThreadPoolExecutor
-        from concurrent.futures import as_completed
+        try:
 
-        if not symbols:
+            df.to_parquet(
+                path,
+                index=False,
+            )
 
-            logger.warning("Empty symbol list.")
+        except Exception:
 
-            return pd.DataFrame(columns=OUTPUT_COLUMNS)
+            logger.exception(
+                "Unable to write cache %s",
+                path.name,
+            )
 
-        logger.info(
 
-            "Downloading OHLC for %d symbols using %d workers.",
+###############################################################################
+# OPTIONAL UTILITIES
+###############################################################################
 
-            len(symbols),
-
-            MAX_WORKERS,
-
-        )
-
-        frames = []
-
-        with ThreadPoolExecutor(
-            max_workers=MAX_WORKERS
-        ) as executor:
-
-            futures = {
-
-                executor.submit(
-                    self._fetch_worker,
-                    symbol
-                ): symbol
-
-                for symbol in symbols
-
-            }
-
-            for future in as_completed(futures):
-
-                df = future.result()
-
-                if df is not None:
-
-                    frames.append(df)
-
-        if not frames:
-
-            logger.warning("No OHLC data downloaded.")
-
-            return pd.DataFrame(columns=OUTPUT_COLUMNS)
-
-        result = pd.concat(
-
-            frames,
-
-            ignore_index=True,
-
-        )
-
-        result.drop_duplicates(
-
-            subset=["Symbol"],
-
-            inplace=True,
-
-        )
-
-        result.reset_index(
-
-            drop=True,
-
-            inplace=True,
-
-        )
-
-        logger.info(
-
-            "Downloaded OHLC for %d symbols.",
-
-            len(result),
-
-        )
-
-        return result
-
-    ###########################################################################
-
-    def merge(
+    def latest_close(
         self,
-        report_df: pd.DataFrame,
-    ) -> pd.DataFrame:
+        symbol: str,
+    ) -> float:
         """
-        Merge OHLC data with report dataframe.
-
-        Parameters
-        ----------
-        report_df : pandas.DataFrame
-
-        Returns
-        -------
-        pandas.DataFrame
+        Latest closing price.
         """
 
-        if report_df.empty:
+        df = self.fetch(symbol)
 
-            logger.warning("Report dataframe is empty.")
+        return float(df.iloc[-1]["close"])
 
-            return report_df
 
-        symbols = (
+    def latest_row(
+        self,
+        symbol: str,
+    ) -> pd.Series:
+        """
+        Latest OHLC row.
+        """
 
-            report_df["Symbol"]
+        df = self.fetch(symbol)
 
-            .dropna()
+        return df.iloc[-1]
 
-            .astype(str)
 
-            .unique()
+    def latest_volume(
+        self,
+        symbol: str,
+    ) -> int:
+        """
+        Latest traded volume.
+        """
 
-            .tolist()
+        df = self.fetch(symbol)
 
-        )
+        return int(df.iloc[-1]["volume"])
+
+
+###############################################################################
+# CLOSE
+###############################################################################
+
+    def close(self) -> None:
+        """
+        Shutdown service.
+        """
 
         logger.info(
-
-            "Merging OHLC for %d symbols.",
-
-            len(symbols),
-
+            "OHLCData closed."
         )
-
-        quote_df = self.fetch_many(symbols)
-
-        if quote_df.empty:
-
-            logger.warning("Quote dataframe is empty.")
-
-            return report_df
-
-        merged = report_df.merge(
-
-            quote_df,
-
-            on="Symbol",
-
-            how="left",
-
-            suffixes=("", "_OHLC"),
-
-        )
-
-        logger.info(
-
-            "Merge completed. Final rows : %d",
-
-            len(merged),
-
-        )
-
-        return merged
-
-    ###########################################################################
-
-    def refresh(self) -> None:
-        """
-        Refresh timestamp and clear cache.
-        """
-        self.timestamp = now_ist()
-
-        self.clear_cache()
-
-        logger.info("OHLCData refreshed.")
-
-
-    def health_check(self) -> Dict[str, Any]:
-        """
-        Return OHLC service health information.
-        """
-
-        return {
-            "component": "OHLCData",
-            "status": "ready",
-            "provider": "nselib",
-            "session_initialized": self.nse.cookies_initialized,
-            "cache_enabled": self.cache is not None,
-            "timestamp": self.timestamp.strftime(
-                "%Y-%m-%d %H:%M:%S"
-            ),
-        }

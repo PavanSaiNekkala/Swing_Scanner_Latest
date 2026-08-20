@@ -12,8 +12,9 @@ Author:
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
+
+from modules.datetime_utils import timestamp
 
 import pandas as pd
 
@@ -318,9 +319,7 @@ def create_excel_report(
     losers: pd.DataFrame,
 ):
 
-    timestamp = datetime.now().strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    report_timestamp = timestamp()
 
     gainers = gainers.copy()
 
@@ -329,13 +328,13 @@ def create_excel_report(
     gainers.insert(
         0,
         "Timestamp",
-        timestamp,
+        report_timestamp,
     )
 
     losers.insert(
         0,
         "Timestamp",
-        timestamp,
+        report_timestamp,
     )
 
     #

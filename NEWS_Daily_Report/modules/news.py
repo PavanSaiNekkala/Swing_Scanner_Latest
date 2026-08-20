@@ -30,6 +30,7 @@ from modules.constants import (
 
 from modules.logger import logger
 from modules.validators import validate_dataframe
+from modules.datetime_utils import now_ist
 
 ###############################################################################
 # Constants
@@ -47,7 +48,7 @@ class NewsService:
 
     def __init__(self):
 
-        self.cutoff = datetime.now() - timedelta(
+        self.cutoff = now_ist() - timedelta(
             days=NEWS_LOOKBACK_DAYS
         )
 

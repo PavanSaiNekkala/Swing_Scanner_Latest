@@ -17,89 +17,188 @@ from pathlib import Path
 import pandas as pd
 
 from config import INPUT_CSV
-from modules.constants import CSVColumns
 from modules.logger import logger
-from modules.utils import normalize_symbols
 from modules.validators import (
     validate_file_exists,
     validate_universe_csv,
 )
 
+###############################################################################
+# Loader
+###############################################################################
+
 
 class UniverseLoader:
     """
-    Responsible for loading the NSE Universe CSV.
+    Responsible for loading and normalizing the NSE Universe.
     """
 
-    def __init__(self, csv_path: Path = INPUT_CSV):
+    def __init__(
+        self,
+        csv_path: Path = INPUT_CSV,
+    ):
 
-        self.csv_path = Path(csv_path)
+        self.csv_path = Path(
+            csv_path,
+        )
 
-    def load(self) -> list[str]:
+    ###########################################################################
+
+    def load(
+        self,
+    ) -> pd.DataFrame:
         """
-        Load and return normalized ticker symbols.
+        Load and normalize the NSE universe.
 
         Returns
         -------
-        list[str]
+        pd.DataFrame
+
+        Columns
+        -------
+        Symbol
+        Company
         """
 
-        logger.info("Loading universe: %s", self.csv_path)
-
-        validate_file_exists(self.csv_path)
-
-        try:
-            df = pd.read_csv(self.csv_path)
-
-            # Normalize NSE column names
-            df.columns = df.columns.str.strip()
-
-            df.rename(
-                columns={
-                    "SYMBOL": "Symbol",
-                    "NAME OF COMPANY": "Company",
-                },
-                inplace=True,
-            )
-
-        except Exception as exc:
-            logger.exception("Unable to read CSV.")
-            raise
-
-        validate_universe_csv(df)
-
-        symbols = (
-            df[CSVColumns.SYMBOL.value]
-            .dropna()
-            .astype(str)
-            .tolist()
+        logger.info(
+            "Loading universe: %s",
+            self.csv_path,
         )
 
-        symbols = normalize_symbols(symbols)
+        validate_file_exists(
+            self.csv_path,
+        )
 
-        # Remove duplicates while preserving order
-        symbols = list(dict.fromkeys(symbols))
+        try:
+
+            df = pd.read_csv(
+                self.csv_path,
+            )
+
+        except Exception:
+
+            logger.exception(
+                "Unable to read universe CSV.",
+            )
+
+            raise
+
+        #
+        # Normalize column names
+        #
+
+        df.columns = (
+            df.columns
+            .str.strip()
+        )
+
+        df.rename(
+            columns={
+                "SYMBOL": "Symbol",
+                "NAME OF COMPANY": "Company",
+            },
+            inplace=True,
+        )
+
+        #
+        # Validate
+        #
+
+        validate_universe_csv(
+            df,
+        )
+
+        #
+        # Keep only required columns
+        #
+
+        df = df[
+            [
+                "Symbol",
+                "Company",
+            ]
+        ].copy()
+
+        #
+        # Normalize Symbol
+        #
+
+        df["Symbol"] = (
+            df["Symbol"]
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+
+        df["Symbol"] = df["Symbol"].apply(
+            lambda symbol:
+            symbol
+            if symbol.endswith(".NS")
+            else f"{symbol}.NS"
+        )
+
+        #
+        # Normalize Company
+        #
+
+        df["Company"] = (
+            df["Company"]
+            .astype(str)
+            .str.strip()
+        )
+
+        #
+        # Remove empty rows
+        #
+
+        df = df.dropna(
+            subset=[
+                "Symbol",
+                "Company",
+            ]
+        )
+
+        #
+        # Remove duplicate symbols
+        #
+
+        df = df.drop_duplicates(
+            subset="Symbol",
+            keep="first",
+        ).reset_index(
+            drop=True,
+        )
 
         logger.info(
             "Loaded %d symbols.",
-            len(symbols),
+            len(df),
         )
 
-        return symbols
+        return df
 
 
-def load_universe() -> list[str]:
-    """
-    Convenience wrapper.
-    """
+###############################################################################
+# Public API
+###############################################################################
+
+
+def load_universe() -> pd.DataFrame:
 
     return UniverseLoader().load()
 
 
+###############################################################################
+# Debug
+###############################################################################
+
 if __name__ == "__main__":
 
-    symbols = load_universe()
+    universe = load_universe()
 
-    print(f"Loaded {len(symbols)} symbols")
+    print(universe.head())
 
-    print(symbols[:20])
+    print()
+
+    print(
+        f"Loaded {len(universe)} symbols."
+    )

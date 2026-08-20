@@ -92,14 +92,14 @@ class DailyReportApplication:
             # Load Universe
             # -----------------------------------------------------------------
 
-            symbols = self.execute_step(
+            universe = self.execute_step(
                 "Load NSE Universe",
                 load_universe,
             )
 
             logger.info(
-                "Symbols Loaded : %d",
-                len(symbols),
+                "Universe Loaded : %d symbols",
+                len(universe),
             )
 
             # -----------------------------------------------------------------
@@ -109,7 +109,7 @@ class DailyReportApplication:
             market_df = self.execute_step(
                 "Download Market Data",
                 fetch_market_data,
-                symbols,
+                universe,
             )
 
             logger.info(
@@ -200,7 +200,7 @@ class DailyReportApplication:
             logger.info("PIPELINE COMPLETED")
             logger.info("=" * 80)
 
-            logger.info("Symbols Processed : %d", len(symbols))
+            logger.info("Universe Size  : %d", len(universe))
             logger.info("Rows Processed    : %d", len(market_df))
             logger.info("Top Gainers       : %d", len(gainers))
             logger.info("Top Losers        : %d", len(losers))

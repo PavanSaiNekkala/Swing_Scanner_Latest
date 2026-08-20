@@ -56,6 +56,8 @@ from modules.validators import (
     validate_dataframe,
 )
 
+from modules.datetime_utils import now_ist
+
 ###############################################################################
 # Data Models
 ###############################################################################
@@ -138,7 +140,7 @@ class MarketDataService:
         Return execution statistics.
         """
 
-        self.stats.completed_at = datetime.now()
+        self.stats.completed_at = now_ist()
 
         return self.stats
 
@@ -207,7 +209,7 @@ class MarketDataService:
                 "No symbols supplied."
             )
 
-        self.stats.started_at = datetime.now()
+        self.stats.started_at = now_ist()
 
         self.stats.requested_symbols = len(
             symbols,
@@ -442,6 +444,7 @@ class MarketDataService:
     def build_record(
         self,
         symbol: str,
+        company: str,
         stock_df: pd.DataFrame,
     ) -> dict:
         """
@@ -480,7 +483,7 @@ class MarketDataService:
                 symbol,
 
             MarketColumns.COMPANY.value:
-                symbol.replace(".NS", ""),
+                company,
 
             MarketColumns.OPEN.value:
                 float(latest["Open"]),
@@ -526,6 +529,7 @@ class MarketDataService:
         self,
         downloaded: pd.DataFrame,
         symbol: str,
+        company: str,
     ) -> dict | None:
         """
         Process a single symbol into a report record.
@@ -544,6 +548,7 @@ class MarketDataService:
 
             return self.build_record(
                 symbol,
+                company,
                 stock_df,
             )
 
@@ -567,7 +572,7 @@ class MarketDataService:
 
     def prepare_market_data(
         self,
-        symbols: Iterable[str],
+        universe: pd.DataFrame,
     ) -> pd.DataFrame:
         """
         Prepare market data for all symbols.
@@ -581,6 +586,17 @@ class MarketDataService:
         -------
         pd.DataFrame
         """
+
+        symbols = normalize_symbols(
+            universe["Symbol"].tolist(),
+        )
+
+        company_lookup = dict(
+            zip(
+                universe["Symbol"],
+                universe["Company"],
+            )
+        )
 
         symbols = normalize_symbols(
             list(symbols),
@@ -637,9 +653,15 @@ class MarketDataService:
                     (index / total_symbols) * 100,
                 )
 
+            company = company_lookup.get(
+                    symbol,
+                    "",
+                )
+
             record = self.process_symbol(
                 downloaded,
                 symbol,
+                company,
             )
 
             if record is None:
@@ -723,9 +745,8 @@ class MarketDataService:
 # Public API
 ###############################################################################
 
-
-def prepare_market_data(
-    symbols: Iterable[str],
+def fetch_market_data(
+    universe: pd.DataFrame,
 ) -> pd.DataFrame:
     """
     Public API.
@@ -734,35 +755,5 @@ def prepare_market_data(
     service = MarketDataService()
 
     return service.prepare_market_data(
-        symbols,
-    )
-
-###############################################################################
-# Public API
-###############################################################################
-
-def prepare_market_data(
-    symbols: Iterable[str],
-) -> pd.DataFrame:
-
-    service = MarketDataService()
-
-    return service.prepare_market_data(
-        symbols,
-    )
-
-
-###############################################################################
-# Backward Compatibility
-###############################################################################
-
-def fetch_market_data(
-    symbols: Iterable[str],
-) -> pd.DataFrame:
-    """
-    Backward-compatible wrapper.
-    """
-
-    return prepare_market_data(
-        symbols,
+        universe,
     )

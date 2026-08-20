@@ -282,7 +282,7 @@ class NSEMarketReport:
             total=len(tasks),
             desc="Market Data",
             unit="task",
-            colour="blue",
+            colour="black",
             ncols=100,
 
         ) as progress:

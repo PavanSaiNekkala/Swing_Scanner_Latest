@@ -269,6 +269,36 @@ class YahooFinanceProvider(
             rows
         )
 
+    ###############################################################################
+    # HISTORY
+    ###############################################################################
+
+    def fetch_history(
+        self,
+        symbol: str,
+        period: str = "6mo",
+        interval: str = "1d",
+    ):
+
+        ticker = yf.Ticker(
+            f"{symbol}.NS"
+        )
+
+        df = ticker.history(
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+            actions=False,
+        )
+
+        if df.empty:
+
+            return df
+
+        df = df.reset_index()
+
+        return df
+
     # ========================================================
     # OHLC
     # ========================================================

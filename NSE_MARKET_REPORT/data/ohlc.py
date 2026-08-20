@@ -106,6 +106,10 @@ class OHLCData:
         return self._load_history(request)
 
 
+###############################################################################
+# FETCH MULTIPLE SYMBOLS
+###############################################################################
+
     def fetch_many(
         self,
         symbols: list[str],
@@ -138,6 +142,76 @@ class OHLCData:
                 result[symbol] = pd.DataFrame()
 
         return result
+
+
+    ###############################################################################
+    # MERGE
+    ###############################################################################
+
+    def merge(
+        self,
+        report_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+
+        symbols = (
+            report_df["Symbol"]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+
+        ohlc_map = self.fetch_many(
+            symbols=symbols,
+        )
+
+        rows = []
+
+        for symbol, df in ohlc_map.items():
+
+            if df.empty:
+
+                continue
+
+            latest = df.iloc[-1]
+
+            rows.append(
+                {
+                    "Symbol": symbol,
+                    "Open": latest.get(
+                        "Open"
+                    ),
+                    "High": latest.get(
+                        "High"
+                    ),
+                    "Low": latest.get(
+                        "Low"
+                    ),
+                    "Close": latest.get(
+                        "Close"
+                    ),
+                    "Volume": latest.get(
+                        "Volume"
+                    ),
+                }
+            )
+
+        ohlc_df = pd.DataFrame(
+            rows
+        )
+
+        if ohlc_df.empty:
+
+            logger.warning(
+                "No OHLC data downloaded."
+            )
+
+            return report_df
+
+        return report_df.merge(
+            ohlc_df,
+            on="Symbol",
+            how="left",
+        )
 
 
 ###############################################################################

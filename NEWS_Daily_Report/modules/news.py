@@ -63,7 +63,7 @@ class NewsService:
         """
 
         query = (
-            f'"{company}" '
+            f'"{company}" OR "{symbol.replace(".NS", "")}" '
             "stock OR shares"
         )
 
@@ -278,7 +278,39 @@ class NewsService:
                 all_news,
             )
 
+            logger.info(
+                "%s -> Total Articles = %d | Recent Articles = %d",
+                symbol,
+                len(all_news),
+                len(recent_news),
+            )
+
+            #
+            # If no articles are found within the lookback period,
+            # fall back to the latest available Google News.
+            #
+
             if not recent_news:
+
+                logger.info(
+                    "%s : No news found in last %d days. Using latest available articles.",
+                    symbol,
+                    NEWS_LOOKBACK_DAYS,
+                )
+
+                recent_news = all_news
+
+            #
+            # Still nothing? Skip this stock.
+            #
+
+            if not recent_news:
+
+                logger.warning(
+                    "%s : No Google News available.",
+                    symbol,
+                )
+
                 continue
 
             #
@@ -329,6 +361,22 @@ class NewsService:
                     idx,
                     f"News {i}",
                 ] = headline
+
+        logger.info(
+            "News enrichment completed for %d stocks.",
+            len(df),
+        )
+
+        logger.info(
+            "\n%s",
+            df[
+                [
+                    "Symbol",
+                    "Top Headline",
+                    "News 1",
+                ]
+            ].head(5).to_string(),
+        )
 
         return df
 

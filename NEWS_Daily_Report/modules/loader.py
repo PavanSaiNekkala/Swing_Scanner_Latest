@@ -51,6 +51,17 @@ class UniverseLoader:
         try:
             df = pd.read_csv(self.csv_path)
 
+            # Normalize NSE column names
+            df.columns = df.columns.str.strip()
+
+            df.rename(
+                columns={
+                    "SYMBOL": "Symbol",
+                    "NAME OF COMPANY": "Company",
+                },
+                inplace=True,
+            )
+
         except Exception as exc:
             logger.exception("Unable to read CSV.")
             raise

@@ -117,7 +117,7 @@ TOP_LOSERS = 20
 # News
 # =============================================================================
 
-NEWS_LOOKBACK_DAYS = 7
+NEWS_LOOKBACK_DAYS = 30
 
 TOP_NEWS = 3
 

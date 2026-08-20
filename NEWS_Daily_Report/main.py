@@ -153,10 +153,30 @@ class DailyReportApplication:
                 gainers,
             )
 
+            logger.info(
+                "Gainers after news enrichment:\n%s",
+                gainers[
+                    [
+                        "Symbol",
+                        "Top Headline",
+                    ]
+                ].head().to_string(),
+            )
+
             losers = self.execute_step(
                 "Fetch News - Losers",
                 enrich_news,
                 losers,
+            )
+
+            logger.info(
+                "Losers after news enrichment:\n%s",
+                losers[
+                    [
+                        "Symbol",
+                        "Top Headline",
+                    ]
+                ].head().to_string(),
             )
 
             # -----------------------------------------------------------------

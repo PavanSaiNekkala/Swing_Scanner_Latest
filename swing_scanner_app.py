@@ -446,6 +446,92 @@ def composite_gate(regime: dict, segments: dict, breadth: dict) -> dict:
             "breadth_veto": (br_significant and br == "NEGATIVE" and idx_state == "RISK-ON")}
 
 
+# =============================================================================
+# STAGE-2 ALIGNMENT SCORE  (Aug-2026 — user request)
+# -----------------------------------------------------------------------------
+# From cross-stock backtest inspection (HAL / ADANIENT / LAURUSLABS / POLYCAB /
+# BHEL / VEDL / DEEPAKNTR): winning years cluster in the same *visual* pattern
+# — Weinstein Stage-2 uptrends. Same setup fired in Stage-1 (base) or Stage-3
+# (topping) produces losses; fired in Stage-2 produces the fat right tail.
+#
+# This scorer produces a 0-100 objective read of "how Stage-2-ish is TODAY's
+# setup on this stock". Used as a MULTIPLICATIVE BOOST on rank_score (bounded
+# ±15%) — never a filter, so no stock the technical scan approved gets skipped;
+# just re-ordered so Stage-2-aligned signals rise to the top.
+#
+# Eight independent checks (each worth 12.5 pts, no look-ahead):
+#   1. Rising long trend    — 200-DMA slope > 0 over last 60 sessions
+#   2. Above long trend     — Close > 200-DMA
+#   3. Golden cross intact  — 50-DMA > 200-DMA
+#   4. Perfect MA stack     — 20 > 50 > 200 (short/mid/long aligned)
+#   5. Trend strength       — ADX(14) > 25 (directional, not chop)
+#   6. Momentum positive    — MACD histogram > 0
+#   7. Near highs           — within 10% of 52w high (recent breakout pattern)
+#   8. Not overextended     — pct_vs_sma20 < 8% (still room to run)
+# Score = passed × 12.5. Boost = 1 + (score - 50) / 100 × 0.30.
+# Score 100 → +15% boost · score 50 → neutral · score 0 → -15% dampener.
+# =============================================================================
+def _compute_stage2_score(df: pd.DataFrame) -> tuple:
+    """Returns (score_0_to_100, human_readable_reasons_list, passing_flags_dict).
+    All features are read from the LAST bar of `df` (already computed by
+    engine.compute_indicators). No look-ahead — every column is trailing."""
+    if df is None or df.empty or len(df) < 210:
+        return 50.0, ["insufficient history for Stage-2 read"], {}
+    last = df.iloc[-1]
+    close_now = float(last["Close"])
+    sma20     = float(last.get("sma20",  np.nan))
+    sma50     = float(last.get("sma50",  np.nan))
+    sma200    = float(last.get("sma200", np.nan))
+    adx       = float(last.get("adx14",  np.nan))
+    macd_hist = float(last.get("macd_hist", np.nan))
+    pct_20    = float(last.get("pct_vs_sma20", np.nan))
+    dist52    = float(last.get("dist_52wH",    np.nan))
+
+    # 200-DMA slope over last 60 sessions (must be rising)
+    sma200_slope = np.nan
+    if "sma200" in df.columns and len(df) >= 260:
+        s_now = float(df["sma200"].iloc[-1])
+        s_old = float(df["sma200"].iloc[-61])
+        if np.isfinite(s_now) and np.isfinite(s_old) and s_old != 0:
+            sma200_slope = (s_now / s_old - 1) * 100
+
+    reasons, flags = [], {}
+    def _ok(name, condition, msg):
+        flags[name] = bool(condition)
+        if condition: reasons.append("✓ " + msg)
+        else:         reasons.append("✗ " + msg)
+
+    _ok("rising_long_trend", np.isfinite(sma200_slope) and sma200_slope > 0,
+        f"200-DMA slope {sma200_slope:+.2f}% (last 60d)"
+        if np.isfinite(sma200_slope) else "200-DMA slope unknown")
+    _ok("above_long_trend", np.isfinite(sma200) and close_now > sma200,
+        f"close ₹{close_now:.0f} vs 200-DMA ₹{sma200:.0f}"
+        if np.isfinite(sma200) else "200-DMA unknown")
+    _ok("golden_cross", np.isfinite(sma50) and np.isfinite(sma200) and sma50 > sma200,
+        f"50-DMA ₹{sma50:.0f} > 200-DMA ₹{sma200:.0f}"
+        if (np.isfinite(sma50) and np.isfinite(sma200)) else "50/200 MAs unknown")
+    _ok("perfect_stack",
+        all(np.isfinite(x) for x in (sma20, sma50, sma200))
+        and sma20 > sma50 > sma200,
+        f"20>50>200 stack aligned"
+        if all(np.isfinite(x) for x in (sma20, sma50, sma200))
+        else "MA stack unknown")
+    _ok("trend_strength", np.isfinite(adx) and adx > 25,
+        f"ADX {adx:.0f} > 25" if np.isfinite(adx) else "ADX unknown")
+    _ok("momentum_positive", np.isfinite(macd_hist) and macd_hist > 0,
+        f"MACD hist {macd_hist:+.2f}" if np.isfinite(macd_hist) else "MACD unknown")
+    _ok("near_highs", np.isfinite(dist52) and dist52 > -10,
+        f"within {dist52:+.1f}% of 52w high"
+        if np.isfinite(dist52) else "52wH distance unknown")
+    _ok("not_overextended", np.isfinite(pct_20) and pct_20 < 8,
+        f"only {pct_20:+.1f}% above 20-DMA"
+        if np.isfinite(pct_20) else "20-DMA distance unknown")
+
+    passed = sum(1 for v in flags.values() if v)
+    score = round(passed * 12.5, 1)  # 0..100 in 12.5-pt increments
+    return score, reasons, flags
+
+
 def scan_one(ticker, start, end, strategy, p, bt_kwargs, idx_ret_window=0.0,
              sector_map=None, category_map=None,
              require_confirmation: bool = False,
@@ -586,6 +672,22 @@ def scan_one(ticker, start, end, strategy, p, bt_kwargs, idx_ret_window=0.0,
     ranking_penalty_reason = " · ".join(penalty_bits) if penalty_bits else ""
     rank_score = round(rank_score * freshness * ext_pen, 2)
 
+    # =====================================================================
+    # STAGE-2 ALIGNMENT BOOST  (Aug-2026 — user pattern observation)
+    # ---------------------------------------------------------------------
+    # See _compute_stage2_score() docstring. Multiplicative boost bounded
+    # to ±15% so it re-orders the shortlist without ever skipping a
+    # technically-valid signal. Stocks whose current setup matches the
+    # Stage-2 pattern that historically drove HAL/ADANIENT/POLYCAB winners
+    # rise to the top; stocks signalling in Stage-1/3 (base or topping)
+    # get gently demoted but still surface.
+    # =====================================================================
+    stage2_score, stage2_reasons, stage2_flags = _compute_stage2_score(df)
+    stage2_boost = 1.0 + (stage2_score - 50.0) / 100.0 * 0.30
+    rank_score_pre_stage2 = rank_score
+    rank_score = round(rank_score * stage2_boost, 2)
+    stage2_reason_str = " · ".join(r for r in stage2_reasons if r.startswith("✓"))
+
     # --- point 1: concrete stop-loss for a trade entered ~ at the last close ---
     entry_ref = float(last["Close"])
     atr_now = float(last["atr14"]) if np.isfinite(last["atr14"]) else 0.0
@@ -627,6 +729,11 @@ def scan_one(ticker, start, end, strategy, p, bt_kwargs, idx_ret_window=0.0,
         "cooldown_blocked": cooldown_blocked, "cooldown_reason": cooldown_reason,
         "rank_score_raw": rank_score_raw,               # Change #6: pre-penalty for audit
         "ranking_penalty_reason": ranking_penalty_reason,
+        # ---- Stage-2 alignment audit (Aug-2026) ----
+        "stage2_score":         stage2_score,             # 0..100
+        "stage2_boost":         round(stage2_boost, 3),   # 0.85..1.15
+        "stage2_reason":        stage2_reason_str[:200],  # ✓ passing checks summary
+        "rank_score_pre_stage2": rank_score_pre_stage2,   # for A/B audit
         "bt_from": raw.index[0].date(), "bt_to": raw.index[-1].date(), "years": round(yrs, 1),
         "hist_trades": n, "win_%": winr, "expectancy_%": exp,
         "avg_win_%": stats.get("avg_win_%", 0.0), "avg_loss_%": stats.get("avg_loss_%", 0.0),
@@ -1563,18 +1670,30 @@ def body():
                         try:
                             n = _news_score(r["yahoo"])
                         except Exception:
-                            n = {"score": 0.0, "n_articles": 0, "top_headline": None,
+                            n = {"score": 0.0, "n_articles": 0,
+                                 "top_headline": None, "top_impact": 0.0,
+                                 "latest_headline": None, "latest_date": None,
+                                 "latest_impact": 0.0,
                                  "matched_terms": []}
-                        r["news_score"]     = float(n.get("score", 0.0))
-                        r["news_n"]         = int(n.get("n_articles", 0))
-                        r["news_top"]       = n.get("top_headline")
-                        r["news_matched"]   = ",".join(n.get("matched_terms", [])[:5])
+                        r["news_score"]      = float(n.get("score", 0.0))
+                        r["news_n"]          = int(n.get("n_articles", 0))
+                        r["news_top"]        = n.get("top_headline")
+                        r["news_top_score"]  = float(n.get("top_impact", 0.0))
+                        # Latest-by-date headline (may differ from `news_top`,
+                        # which is largest-|score|). Users want both.
+                        r["news_latest"]        = n.get("latest_headline")
+                        r["news_latest_date"]   = n.get("latest_date")
+                        r["news_latest_score"]  = float(n.get("latest_impact", 0.0))
+                        r["news_matched"]    = ",".join(n.get("matched_terms", [])[:5])
                         # Rank blending — news tilts ±20%.
                         tilt = max(min(r["news_score"], 1.0), -1.0) * 0.20
                         r["rank_score"] = round(r["rank_score"] * (1.0 + tilt), 2)
                     else:
                         r["news_score"] = 0.0; r["news_n"] = 0
-                        r["news_top"] = None; r["news_matched"] = ""
+                        r["news_top"] = None; r["news_top_score"] = 0.0
+                        r["news_latest"] = None; r["news_latest_date"] = None
+                        r["news_latest_score"] = 0.0
+                        r["news_matched"] = ""
                     n_prog.progress((k + 1) / len(signal_rows))
                 n_stat.empty(); n_prog.empty()
                 blocked_ct = sum(1 for r in signal_rows if r.get("event_blocked"))
@@ -1591,6 +1710,10 @@ def body():
             r.setdefault("news_score", 0.0)
             r.setdefault("news_n", 0)
             r.setdefault("news_top", None)
+            r.setdefault("news_top_score", 0.0)
+            r.setdefault("news_latest", None)
+            r.setdefault("news_latest_date", None)
+            r.setdefault("news_latest_score", 0.0)
             r.setdefault("news_matched", "")
 
         # breadth from the scanned universe, then the composite verdict
@@ -1725,6 +1848,120 @@ def render_stock_backtest(row, S, key_prefix=""):
             st.caption("⚠️ Under 1 year of sequential trading history for this stock — CAGR is "
                        "annualised from a short window and should be treated as illustrative only.")
 
+    # =========================================================================
+    # YEAR-WISE BREAKDOWN  (Aug-2026 — user request)
+    # -------------------------------------------------------------------------
+    # Interactive tabular breakdown of the trade log by ENTRY YEAR. Answers
+    # "how consistent was the edge over time?" — is the +936% total the sum of
+    # a fat 2021 and drag every other year, or did the algo work across the
+    # decade? Same table also flags year-clusters of losses (e.g. -34% DD
+    # concentrated in 2022) that the aggregate can hide.
+    # Columns: Year · # trades · Win% · Target hits · Stop hits · Time exits ·
+    #          Avg return % · Total return (sum) · Avg hold days · Best · Worst
+    # =========================================================================
+    with st.expander(f"📅 Year-wise breakdown  ({len(t)} trades across "
+                     f"{pd.to_datetime(t['entry_date']).dt.year.nunique()} years)",
+                     expanded=True):
+        ty = t.copy()
+        ty["_year"]  = pd.to_datetime(ty["entry_date"]).dt.year
+        ty["_win"]   = (ty["net_return_%"] > 0).astype(int)
+        ty["_tgt"]   = (ty["outcome"] == "TARGET").astype(int)
+        ty["_stop"]  = (ty["outcome"] == "STOP").astype(int)
+        ty["_trail"] = (ty["outcome"] == "TRAIL").astype(int)
+        ty["_time"]  = (ty["outcome"] == "TIME").astype(int)
+
+        # Aggregate per year (chronological ascending = most-recent last so
+        # cumulative reads left→right the way you'd trade it).
+        yearly = ty.groupby("_year").agg(
+            trades      = ("net_return_%", "size"),
+            wins        = ("_win",         "sum"),
+            targets     = ("_tgt",         "sum"),
+            trails      = ("_trail",       "sum"),
+            stops       = ("_stop",        "sum"),
+            times       = ("_time",        "sum"),
+            avg_ret     = ("net_return_%", "mean"),
+            total_ret   = ("net_return_%", "sum"),
+            best        = ("net_return_%", "max"),
+            worst       = ("net_return_%", "min"),
+            avg_hold    = ("days_held",    "mean"),
+        ).reset_index()
+        yearly["win_%"] = (100 * yearly["wins"] / yearly["trades"]).round(1)
+        # Compounded per-year equity multiplier — closer to real portfolio experience
+        yearly["cum_ret_%"] = yearly["total_ret"].cumsum().round(2)
+
+        # Human-friendly columns + formatting
+        view = yearly[[
+            "_year", "trades", "win_%",
+            "targets", "trails", "stops", "times",
+            "avg_ret", "total_ret", "cum_ret_%",
+            "best", "worst", "avg_hold",
+        ]].copy()
+        view.columns = [
+            "Year", "# Trades", "Win %",
+            "Target #", "Trail #", "Stop #", "Time #",
+            "Avg return %", "Total return (sum) %", "Cumulative %",
+            "Best %", "Worst %", "Avg hold (d)",
+        ]
+
+        # Colour-highlight losing years for at-a-glance reading
+        def _style_neg_years(df):
+            def _row_style(r):
+                if r["Total return (sum) %"] < 0:
+                    return ["background-color: rgba(220, 38, 38, 0.10)"] * len(r)
+                return [""] * len(r)
+            return df.style.apply(_row_style, axis=1).format({
+                "Win %":                "{:.1f}",
+                "Avg return %":         "{:+.2f}",
+                "Total return (sum) %": "{:+.2f}",
+                "Cumulative %":         "{:+.2f}",
+                "Best %":               "{:+.2f}",
+                "Worst %":              "{:+.2f}",
+                "Avg hold (d)":         "{:.1f}",
+            })
+
+        st.dataframe(_style_neg_years(view), use_container_width=True,
+                     hide_index=True, height=min(500, 60 + 34 * len(view)),
+                     key=f"{key_prefix}yr_{tick}")
+
+        # Quick summary of consistency
+        pos_years = int((yearly["total_ret"] > 0).sum())
+        neg_years = int((yearly["total_ret"] < 0).sum())
+        best_yr   = yearly.loc[yearly["total_ret"].idxmax(), ["_year", "total_ret"]]
+        worst_yr  = yearly.loc[yearly["total_ret"].idxmin(), ["_year", "total_ret"]]
+        st.caption(
+            f"**Consistency scorecard** — {pos_years} positive years / "
+            f"{neg_years} negative years · "
+            f"Best: **{int(best_yr['_year'])}** ({best_yr['total_ret']:+.1f}%) · "
+            f"Worst: **{int(worst_yr['_year'])}** ({worst_yr['total_ret']:+.1f}%). "
+            f"Red-tinted rows = losing years. "
+            f"**Cumulative %** compounds year-by-year — the last row equals "
+            f"the overall Total return (sum) shown above."
+        )
+
+        st.download_button(
+            f"⬇️ Download {tick} year-wise breakdown",
+            view.to_csv(index=False).encode(),
+            file_name=f"{tick}_yearwise_breakdown.csv", mime="text/csv",
+            key=f"{key_prefix}yr_dl_{tick}"
+        )
+
+        # ---- Bonus: sparkline of yearly returns for the visual reader ----
+        import plotly.graph_objects as go
+        colors_yr = ["#16a34a" if v >= 0 else "#dc2626" for v in yearly["total_ret"]]
+        fig_yr = go.Figure(go.Bar(
+            x=yearly["_year"].astype(int), y=yearly["total_ret"].round(2),
+            marker_color=colors_yr, name="Total return (sum) %",
+            text=[f"{v:+.1f}%" for v in yearly["total_ret"]],
+            textposition="outside",
+        ))
+        fig_yr.update_layout(
+            height=260, margin=dict(t=30, b=20, l=10, r=10),
+            title=dict(text="Total return (sum) % by year", font=dict(size=13)),
+            xaxis_title=None, yaxis_title="Return %", showlegend=False,
+        )
+        st.plotly_chart(fig_yr, use_container_width=True,
+                        key=f"{key_prefix}yr_chart_{tick}")
+
     facts = ["signal_date", "entry_date", "exit_date", "days_held", "outcome",
              "exit_route", "route_reason",
              "trade_type", "signal_close", "limit_price", "entry_price",
@@ -1846,11 +2083,24 @@ def render_results():
     # ---------- point 5: how prioritisation works ----------
     with st.expander("❓ How are stocks prioritised?  (ranking logic)", expanded=False):
         st.markdown(
-            "Candidates are ranked by a **blended score = confidence × relative-strength tilt**:\n\n"
+            "**Full rank formula:**\n\n"
+            "`rank_score = confidence × RS_tilt × freshness × extension_pen × stage2_boost × news_tilt`\n\n"
             "**confidence = max(expectancy, 0) × win-rate × sample-size-damping × 10** — the historical edge.\n\n"
             "**relative strength (RS%)** = the stock's return minus the index's over ~3 months. "
             "RS > 0 means it's *beating the market*. The blend nudges market-beating stocks up and "
             "laggards down (bounded ±50%), so on weak days the leaders rise to the top.\n\n"
+            "**🆕 Stage-2 alignment boost (±15%)** — objective 0-100 score for how well today's setup "
+            "matches the Weinstein Stage-2 uptrend pattern that historically drives the winning trades. "
+            "Eight independent checks: rising 200-DMA, close > 200-DMA, 50 > 200 (golden cross), "
+            "20>50>200 stack, ADX > 25 (real trend), MACD hist > 0, within 10% of 52w high, and "
+            "not overextended vs 20-DMA. Score 100 → +15% boost; score 0 → -15% dampener. **Never "
+            "skips a technically-valid signal** — just re-orders so Stage-2 setups rise to the top. "
+            "The Stage-2 column shows the score and the Why-Stage-2 column shows which of the 8 "
+            "checks passed. Rationale: cross-stock backtest inspection (HAL/ADANIENT/POLYCAB/BHEL/"
+            "LAURUSLABS/VEDL/DEEPAKNTR) showed that winning years cluster in the same visual pattern "
+            "— strong sustained uptrends with rising long trend and healthy MA stack. Same signal "
+            "fired in Stage-1 (base) or Stage-3 (topping) fails; fired in Stage-2 produces the fat "
+            "right tail. This boost tilts the shortlist toward the phase where the edge actually works.\n\n"
             "**Market-regime gate (composite):** three inputs decide RISK-ON / NEUTRAL / RISK-OFF — "
             "(1) the broad index vs its 200-DMA and 10-day momentum, (2) the **mid/small-cap segment "
             "indices** vs their own 200-DMA (your universe lives there, not in the IT mega-caps that "
@@ -1926,23 +2176,25 @@ def render_results():
             # Change #6 audit column — only show when at least one candidate has a penalty
             has_penalty = ("ranking_penalty_reason" in cand.columns) and \
                           cand["ranking_penalty_reason"].astype(str).str.len().gt(0).any()
-            base_cols = ["ticker", "category", "sector", "regime_today", "rank_score", "confidence", "rel_strength"]
+            base_cols = ["ticker", "category", "sector", "regime_today", "rank_score",
+                         "stage2_score", "confidence", "rel_strength"]
             if has_news:
                 base_cols += ["news_score"]
             if has_penalty:
                 base_cols += ["ranking_penalty_reason"]
             base_cols += ["entry_ref", "plan_entry", "target_price", "stop_price", "stop_%",
-                          "exp_days_to_target", "last_atr_pct", "remark"]
+                          "exp_days_to_target", "last_atr_pct", "stage2_reason", "remark"]
             inv = cand[base_cols].copy()
             _em = S.get("entry_mode", "Market open")
             _entry_label = "BUY limit ₹" if _em == "Limit" else "Entry (open)"
-            new_cols = ["Stock", "Cap", "Sector", "Signal", "Rank", "Conf(/day)", "RS%"]
+            new_cols = ["Stock", "Cap", "Sector", "Signal", "Rank",
+                        "Stage-2", "Conf(/day)", "RS%"]
             if has_news:
                 new_cols += ["News"]
             if has_penalty:
                 new_cols += ["Rank penalty"]
             new_cols += ["Last close", _entry_label, "Objective ₹", "Stop ₹", "Stop %",
-                         "Exp. days→objective", "ATR%", "Remark"]
+                         "Exp. days→objective", "ATR%", "Why Stage-2", "Remark"]
             inv.columns = new_cols
             if S.get("entry_mode") == "Limit":
                 st.caption(f"📥 **Place a BUY LIMIT at the 'BUY limit ₹' price** "
@@ -1970,7 +2222,8 @@ def render_results():
         # ======= TABLE 2: BACKTEST TRACK RECORD (evidence) =======
         st.subheader("📊 Backtest Track Record  —  historical proof behind each stock")
         bt = ok.sort_values("rank_score", ascending=False).reset_index(drop=True)
-        rec = bt[["ticker", "category", "sector", "signals_today", "rank_score", "exp_per_day_%", "rel_strength", "hist_trades", "win_%",
+        rec = bt[["ticker", "category", "sector", "signals_today", "rank_score",
+                  "stage2_score", "exp_per_day_%", "rel_strength", "hist_trades", "win_%",
                   "target_hits", "target_%", "trail_exits", "trail_%", "stop_hits", "stop_hit_%",
                   "time_exits", "time_%", "time_win", "time_loss",
                   "mom_exits", "mom_%", "decay_exits", "decay_%", "staircase_partials",
@@ -1978,7 +2231,8 @@ def render_results():
                   "total_return_sum_%", "cagr_%", "max_drawdown_%", "profit_factor",
                   "recovery_factor", "max_consecutive_losses", "seq_trades",
                   "bt_from", "bt_to", "years", "remark"]].copy()
-        rec.columns = ["Stock", "Cap", "Sector", "Signals today", "Rank", "Exp/DAY%", "RS%", "Trades", "Win%",
+        rec.columns = ["Stock", "Cap", "Sector", "Signals today", "Rank",
+                       "Stage-2", "Exp/DAY%", "RS%", "Trades", "Win%",
                        "Target #", "Target %", "Trail #", "Trail %", "Stop #", "Stop %",
                        "Time #", "Time %", "Time-win", "Time-loss",
                        "MomExit #", "MomExit %", "Decay #", "Decay %", "Staircase #",
@@ -2074,9 +2328,11 @@ def render_results():
                            "sentiment stabilises. News does NOT bypass the technical "
                            "signal requirement — this section is informational.")
                 nw_view = news_watchlist[["ticker", "sector", "news_score", "news_n",
-                                           "news_top", "news_matched"]].copy()
+                                           "news_top", "news_latest", "news_latest_date",
+                                           "news_matched"]].copy()
                 nw_view.columns = ["Stock", "Sector", "News", "# articles",
-                                    "Top headline", "Keywords matched"]
+                                    "Top headline", "Latest headline", "Latest date",
+                                    "Keywords matched"]
                 st.dataframe(nw_view, use_container_width=True, hide_index=True, height=280)
                 st.download_button(
                     "⬇️ Download news watchlist",
@@ -2093,13 +2349,22 @@ def render_results():
                              f"({n_material} material)"):
                 st.caption("Every fundamentally-passing stock's news score in the last 5 days. "
                            "Sorted by |news score|. Zero-score rows are stocks where headlines "
-                           "existed but none matched the sentiment lexicon (neutral coverage).")
+                           "existed but none matched the sentiment lexicon (neutral coverage). "
+                           "**Top headline** = largest single-impact story (dominates the mean). "
+                           "**Latest headline** = most-recent by publication date. "
+                           "These often differ — a +4 'beats estimates' from 4 days ago will be "
+                           "the Top slot while a −3 'resigns' from yesterday will be the Latest. "
+                           "Both feed the aggregate news score.")
                 full_view = with_news[["ticker", "sector", "signals_today",
-                                        "news_score", "news_n", "news_top", "news_matched"]].copy()
+                                        "news_score", "news_n",
+                                        "news_top", "news_latest", "news_latest_date",
+                                        "news_matched"]].copy()
                 full_view["|news|"] = full_view["news_score"].abs()
                 full_view = full_view.sort_values("|news|", ascending=False).drop(columns=["|news|"])
                 full_view.columns = ["Stock", "Sector", "Signals today?", "News",
-                                     "# articles", "Top headline", "Keywords matched"]
+                                     "# articles", "Top headline",
+                                     "Latest headline", "Latest date",
+                                     "Keywords matched"]
                 st.dataframe(full_view, use_container_width=True, hide_index=True, height=350)
                 st.download_button(
                     "⬇️ Download full news audit",

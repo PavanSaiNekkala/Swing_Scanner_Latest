@@ -162,16 +162,24 @@ def _score_headline(text: str) -> tuple:
 # ======================================================================================
 #  NEWS FETCHERS
 # ======================================================================================
+_LAST_FETCH_ERRORS = {}     # {ticker: (source, error_str)} — last-run diagnostics
+
 def _fetch_yfinance_news(ticker_yahoo: str) -> list:
     """Fetch news from yfinance. yfinance's news schema changed in 2024 — the
-    payload is now nested under 'content'. Handles both old and new shapes."""
+    payload is now nested under 'content'. Handles both old and new shapes.
+
+    v3.2 (Aug-2026): capture the exception into _LAST_FETCH_ERRORS so the UI
+    can surface WHY a fetch failed instead of silently returning []."""
     if yf is None:
+        _LAST_FETCH_ERRORS[ticker_yahoo] = ("yfinance", "yfinance not installed")
         return []
     try:
         news = yf.Ticker(ticker_yahoo).news
-    except Exception:
+    except Exception as e:
+        _LAST_FETCH_ERRORS[ticker_yahoo] = ("yfinance", f"{type(e).__name__}: {str(e)[:80]}")
         return []
     if not news:
+        _LAST_FETCH_ERRORS.setdefault(ticker_yahoo, ("yfinance", "returned empty list"))
         return []
     out = []
     for a in news:
@@ -215,7 +223,12 @@ def _fetch_google_news(query: str, max_items: int = 10, days: int = 3) -> list:
         req = urllib.request.Request(url, headers={"User-Agent":
             "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36"})
         raw = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", errors="replace")
-    except Exception:
+    except Exception as e:
+        # v3.2: capture the actual error so callers can surface it. Use the
+        # query as the key — one entry per query, gets overwritten by later
+        # queries but at least we have visibility into what failed and why.
+        _LAST_FETCH_ERRORS[f"__google:{query[:40]}"] = (
+            "google", f"{type(e).__name__}: {str(e)[:80]}")
         return []
     # Extract each <item> block, then title + pubDate within
     items = re.findall(r"<item>(.*?)</item>", raw, re.DOTALL)
@@ -366,18 +379,65 @@ def _build_search_queries(bare_ticker: str, company_name: str) -> list:
     return out
 
 
+# v3.4 (Aug-2026): Google News RSS rate-limit protection.
+# --------------------------------------------------------------
+# Google returns EMPTY responses (not HTTP 429) when rate-limited, so we
+# can't detect the block from HTTP status alone. Instead:
+#   1. Sleep ~0.35s between queries to stay under Google's per-IP threshold
+#      (empirically: <3 queries/sec sustained keeps us un-blocked).
+#   2. If a query returns 0 items AND the previous query returned 0,
+#      pause for `_BACKOFF_S` seconds — Google is very likely blocking us.
+#   3. Track a session-level "blocked" flag that fast-fails remaining queries
+#      once we're confident we're blocked. Prevents wasting 5s per query
+#      × 100 stocks × 4 queries = 33 min of wall-clock waiting for empties.
+import time as _time
+
+_INTER_QUERY_SLEEP_S = 0.35     # empirical — see comment above
+_BACKOFF_S           = 5.0
+_BLOCK_STREAK_LIMIT  = 5        # 5 consecutive 0-item queries → assume blocked
+_session_block       = {"blocked": False, "zero_streak": 0}
+
+
+def reset_google_block_flag():
+    """Call at the start of a fresh scan run to reset the session-level
+    rate-limit flag. Otherwise the flag persists across scans and legitimate
+    fetches get skipped."""
+    _session_block["blocked"]     = False
+    _session_block["zero_streak"] = 0
+
+
 def _fetch_google_news_multi(queries: list, days: int = 7,
                               per_query: int = 15) -> list:
-    """Fetch news across MULTIPLE Google News queries and dedupe by title."""
+    """Fetch news across MULTIPLE Google News queries and dedupe by title.
+    v3.4: rate-limit aware — sleeps between queries, backs off on empties,
+    fast-fails once we're confident we're blocked for this session."""
     seen_titles = set()
     all_items = []
-    for q in queries[:4]:               # cap at 4 queries
+    for qi, q in enumerate(queries[:4]):
+        if _session_block["blocked"]:
+            break                          # skip remaining queries this call
+        if qi > 0:
+            _time.sleep(_INTER_QUERY_SLEEP_S)
         items = _fetch_google_news(q, max_items=per_query, days=days)
-        for it in items:
-            t = (it.get("title") or "").strip().lower()
-            if t and t not in seen_titles:
-                seen_titles.add(t)
-                all_items.append(it)
+        if items:
+            _session_block["zero_streak"] = 0
+            for it in items:
+                t = (it.get("title") or "").strip().lower()
+                if t and t not in seen_titles:
+                    seen_titles.add(t)
+                    all_items.append(it)
+        else:
+            _session_block["zero_streak"] += 1
+            if _session_block["zero_streak"] >= _BLOCK_STREAK_LIMIT:
+                _session_block["blocked"] = True
+                _LAST_FETCH_ERRORS["__RATE_LIMIT__"] = (
+                    "google",
+                    f"5 consecutive empty responses — Google RSS is rate-"
+                    f"limiting this IP. Fast-failing rest of the run to save "
+                    f"time. Wait 5-15 min and rerun with cache-clear.")
+                break
+            # Small back-off on any empty response to give Google breathing room
+            _time.sleep(_BACKOFF_S / 5)
     return all_items
 
 
@@ -385,7 +445,8 @@ def _fetch_google_news_multi(queries: list, days: int = 7,
 #  PUBLIC API
 # ======================================================================================
 def fetch_news_score(ticker_yahoo: str, company_name: str = None,
-                     lookback_days: int = 7) -> dict:
+                     lookback_days: int = 7,
+                     as_of_date=None) -> dict:
     """Fetch news for a ticker and compute a sentiment score.
 
     v2 (Aug-2026) — auto-resolves the company name from yfinance if not
@@ -395,10 +456,23 @@ def fetch_news_score(ticker_yahoo: str, company_name: str = None,
     where headlines used the FULL company name (e.g. 'Mahindra') but the
     filter only accepted the ticker string (e.g. 'M&M').
 
+    v3 (Aug-2026) — NO-LOOK-AHEAD support via `as_of_date`.
+        For live scanner use (`as_of_date=None`): behaves exactly as v2 —
+        returns headlines from the last `lookback_days` calendar days.
+        For forward validation (`as_of_date=<cutoff>`): filters headlines to
+        the window [as_of_date - lookback_days, as_of_date]. Any headline
+        published AFTER as_of_date is dropped (look-ahead contamination).
+        The Google News query is widened so items published between
+        as_of_date and today aren't the ONLY ones returned — otherwise
+        the post-filter would leave the bucket empty for old cutoffs.
+
     Args:
         ticker_yahoo: e.g. "RELIANCE.NS"
         company_name: optional — auto-resolved from yfinance.Ticker.info if None
-        lookback_days: only headlines within this many days count (default 7)
+        lookback_days: length of the news window in calendar days (default 7)
+        as_of_date:   `date` or `datetime`. When provided, the window is
+                      [as_of_date - lookback_days, as_of_date] and any headline
+                      after as_of_date is EXCLUDED (no-look-ahead). None = "now".
     """
     bare = ticker_yahoo.replace(".NS", "").replace(".BO", "").upper()
 
@@ -410,11 +484,42 @@ def fetch_news_score(ticker_yahoo: str, company_name: str = None,
     keywords = [bare.lower()]
     keywords.extend(_keywords_from_name(company_name))
 
+    # -------- v3: figure out the reference datetime for the lookback window --------
+    if as_of_date is not None:
+        # Accept either date or datetime; treat date as end-of-day so a headline
+        # timestamped 2026-08-08 15:37 still qualifies when as_of_date=2026-08-08.
+        if isinstance(as_of_date, dt.datetime):
+            ref_dt = as_of_date
+        else:
+            ref_dt = dt.datetime.combine(as_of_date, dt.time.max)
+    else:
+        ref_dt = dt.datetime.now()
+
+    # If cutoff is in the past, widen Google's `when:` query so items from
+    # BEFORE the cutoff are actually returned. Google's when:Nd is relative
+    # to NOW (the moment Google runs the query), NOT to our ref_dt.
+    #
+    # v3.1 FIX (Aug-2026): the previous "lookback + days_since_ref" widening
+    # wasn't enough because Google News RSS is heavily recency-biased — even
+    # with when:14d, most returned items are dated in the last 3-4 days. For
+    # a cutoff 8 days ago that meant every returned item post-dated the
+    # cutoff and got dropped by the post-filter → 0 kept articles.
+    # Fix: when as_of_date is provided, use Google's practical MAX (30 days)
+    # AND double per_query, so we cover the full window and get enough items
+    # dated on-or-before the cutoff to survive the filter.
+    days_from_now_to_ref = max(0, (dt.datetime.now() - ref_dt).days)
+    if as_of_date is not None:
+        google_days = 30                         # Google's practical ceiling
+        per_query = 40                           # 2.6× the live-mode default
+    else:
+        google_days = int(lookback_days)
+        per_query = 15
+
     yf_news = _fetch_yfinance_news(ticker_yahoo)
 
     # Build a MULTI-QUERY Google News search (covers name + ticker variants)
     queries = _build_search_queries(bare, company_name)
-    gn_news = _fetch_google_news_multi(queries, days=lookback_days, per_query=15)
+    gn_news = _fetch_google_news_multi(queries, days=google_days, per_query=per_query)
 
     # LOOSENED relevance filter — matches ANY meaningful company-name word
     # OR the bare ticker. AND checks the CONFUSABLES exclusion list so we
@@ -431,21 +536,71 @@ def fetch_news_score(ticker_yahoo: str, company_name: str = None,
         return any(k in tl for k in keywords)
     gn_news = [it for it in gn_news if _is_relevant(it["title"])]
 
-    cutoff = dt.datetime.now() - dt.timedelta(days=lookback_days)
+    # -------- Window filter: [ref_dt - lookback_days, ref_dt] --------
+    # Any headline dated AFTER ref_dt is a look-ahead violation (excluded).
+    # Any headline dated BEFORE ref_dt - lookback_days is out of window.
+    # Undated headlines pass (be permissive — yfinance items sometimes lack dates).
+    earliest = ref_dt - dt.timedelta(days=lookback_days)
     all_items = []
-    for it in (yf_news + gn_news):
+    # ---- Diagnostics for the UI: how many RAW items did we fetch, and what
+    # was their date range? Helps the user diagnose "0 kept" — was it 0 raw
+    # fetched (Google rate-limited / blocked), or 30 raw items all dated
+    # after the cutoff (fetch worked but nothing pre-cutoff)?
+    raw_items_all = yf_news + gn_news
+    raw_fetched = len(raw_items_all)
+    # v3.3: strip tzinfo defensively so min/max never sees mixed aware/naive.
+    _raw_dates = []
+    for it in raw_items_all:
         d = it.get("date")
-        # If we can't tell how old it is, include it (be permissive)
-        if d is not None and d.replace(tzinfo=None) < cutoff:
+        if d is None:
             continue
+        if hasattr(d, "tzinfo") and d.tzinfo is not None:
+            d = d.replace(tzinfo=None)
+        _raw_dates.append(d)
+    raw_oldest = min(_raw_dates) if _raw_dates else None
+    raw_newest = max(_raw_dates) if _raw_dates else None
+    dropped_look_ahead = 0
+    dropped_too_old    = 0
+    for it in raw_items_all:
+        d = it.get("date")
+        # v3.3 BUG FIX (Aug-2026): normalise timezone HERE, then store the
+        # naive version back on the item. Previously the filter used a naive
+        # copy `d_cmp` for comparison but appended the ORIGINAL tz-aware
+        # date to all_items — downstream `max(all_items, key=x["date"])`
+        # then crashed with "can't compare offset-naive and offset-aware
+        # datetimes" whenever the list mixed yfinance (ISO/tz-aware) and
+        # Google News (RFC-2822/tz-naive) items. That killed ~10% of runs
+        # (5 out of 50 SmallCap tickers in the reproduction).
+        if d is not None:
+            if hasattr(d, "tzinfo") and d.tzinfo is not None:
+                d = d.replace(tzinfo=None)
+            if d > ref_dt:
+                dropped_look_ahead += 1
+                continue                # look-ahead — drop
+            if d < earliest:
+                dropped_too_old += 1
+                continue                # too old — drop
         score, matched = _score_headline(it["title"])
-        all_items.append({**it, "score": score, "matched": matched})
+        all_items.append({**it, "date": d, "score": score, "matched": matched})
 
     if not all_items:
-        return {"score": 0.0, "n_articles": 0, "top_headline": None,
-                "top_impact": 0.0, "matched_terms": [],
+        return {"score": 0.0, "n_articles": 0,
+                "top_headline": None, "top_date": None, "top_impact": 0.0,
+                "latest_headline": None, "latest_date": None,
+                "latest_impact": 0.0, "latest_source": None,
+                "matched_terms": [],
                 "sources": {"yfinance": 0, "google": 0},
-                "all_headlines": []}
+                "all_headlines": [],
+                "window_from": earliest.date() if hasattr(earliest, "date") else None,
+                "window_to":   ref_dt.date()  if hasattr(ref_dt, "date")   else None,
+                "as_of_used":  (as_of_date if as_of_date is not None else None),
+                # Diagnostics: why did we return 0 items?
+                "raw_fetched":        raw_fetched,
+                "raw_oldest":         raw_oldest.date() if raw_oldest else None,
+                "raw_newest":         raw_newest.date() if raw_newest else None,
+                "dropped_look_ahead": dropped_look_ahead,
+                "dropped_too_old":    dropped_too_old,
+                "google_days_used":   google_days}
 
     # Aggregate: take the average absolute impact, weighted by recency.
     # Normalise to [-1, +1] using a soft compression (tanh-like).
@@ -456,14 +611,35 @@ def fetch_news_score(ticker_yahoo: str, company_name: str = None,
     net = math.tanh(net_raw / 4.0)
 
     # Top headline = the one with the largest absolute individual score
+    #                (biggest single-item impact — dominates the average).
     top = max(all_items, key=lambda x: abs(x["score"]))
+
+    # Latest headline = the most-recent article by publication date.
+    # Different concept from `top`: e.g. a +4 "beats estimates" beat 4 days ago
+    # will be the `top` slot, while a −3 "resigns" story from yesterday will be
+    # the `latest`. Users want to see both — recency AND impact — because a
+    # small-|score| news item can still be the most decision-relevant piece of
+    # information (management change, regulatory notice, etc.).
+    #
+    # Fall back to `top` when no article carries a parseable date (e.g. all
+    # yfinance items with missing pubDate) so the caller never sees None.
+    items_with_date = [it for it in all_items if it.get("date") is not None]
+    if items_with_date:
+        latest = max(items_with_date, key=lambda x: x["date"])
+    else:
+        latest = top
     matched_terms = sorted({m for it in all_items for m in it["matched"]})
 
     return {
         "score": round(net, 3),
         "n_articles": len(all_items),
         "top_headline": top["title"],
-        "top_impact": top["score"],
+        "top_date":     top.get("date"),        # NEW — pairs with latest_date
+        "top_impact":   top["score"],
+        "latest_headline": latest["title"],
+        "latest_date":     latest.get("date"),
+        "latest_impact":   float(latest["score"]),
+        "latest_source":   latest.get("source"),
         "matched_terms": matched_terms,
         "sources": {"yfinance": sum(1 for it in all_items if it["source"] == "yfinance"),
                     "google":   sum(1 for it in all_items if it["source"] == "google")},
@@ -471,9 +647,59 @@ def fetch_news_score(ticker_yahoo: str, company_name: str = None,
             {"title": it["title"], "date": it["date"], "source": it["source"],
              "score": it["score"]} for it in all_items
         ],
+        # v3: the actual window applied (useful for the UI to prove no look-ahead)
+        "window_from": earliest.date() if hasattr(earliest, "date") else None,
+        "window_to":   ref_dt.date()   if hasattr(ref_dt, "date")   else None,
+        "as_of_used":  (as_of_date if as_of_date is not None else None),
+        # v3.1: diagnostics — makes "why did I get so few items?" answerable
+        "raw_fetched":        raw_fetched,
+        "raw_oldest":         raw_oldest.date() if raw_oldest else None,
+        "raw_newest":         raw_newest.date() if raw_newest else None,
+        "dropped_look_ahead": dropped_look_ahead,
+        "dropped_too_old":    dropped_too_old,
+        "google_days_used":   google_days,
     }
 
 
 # Streamlit cache wrapper (60 min TTL)
 if st is not None:
     fetch_news_score = st.cache_data(ttl=60 * 60, show_spinner=False)(fetch_news_score)
+
+
+# ======================================================================================
+#  DIAGNOSTIC HELPERS (v3.2 — Aug-2026)
+# ======================================================================================
+def clear_news_cache() -> None:
+    """Wipe the Streamlit in-memory news cache. Call this when the user hits
+    the sidebar 'Force refresh news' button — necessary because stale
+    zero-item results from an earlier module version otherwise persist for
+    60 min per Streamlit session. Also resets the rate-limit tracker."""
+    global _LAST_FETCH_ERRORS
+    _LAST_FETCH_ERRORS = {}
+    _session_block["blocked"]     = False
+    _session_block["zero_streak"] = 0
+    try:
+        fetch_news_score.clear()
+    except Exception:
+        pass
+
+
+def is_rate_limited() -> bool:
+    """True if this session has hit the empty-response streak threshold and
+    is fast-failing subsequent queries. UI can surface this so the user
+    doesn't wonder why later stocks show 0 news."""
+    return bool(_session_block["blocked"])
+
+
+def get_last_fetch_errors() -> dict:
+    """Return the last-run per-source fetch errors (yfinance / google).
+    UI can render this in a debug expander when raw_fetched == 0 to explain
+    what actually failed instead of hand-waving 'probably rate-limited'."""
+    return dict(_LAST_FETCH_ERRORS)
+
+
+def reset_fetch_errors() -> None:
+    """Clear the error log before a new run — otherwise stale errors from
+    a previous run leak into the current diagnostic."""
+    global _LAST_FETCH_ERRORS
+    _LAST_FETCH_ERRORS = {}

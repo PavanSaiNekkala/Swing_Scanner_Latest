@@ -45,6 +45,67 @@ try:
 except Exception:
     yf = None
 
+# Optional news module. Only used when the cutoff is within the live-fetch
+# window (14 days) — free news sources don't archive, so a cutoff of
+# 2020-01-01 legitimately cannot have news. We NEVER fake old news.
+# Defensive two-stage import (Aug-2026): the OLD `news_sentiment` module in
+# a hot-reloaded Streamlit process may not have the newest helper functions
+# yet. Falling all the way back to HAVE_NEWS=False would silently disable
+# the news pass entirely — that's how the user hit "checkbox greyed out
+# despite News-fetch-enabled banner". Fix: import the CORE function first
+# (present in every version), then try the helpers with no-op stubs on
+# ImportError. Now news still runs on hot-reloaded processes.
+try:
+    from news_sentiment import fetch_news_score as _news_score
+    HAVE_NEWS = True
+    try:
+        from news_sentiment import clear_news_cache as _news_clear_cache
+    except ImportError:
+        def _news_clear_cache(): pass          # no-op fallback
+    try:
+        from news_sentiment import get_last_fetch_errors as _news_last_errors
+    except ImportError:
+        def _news_last_errors(): return {}      # no-op fallback
+    try:
+        from news_sentiment import reset_fetch_errors as _news_reset_errors
+    except ImportError:
+        def _news_reset_errors(): pass          # no-op fallback
+    try:
+        from news_sentiment import reset_google_block_flag as _news_reset_block
+    except ImportError:
+        def _news_reset_block(): pass          # v3.4 rate-limit flag reset
+    try:
+        from news_sentiment import is_rate_limited as _news_is_rate_limited
+    except ImportError:
+        def _news_is_rate_limited(): return False
+except Exception:
+    HAVE_NEWS = False
+    def _news_clear_cache(): pass
+    def _news_last_errors(): return {}
+    def _news_reset_errors(): pass
+    def _news_reset_block(): pass
+    def _news_is_rate_limited(): return False
+
+# Fundamentals gate — cache-aware. The cache is weekly (rotates every Saturday)
+# so successive forward-validation runs within the week are instant on this
+# pillar. Fundamentals are honestly not point-in-time (yfinance.info returns
+# TODAY's numbers) — see the sidebar banner below for guidance on when to
+# enable this. Kept enabled by default for recent cutoffs because it still
+# blocks structurally-broken names that are unlikely to have swing edge on
+# any date.
+try:
+    from fundamental_screen import (
+        screen_universe as fs_screen_universe,
+        summarize_results as fs_summarize,
+        rejects_to_dataframe as fs_rejects_df,
+        clear_fundamentals_cache as fs_clear_cache,
+        _weekly_cache_bucket as fs_weekly_bucket,
+        DEFAULT_FUNDA_CONFIG,
+    )
+    HAVE_FUNDA = True
+except Exception:
+    HAVE_FUNDA = False
+
 
 # ======================================================================================
 #  Engine loader — reuses swing_screener_app.py
@@ -59,6 +120,31 @@ engine = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(engine)
 
 from universe_loader import load_full_universe
+
+# Constants mirrored from swing_scanner_app.py so the rank formula matches exactly.
+RS_WINDOW = 63    # ~3 months for relative-strength (same as live scanner)
+
+# ============================================================================
+# STAGE-2 SCORER — shared with the live scanner so historical walk-forward
+# uses the IDENTICAL boost formula that ranks tonight's shortlist. Imported
+# lazily to avoid an import-cycle if swing_scanner_app is being reloaded.
+# ============================================================================
+def _lazy_import_stage2():
+    """Load swing_scanner_app._compute_stage2_score without re-executing its
+    main body. Falls back to a no-op scorer (score=50, no reasons) if the
+    scanner file isn't importable (older layout)."""
+    try:
+        import importlib.util as _iu
+        _ss_path = os.path.join(_here, "swing_scanner_app.py")
+        _spec = _iu.spec_from_file_location("_ss_stage2", _ss_path)
+        _mod  = _iu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        return _mod._compute_stage2_score
+    except Exception:
+        def _noop(df):
+            return 50.0, ["stage2 unavailable (import failed)"], {}
+        return _noop
+_compute_stage2_score = _lazy_import_stage2()
 
 
 # ======================================================================================
@@ -138,7 +224,15 @@ def regime_at_cutoff(bench_df: pd.DataFrame, cutoff: dt.date) -> dict:
 # ======================================================================================
 def scan_as_of(ticker: str, hist_df: pd.DataFrame, strategy: str,
                strat_params: dict, bt_kwargs: dict, cutoff: dt.date,
-               sector_map: dict = None) -> dict:
+               sector_map: dict = None,
+               category_map: dict = None,
+               bench_close_series: pd.Series = None,
+               idx_ret_window_pct: float = 0.0) -> dict:
+    """As-of-cutoff scan. Now returns the full daily-scanner column set:
+    rank_score, rel_strength, extension-penalty audit, exp_per_day_%,
+    stop_%, exp_days_to_target, hist_trades / win_% / total_return_sum_%
+    — so the Tonight's-Investment-Analysis-style renderer can consume its
+    output without recomputing anything downstream."""
     df_in = hist_df.loc[hist_df.index.date <= cutoff].copy()
     if df_in.empty or len(df_in) < 250:
         return {"ticker": _bare(ticker), "status": "insufficient"}
@@ -162,26 +256,122 @@ def scan_as_of(ticker: str, hist_df: pd.DataFrame, strategy: str,
         plan_entry = entry_ref
     stop_price = max(plan_entry - stop_mult * atr_now,
                      plan_entry * (1 - max_stop_pct / 100))
+    stop_pct = round((stop_price / plan_entry - 1) * 100, 2) if plan_entry else 0.0
     target_price = round(plan_entry * (1 + tgt_pct / 100), 2)
-    n_seq = stats.get("seq_trades", 0)
-    winr_seq = stats.get("seq_win_%", 0.0)
-    exp_day_seq = stats.get("seq_exp_per_day_%", 0.0)
+
+    # --- Historical stats (same fields the daily scanner exposes) ---
+    n_seq         = stats.get("seq_trades", 0)
+    winr_seq      = stats.get("seq_win_%", 0.0)
+    exp_seq       = stats.get("seq_expectancy_%", 0.0)
+    exp_day_seq   = stats.get("seq_exp_per_day_%", 0.0)
+    hist_trades   = stats.get("trades", 0)
+    hist_win      = stats.get("profitable_%", 0.0)
+    hist_expect   = stats.get("expectancy_%", 0.0)
+    tot_ret_sum   = stats.get("total_return_sum_%", 0.0)
+    cagr_pct      = stats.get("cagr_%", np.nan)
+    max_dd_pct    = stats.get("max_drawdown_%", np.nan)
+    size_factor   = n_seq / (n_seq + 30.0)
     confidence = round(max(exp_day_seq, 0) * (winr_seq / 100.0)
-                       * (n_seq / (n_seq + 30.0)) * 100, 2) if n_seq else 0.0
+                       * size_factor * 100, 2) if n_seq else 0.0
+
+    # --- Relative strength vs supplied benchmark (matches scan_one formula) ---
+    c_ser = df["Close"]
+    if len(c_ser) > RS_WINDOW:
+        stock_ret_window = (c_ser.iloc[-1] / c_ser.iloc[-(RS_WINDOW + 1)] - 1) * 100
+    else:
+        stock_ret_window = (c_ser.iloc[-1] / c_ser.iloc[0] - 1) * 100
+    rel_strength = round(float(stock_ret_window - idx_ret_window_pct), 2)
+    rs_norm = max(min(rel_strength / 30.0, 0.5), -0.5)
+    rank_score = round(confidence * (1 + rs_norm), 2)
+
+    # --- Extension penalty audit (mirrors scan_one Change #6) ---
+    def _f(colname, default):
+        v = last.get(colname, default)
+        try:
+            return float(v) if pd.notna(v) else default
+        except Exception:
+            return default
+    rsi_now = _f("rsi14", 50.0)
+    pct_20  = _f("pct_vs_sma20", 0.0)
+    dist52  = _f("dist_52wH", -10.0)
+    bb_pctb = _f("bb_pctB", 50.0)
+    signals_today = bool(last["signal"])
+    freshness = 1.0 if signals_today else 0.4
+    ext_pen = 1.0
+    penalty_bits = []
+    if rsi_now > 70:  ext_pen *= 0.80; penalty_bits.append(f"RSI {rsi_now:.0f}")
+    if pct_20  > 8:   ext_pen *= 0.85; penalty_bits.append(f"+{pct_20:.1f}% vs 20DMA")
+    if dist52  > -2:  ext_pen *= 0.85; penalty_bits.append(f"{dist52:+.1f}% from 52wH")
+    if bb_pctb > 90:  ext_pen *= 0.85; penalty_bits.append(f"BB%B {bb_pctb:.0f}")
+    if not signals_today:
+        penalty_bits.append("stale (no signal at cutoff)")
+    rank_score_raw = rank_score
+    rank_score = round(rank_score * freshness * ext_pen, 2)
+    ranking_penalty_reason = " · ".join(penalty_bits) if penalty_bits else ""
+
+    # ---------------------------------------------------------------------
+    # STAGE-2 ALIGNMENT BOOST (mirrors scan_one in swing_scanner_app)
+    # No look-ahead — reads only the last bar of df which is bounded to
+    # data <= cutoff by the earlier df_in slicing. Same ±15% bound and
+    # same 8-check scorer as the live scanner so the forward walk-forward
+    # test evaluates the SAME rank formula the scanner uses tonight.
+    # ---------------------------------------------------------------------
+    stage2_score, stage2_reasons, _stage2_flags = _compute_stage2_score(df)
+    stage2_boost = 1.0 + (stage2_score - 50.0) / 100.0 * 0.30
+    rank_score_pre_stage2 = rank_score
+    rank_score = round(rank_score * stage2_boost, 2)
+    stage2_reason_str = " · ".join(r for r in stage2_reasons if r.startswith("✓"))
+
+    # --- Expected days to target (from winners' median) ---
+    med_days = stats.get("med_days_to_target", np.nan)
+    n_win    = stats.get("n_winners", 0)
+    if np.isnan(med_days):
+        exp_days_to_target = "n/a"
+    elif n_win < 5:
+        exp_days_to_target = f"{med_days:.0f}d ⚠ thin"
+    else:
+        exp_days_to_target = f"{med_days:.0f}d"
+
     return {
         "ticker": _bare(ticker), "status": "ok",
-        "signals_today": bool(last["signal"]),
-        "sector": (sector_map or {}).get(_bare(ticker), "UNKNOWN"),
-        "cutoff_close": entry_ref, "plan_entry": round(plan_entry, 2),
+        "signals_today": signals_today,
+        "sector":   (sector_map   or {}).get(_bare(ticker), "UNKNOWN"),
+        "category": (category_map or {}).get(_bare(ticker), "Unknown"),
+        "cutoff_close": entry_ref, "signal_close": entry_ref,
+        "plan_entry": round(plan_entry, 2), "entry_ref": round(entry_ref, 2),
         "limit_price": (round(limit_price, 2) if np.isfinite(limit_price) else None),
-        "target_price": target_price, "stop_price": round(stop_price, 2),
-        "target_%": tgt_pct, "atr_pct": round(float(last["atr_pct"]), 2)
-                                          if np.isfinite(last["atr_pct"]) else np.nan,
-        "hist_trades_seq": n_seq, "hist_winrate_seq": winr_seq,
-        "hist_expectancy_seq": stats.get("seq_expectancy_%", 0),
-        "confidence": confidence,
-        "regime_today": (last.get("trade_type", "") or "UPTREND")
-                        if bool(last["signal"]) else "",
+        "target_price": target_price,
+        "stop_price": round(stop_price, 2), "stop_%": stop_pct,
+        "target_%": tgt_pct,
+        "atr_pct":    round(float(last["atr_pct"]), 2) if np.isfinite(last["atr_pct"]) else np.nan,
+        "last_atr_pct": round(float(last["atr_pct"]), 2) if np.isfinite(last["atr_pct"]) else np.nan,
+        # Full backtest track-record set (matches daily scanner)
+        "hist_trades":         hist_trades,
+        "win_%":               hist_win,
+        "expectancy_%":        hist_expect,
+        "exp_per_day_%":       exp_day_seq,
+        "hist_trades_seq":     n_seq,
+        "hist_winrate_seq":    winr_seq,
+        "hist_expectancy_seq": exp_seq,
+        "seq_trades":          n_seq,
+        "seq_win_%":           winr_seq,
+        "seq_expectancy_%":    exp_seq,
+        "seq_exp_per_day_%":   exp_day_seq,
+        "total_return_sum_%":  tot_ret_sum,
+        "cagr_%":              cagr_pct,
+        "max_drawdown_%":      max_dd_pct,
+        "confidence":          confidence,
+        "rank_score":          rank_score,
+        "rank_score_raw":      rank_score_raw,
+        "ranking_penalty_reason": ranking_penalty_reason,
+        # ---- Stage-2 alignment audit (Aug-2026) ----
+        "stage2_score":         stage2_score,             # 0..100
+        "stage2_boost":         round(stage2_boost, 3),   # 0.85..1.15
+        "stage2_reason":        stage2_reason_str[:200],  # ✓ passing checks
+        "rank_score_pre_stage2": rank_score_pre_stage2,   # for A/B audit
+        "rel_strength":        rel_strength,
+        "exp_days_to_target":  exp_days_to_target,
+        "regime_today": (last.get("trade_type", "") or "UPTREND") if signals_today else "",
     }
 
 
@@ -299,43 +489,223 @@ def cluster_analysis(cmp_df: pd.DataFrame) -> dict:
 #  UI
 # ======================================================================================
 def main():
+    """Standalone entry-point — sets page config, then renders body().
+    trading_suite.py imports body() directly to avoid a duplicate config call."""
     st.set_page_config(page_title="Forward Validation v2", layout="wide")
+    body()
+
+
+def body():
+    """All render logic, no set_page_config (safe to call inside a larger app
+    like trading_suite.py where the top-level page config has already been set)."""
     st.title("🔮 Forward Validation v2 — with regime gate & failure clustering")
     st.caption("Walk-forward test with regime overlay, sector cap, signal decay, and "
                "clustering analysis to diagnose why stops cluster together.")
 
     with st.sidebar:
-        st.header("1 · Cutoff & window")
+        st.header("1 · Backtest window & cutoff")
         today = dt.date.today()
-        cutoff = st.date_input("Cutoff (= scan 'today')",
-                               value=today - dt.timedelta(days=90),
-                               min_value=dt.date(2010, 1, 1),
-                               max_value=today - dt.timedelta(days=1))
-        bt_years = st.slider("Backtest history (years before cutoff)", 2, 15, 10)
-        fwd_days = st.slider("Forward observation window (calendar days)", 15, 180, 60,
-                             help=">= max_hold + fill_days + buffer")
 
-        days_old = (today - cutoff).days
-        if days_old > 30:
-            st.info(f"ℹ️ News/event DISABLED (cutoff {days_old}d ago, "
-                    f"free news doesn't archive that far).")
-        if days_old > 5:
-            st.info(f"ℹ️ Fundamentals DISABLED (yfinance .info is today's data, "
-                    f"not point-in-time).")
+        # =================================================================
+        # DATE-RANGE BACKTEST WINDOW  (Aug-2026 — user request)
+        # -----------------------------------------------------------------
+        # Two dates instead of one:
+        #   bt_start = start of price history used for indicator + backtest
+        #   cutoff   = end of backtest & start of forward test = "scan as-of"
+        # Forward window = cutoff → today (auto), so we always see the full
+        # realized forward path that's actually available in Yahoo's data.
+        # =================================================================
+        bt_start = st.date_input(
+            "Backtest history START",
+            value=dt.date(2020, 1, 1),
+            min_value=dt.date(2010, 1, 1),
+            max_value=today - dt.timedelta(days=280),
+            help="First bar the engine sees. Engine needs ≥250 trading "
+                 "sessions before the cutoff to compute the 200-DMA — pick "
+                 "at least 14 months before the cutoff. Earlier = more "
+                 "historical trades in the per-stock backtest evidence."
+        )
+        cutoff = st.date_input(
+            "Scan 'as of' date  (= end of backtest, start of forward test)",
+            value=today - dt.timedelta(days=7),
+            min_value=bt_start + dt.timedelta(days=280),
+            max_value=today - dt.timedelta(days=1),
+            help="The scanner runs as if it were this day. Everything after "
+                 "this date is forward-testing territory. Recommended: pick "
+                 "a cutoff 7-30 days ago so you can see how the predictions "
+                 "actually played out."
+        )
+        _bt_years = (cutoff - bt_start).days / 365.25
+        _days_since_cutoff = (today - cutoff).days
+        st.caption(
+            f"📊 Backtest history: **{_bt_years:.1f} years** "
+            f"({bt_start} → {cutoff}) · "
+            f"🔮 Forward window: **{_days_since_cutoff} days** ({cutoff} → {today})"
+        )
+        fwd_days = st.slider(
+            "Forward observation window (calendar days after cutoff)",
+            min_value=15,
+            max_value=max(180, _days_since_cutoff + 30),
+            value=max(15, min(180, _days_since_cutoff)),
+            help="How many days after the cutoff to track each trade for "
+                 "exit. Default = calendar days from cutoff to today, so "
+                 "we see the full realized forward path."
+        )
+
+        # ---- Feasibility banners (news + fundamentals point-in-time) ----
+        days_old = _days_since_cutoff       # backward-compat with older refs below
+        if _days_since_cutoff <= 7:
+            st.success(f"✅ News fetch **enabled** — cutoff is {_days_since_cutoff}d "
+                       f"ago, well inside the 7-day live-fetch window.")
+            news_available_for_cutoff = True
+        elif _days_since_cutoff <= 14:
+            st.info(f"ℹ️ News fetch **partial** — cutoff is {_days_since_cutoff}d "
+                    f"ago; only headlines newer than {14 - _days_since_cutoff} "
+                    f"days ago (relative to cutoff) will show up.")
+            news_available_for_cutoff = True
+        else:
+            st.warning(f"⚠️ News fetch **skipped** — cutoff is {_days_since_cutoff}d "
+                       f"ago; free news sources don't archive that far. "
+                       f"Historical news gate honestly disabled.")
+            news_available_for_cutoff = False
+
+        if _days_since_cutoff > 5:
+            st.caption(f"ℹ️ Fundamentals gate stays disabled (yfinance.info is "
+                       f"today's data, not point-in-time as-of {cutoff}).")
+
+        use_news = st.checkbox(
+            "📰 Apply news pass on cutoff-day candidates",
+            value=(news_available_for_cutoff and HAVE_NEWS),
+            disabled=not (news_available_for_cutoff and HAVE_NEWS),
+            help=("Fetches recent headlines for EVERY fundamentally-passing stock "
+                  "(not just signalling ones) and tilts rank_score ±20% on the "
+                  "signalling subset — same formula as the live scanner. "
+                  "Non-signalling stocks with material news land in the "
+                  "'News-driven WATCHLIST' expander at the bottom. Only "
+                  "meaningful when the cutoff is recent — see banner above."))
+        news_lookback = st.slider(
+            "News lookback (days back from cutoff)",
+            min_value=3, max_value=14,
+            value=7,
+            disabled=not (news_available_for_cutoff and HAVE_NEWS and use_news),
+            help="How many days of headlines to fetch per stock, measured "
+                 "BACKWARDS from the cutoff date. E.g. cutoff=2026-08-08 "
+                 "with lookback=7 → window is 2026-08-01 → 2026-08-08. "
+                 "Google-News practical ceiling is ~14 days beyond which "
+                 "coverage becomes patchy."
+        )
+        # v3.2 (Aug-2026): explicit cache-clear button. Necessary because
+        # Streamlit's @st.cache_data holds the news results for 60 min per
+        # session — if a previous run cached 0-item results (e.g. before a
+        # bug fix), re-running would just replay those zeros. This button
+        # wipes the cache so the next run does a fresh fetch.
+        if HAVE_NEWS:
+            if st.button(
+                "🔄 Force refresh news cache",
+                disabled=not use_news,
+                help="Clears the 60-min Streamlit news cache so the next "
+                     "run re-fetches from Google News + yfinance. Use if "
+                     "you upgraded the code / changed the cutoff and are "
+                     "seeing stale zero-item cached results."):
+                _news_clear_cache()
+                st.success("✅ News cache cleared. Next run will re-fetch.")
+
+        # ==============================================================
+        # 1b · Fundamentals gate (cache-aware, weekly refresh)
+        # --------------------------------------------------------------
+        # Runs BEFORE the technical scan so we save the yfinance fetch
+        # cost on stocks that are structurally broken. Cache rotates
+        # every Saturday — 7-day TTL. Same code path as the live scanner.
+        # HONEST CAVEAT: yfinance.info returns TODAY's numbers, not
+        # point-in-time-as-of-cutoff. For very-old cutoffs the gate can
+        # reject a stock that was fine on cutoff but is broken today.
+        # ==============================================================
+        st.header("1b · Fundamentals gate")
+        if not HAVE_FUNDA:
+            st.caption("⚠️ `fundamental_screen` module unavailable — "
+                       "fundamentals gate disabled.")
+            apply_funda_gate = False
+            momentum_preset = False
+        else:
+            _fbucket = fs_weekly_bucket()
+            st.caption(f"📅 Weekly cache key: **{_fbucket}** "
+                       f"(auto-refresh next Saturday)")
+            apply_funda_gate = st.checkbox(
+                "Apply fundamental gate before technical scan",
+                value=(_days_since_cutoff <= 30),
+                help="ON: filter out structurally broken names (low ROE, "
+                     "high D/E, promoter pledge, etc.) before running the "
+                     "technical scan. Cache-aware — instant re-run within "
+                     "the same week. Recommend ON for cutoffs within "
+                     "~30 days of today; toggle off for very old cutoffs "
+                     "where 'broken today' ≠ 'broken then'.")
+            momentum_preset = st.checkbox(
+                "🚀 Momentum-friendly preset  (recommended)",
+                value=True,
+                disabled=not apply_funda_gate,
+                help="Same preset as the live scanner: Quality (loose) + "
+                     "Governance only. Skips Valuation / Trend / Growth "
+                     "pillars because momentum swings can carry rich P/E "
+                     "and recovery stocks show negative growth.")
+            if st.button("🔄 Force refresh fundamentals now",
+                         disabled=not apply_funda_gate,
+                         help="Clears the fundamentals cache so the next "
+                              "run re-fetches from yfinance + Screener.in. "
+                              "Use after quarterly results season."):
+                fs_clear_cache()
+                st.success("✅ Fundamentals cache cleared. "
+                           "Next run will re-fetch fresh data.")
 
         st.header("2 · Universe")
         buckets_meta = load_full_universe()
         buckets = buckets_meta["buckets"]
         sector_map = buckets_meta.get("sector_map", {})
         default_bucket = "Nifty500" if "Nifty500" in buckets else list(buckets.keys())[0]
-        bucket_choice = st.selectbox("Universe bucket",
-                                      list(buckets.keys()),
-                                      index=list(buckets.keys()).index(default_bucket))
-        universe = buckets.get(bucket_choice, [])
-        st.caption(f"{len(universe)} stocks in {bucket_choice}")
-        max_n = st.slider("Limit stocks this run", 20, len(universe),
-                          min(len(universe), 200 if bucket_choice == "Nifty500"
-                              else min(50, len(universe))))
+        # Aug-2026 (user request): add "Enter manually" so specific stocks
+        # can be forward-validated without picking a full bucket. Mirrors the
+        # Daily Scanner's segment picker exactly — same option name, same
+        # comma/space parsing so muscle memory carries over.
+        bucket_options = list(buckets.keys()) + ["Enter manually"]
+        bucket_choice = st.selectbox(
+            "Universe bucket",
+            bucket_options,
+            index=bucket_options.index(default_bucket),
+            help="Pick one of the standard NSE buckets, or choose **Enter manually** "
+                 "to test a curated list of tickers (e.g. your current positions or "
+                 "a small watchlist)."
+        )
+        if bucket_choice == "Enter manually":
+            manual_tickers_txt = st.text_area(
+                "Tickers (comma or space separated)",
+                "HAL, BEL, HUDCO, IRFC, RVNL",
+                height=100,
+                help="Bare NSE symbols (no .NS suffix needed). "
+                     "Example: `HAL, ADANIENT, POLYCAB` or one per line. "
+                     "Case-insensitive. Anything not resolvable on Yahoo will "
+                     "be flagged as 'no data' in the scan output."
+            )
+            universe = [t.strip().upper() for t in
+                        manual_tickers_txt.replace(",", " ").split()
+                        if t.strip()]
+            if universe:
+                st.caption(f"✏️ **Manual list:** {len(universe)} tickers — "
+                           f"{', '.join(universe[:8])}"
+                           + (" …" if len(universe) > 8 else ""))
+            else:
+                st.warning("⚠️ Manual list is empty — add at least one ticker.")
+        else:
+            universe = buckets.get(bucket_choice, [])
+            st.caption(f"{len(universe)} stocks in {bucket_choice}")
+        # Slider guards: max=1 breaks the widget, so ensure at least 1
+        _uni_n = max(1, len(universe))
+        _slider_min = 1 if bucket_choice == "Enter manually" else min(20, _uni_n)
+        max_n = st.slider(
+            "Limit stocks this run",
+            _slider_min, _uni_n,
+            min(_uni_n, 200 if bucket_choice == "Nifty500"
+                else _uni_n if bucket_choice == "Enter manually"
+                else min(50, _uni_n))
+        )
 
         st.header("3 · Regime overlay  🆕")
         use_regime = st.checkbox("Apply market-regime gate historically",
@@ -393,11 +763,32 @@ def main():
         exit_mode = "Trailing" if exit_mode.startswith("Trailing") else "Fixed target"
         trail_mult = st.slider("Trailing distance (x ATR)", 0.5, 5.0, 2.0, 0.5,
                                 disabled=(exit_mode != "Trailing"))
-        lock_pct = st.slider("Lock profit once target reached (%)", 0.0, 30.0, 10.0, 0.5,
-                              disabled=(exit_mode != "Trailing"),
-                              help="After +15% is touched, stop never falls below +10% "
-                                   "(guarantees at least 10% profit while letting trade "
-                                   "run to 20-30%).")
+        # v3 (Aug-2026): mirror Daily Scanner's lock_on checkbox exactly.
+        # Previously the Forward Validator ALWAYS passed a lock_pct value,
+        # while the Daily Scanner allows lock_pct=None (unchecked). Result:
+        # trades that ran uncapped in Daily Scanner (e.g. HUDCO 2023-12-07
+        # → +63.22% gross) got prematurely capped at +10% in Forward
+        # Validator. This checkbox restores parity — see hudco_hunt.py for
+        # the empirical confirmation.
+        lock_on = st.checkbox(
+            "Lock in profit once objective reached",
+            value=True,
+            disabled=(exit_mode != "Trailing"),
+            help="ON (default): once price touches the +15% target, the stop "
+                 "never falls below the lock level (e.g. +10%). Guarantees a "
+                 "profitable exit at cost of capping upside during volatile "
+                 "pullbacks.\n\n"
+                 "OFF: pure trailing — after target, the stop still trails "
+                 "peak by trail_mult × ATR with no floor. This is what "
+                 "catches runners (HUDCO Dec-2023 → March-2024 rally: OFF "
+                 "gives +63% gross · ON gives +10% gross). Match this to "
+                 "your Daily Scanner setting for parity between the two apps."
+        )
+        lock_pct = st.slider(
+            "Lock profit at (%)", 0.0, 30.0, 10.0, 0.5,
+            disabled=(exit_mode != "Trailing" or not lock_on),
+            help="Floor under a winner after it hits the objective."
+        ) if lock_on else None
         stop_anchor = st.radio("Stop anchoring",
                                ["Structure (swing low)", "ATR distance"], index=0)
         stop_anchor = "Structure" if stop_anchor.startswith("Structure") else "ATR"
@@ -440,9 +831,75 @@ def main():
                      route_min_dist_pct=15.0, route_vol_lb=63, route_vol_baseline_lb=252,
                      route_fixed_target_pct=15.0, min_hold=1)
 
-    ohlc_start = cutoff - dt.timedelta(days=int(bt_years * 365.25) + 300)
+    # NEW (Aug-2026): use the user-picked bt_start directly.
+    # 300-day buffer before bt_start is added purely to make sure the very
+    # first bars have enough history for 200-DMA / 252-day-high indicators.
+    ohlc_start = bt_start - dt.timedelta(days=300)
     ohlc_end = cutoff + dt.timedelta(days=fwd_days + 1)
     subset = universe[:max_n]
+
+    # ================== FUNDAMENTAL NO-TRADE GATE ==================
+    # Runs BEFORE the price fetch loop so we save the yfinance download cost
+    # on structurally broken names. Cache-aware — same weekly cache as the
+    # live scanner. Rejected stocks are stashed in funda_rejects_df for the
+    # audit expander at the bottom of the render.
+    funda_results, funda_rejects_df = {}, pd.DataFrame()
+    pre_gate_count = len(subset)
+    if apply_funda_gate and HAVE_FUNDA:
+        if momentum_preset:
+            funda_cfg = {
+                **DEFAULT_FUNDA_CONFIG,
+                "valuation_enabled":  False,
+                "quality_enabled":    True,
+                "growth_enabled":     False,
+                "governance_enabled": True,
+                "ownership_enabled":  False,
+                "trend_enabled":      False,
+                "strict_mode":        False,
+                # Loosened Quality thresholds — same as live scanner preset
+                "roe_min_%":            0.0,
+                "roce_min_%":           0.0,
+                "debt_to_equity_max":   5.0,
+                "interest_cover_min":   1.0,
+                "current_ratio_min":    0.4,
+                "promoter_pledge_max_%":  40.0,
+                "promoter_holding_min_%": 15.0,
+                "flag_auditor_qualified": True,
+                "flag_rpt_concern":       True,
+            }
+            st.caption("🚀 **Momentum preset active** — quality (loose) + "
+                       "governance only.")
+        else:
+            funda_cfg = DEFAULT_FUNDA_CONFIG.copy()
+
+        st.info("🧾 Running fundamentals no-trade screen "
+                "(weekly cached — reruns until next Saturday are instant)...")
+        subset_yahoo = [_to_yahoo(s) for s in subset]
+        f_prog = st.progress(0.0); f_stat = st.empty()
+
+        def _fund_cb(k, n, sym):
+            f_stat.write(f"Fund-check {sym.replace('.NS','')}  ({k+1}/{n})")
+            f_prog.progress((k + 1) / n)
+
+        funda_results, _sec_medians = fs_screen_universe(
+            subset_yahoo, sector_map, funda_cfg, _fund_cb
+        )
+        f_stat.empty(); f_prog.empty()
+
+        passing_bare = {t for t, r in funda_results.items()
+                        if r["status"] in ("pass", "pass_no_data")}
+        subset = [s for s in subset
+                  if s.upper().replace(".NS", "").replace(".BO", "") in passing_bare]
+        summ = fs_summarize(funda_results)
+        st.success(
+            f"✅ Fundamentals gate: **{summ['pass']} passed**, "
+            f"**{summ['reject']} rejected**, "
+            f"{summ['no_data']} no-data (passed), "
+            f"{summ['warn_only']} passed with warnings. "
+            f"Technical scan now runs on {len(subset)} names "
+            f"(from {pre_gate_count})."
+        )
+        funda_rejects_df = fs_rejects_df(funda_results)
 
     # --- Regime check UP FRONT (fetches once) ---
     st.write(f"### Cutoff: **{cutoff.isoformat()}**  |  Universe: **{bucket_choice}**  |  Scanning: **{len(subset)}** stocks")
@@ -477,6 +934,27 @@ def main():
         regime_info["block_all"] = block_all
     else:
         regime_info = {"status": "UNKNOWN", "block_all": False}
+        bench_df = pd.DataFrame()
+
+    # --- BENCH return over the RS window, taken AT-CUTOFF (no look-ahead) ---
+    # Feeds rel_strength inside scan_as_of; matches the live scanner's formula.
+    idx_ret_window_pct = 0.0
+    bench_close_at_cutoff = pd.Series(dtype=float)
+    if not bench_df.empty:
+        _bc = bench_df.loc[bench_df.index.date <= cutoff, "Close"].dropna()
+        if len(_bc) > RS_WINDOW:
+            idx_ret_window_pct = float((_bc.iloc[-1] / _bc.iloc[-(RS_WINDOW + 1)] - 1) * 100)
+            bench_close_at_cutoff = _bc
+
+    # --- Category map (LargeCap / MidCap / SmallCap per SEBI) for the shortlist ---
+    largecap = set(buckets.get("LargeCap", []))
+    midcap   = set(buckets.get("MidCap", []))
+    allnse   = set(buckets.get("AllNSE", []))
+    category_map = {}
+    for t in allnse:
+        if t in largecap:   category_map[t] = "LargeCap"
+        elif t in midcap:   category_map[t] = "MidCap"
+        else:               category_map[t] = "SmallCap"
 
     # --- Scan each stock ---
     prog = st.progress(0.0); stat = st.empty()
@@ -489,7 +967,10 @@ def main():
         if full.empty:
             rows.append({"ticker": sym, "status": "no data"})
             prog.progress((k+1)/len(subset)); continue
-        plan = scan_as_of(yahoo, full, strategy, p, bt_kwargs, cutoff, sector_map)
+        plan = scan_as_of(yahoo, full, strategy, p, bt_kwargs, cutoff, sector_map,
+                          category_map=category_map,
+                          bench_close_series=bench_close_at_cutoff,
+                          idx_ret_window_pct=idx_ret_window_pct)
         # REGIME HARD-BLOCK (covers both RISK-OFF and NEUTRAL-decelerating)
         if use_regime and regime_info.get("block_all") and plan.get("signals_today"):
             plan["signals_today"] = False
@@ -514,6 +995,172 @@ def main():
     if skipped_regime:
         st.warning(f"🚫 Regime gate blocked {skipped_regime} would-be signals.")
 
+    # ================== NEWS PASS (only when cutoff is recent) ==================
+    # v3 (Aug-2026): now covers EVERY fundamentally-passing stock, not just
+    # signalling ones. This mirrors the live scanner's behaviour and enables
+    # the "News-driven WATCHLIST" section — stocks with material news that
+    # DIDN'T fire a technical signal (early catalysts, pre-signal moves).
+    #
+    # Only signalling stocks get the ±20% rank_score tilt; non-signalling
+    # stocks store the news fields for display but don't have a rank to tilt.
+    #
+    # Only meaningful when cutoff is within ~14 days (free news doesn't
+    # archive). `use_news` is auto-disabled by the sidebar for older cutoffs,
+    # so this branch is a no-op for anything older than the news window.
+    # ⚠️ CRITICAL: pass `as_of_date=cutoff` so news_sentiment applies
+    # NO-LOOK-AHEAD filtering. Without this, headlines dated AFTER the
+    # cutoff (which is contamination for a forward test) leak into the
+    # score and the "latest headline" slot. See news_sentiment v3 for
+    # the filter mechanics — items with pub_date > cutoff are excluded,
+    # and Google's when: query is widened so items before the cutoff are
+    # actually returned in the first place.
+    if use_news and HAVE_NEWS:
+        news_rows = [r for r in rows if r.get("status") == "ok"]
+        if news_rows:
+            # v3.2: reset the per-run error log so we only capture THIS run's
+            # failures, not leftovers from a previous run.
+            try: _news_reset_errors()
+            except Exception: pass
+            n_prog = st.progress(0.0); n_stat = st.empty()
+            for k, r in enumerate(news_rows):
+                tk_bare = r["ticker"]
+                n_stat.write(f"News check: {tk_bare} ({k+1}/{len(news_rows)})  "
+                             f"[window: {news_lookback}d ending {cutoff.isoformat()}]")
+                try:
+                    n = _news_score(_to_yahoo(tk_bare),
+                                    lookback_days=int(news_lookback),
+                                    as_of_date=cutoff)         # ← NO LOOK-AHEAD
+                except Exception:
+                    n = {"score": 0.0, "n_articles": 0,
+                         "top_headline": None, "top_date": None,
+                         "latest_headline": None, "latest_date": None,
+                         "top_impact": 0.0, "latest_impact": 0.0,
+                         "matched_terms": [],
+                         "window_from": None, "window_to": None}
+                r["news_score"]         = float(n.get("score", 0.0))
+                r["news_n"]             = int(n.get("n_articles", 0))
+                r["news_top"]           = n.get("top_headline")
+                r["news_top_date"]      = n.get("top_date")
+                r["news_top_score"]     = float(n.get("top_impact", 0.0))
+                r["news_latest"]        = n.get("latest_headline")
+                r["news_latest_date"]   = n.get("latest_date")
+                r["news_latest_score"]  = float(n.get("latest_impact", 0.0))
+                r["news_matched"]       = ",".join(n.get("matched_terms", [])[:5])
+                r["news_lookback_days"] = int(news_lookback)
+                r["news_window_from"]   = n.get("window_from")
+                r["news_window_to"]     = n.get("window_to")
+                # v3.1 diagnostics — surface WHY count is low/zero
+                r["news_raw_fetched"]    = int(n.get("raw_fetched", 0))
+                r["news_raw_oldest"]     = n.get("raw_oldest")
+                r["news_raw_newest"]     = n.get("raw_newest")
+                r["news_dropped_ahead"]  = int(n.get("dropped_look_ahead", 0))
+                r["news_dropped_old"]    = int(n.get("dropped_too_old", 0))
+                # Rank tilt only applies to signalling stocks (only they have
+                # a meaningful rank_score to modify).
+                if r.get("signals_today"):
+                    tilt = max(min(r["news_score"], 1.0), -1.0) * 0.20
+                    r["rank_score"] = round(r["rank_score"] * (1.0 + tilt), 2)
+                n_prog.progress((k + 1) / len(news_rows))
+            n_stat.empty(); n_prog.empty()
+
+    # Defaults so downstream selectors don't KeyError on stocks with no news
+    for r in rows:
+        r.setdefault("news_score", 0.0)
+        r.setdefault("news_n", 0)
+        r.setdefault("news_top", None)
+        r.setdefault("news_top_date", None)
+        r.setdefault("news_top_score", 0.0)
+        r.setdefault("news_latest", None)
+        r.setdefault("news_latest_date", None)
+        r.setdefault("news_latest_score", 0.0)
+        r.setdefault("news_matched", "")
+        r.setdefault("news_lookback_days", 0)
+        r.setdefault("news_window_from", None)
+        r.setdefault("news_window_to", None)
+        r.setdefault("news_raw_fetched", 0)
+        r.setdefault("news_raw_oldest", None)
+        r.setdefault("news_raw_newest", None)
+        r.setdefault("news_dropped_ahead", 0)
+        r.setdefault("news_dropped_old", 0)
+        r.setdefault("category", "Unknown")
+
+    # ============ NEWS DIAGNOSTIC SUMMARY (Aug-2026) ============
+    # Surface aggregate stats immediately after the news pass so the user
+    # can see if the fetch worked but everything got filtered out (raw > 0,
+    # kept = 0) vs Google actually returning nothing (raw = 0 → likely
+    # rate-limit / block, not a filter problem).
+    if use_news and HAVE_NEWS:
+        ok_rows_for_diag = [r for r in rows if r.get("status") == "ok"]
+        if ok_rows_for_diag:
+            tot_raw = sum(r.get("news_raw_fetched", 0) for r in ok_rows_for_diag)
+            tot_kept = sum(r.get("news_n", 0) for r in ok_rows_for_diag)
+            tot_ahead = sum(r.get("news_dropped_ahead", 0) for r in ok_rows_for_diag)
+            tot_old   = sum(r.get("news_dropped_old", 0) for r in ok_rows_for_diag)
+            n_stocks_any = sum(1 for r in ok_rows_for_diag if r.get("news_raw_fetched", 0) > 0)
+            n_stocks_kept = sum(1 for r in ok_rows_for_diag if r.get("news_n", 0) > 0)
+            oldest = min((r.get("news_raw_oldest") for r in ok_rows_for_diag
+                          if r.get("news_raw_oldest")), default=None)
+            newest = max((r.get("news_raw_newest") for r in ok_rows_for_diag
+                          if r.get("news_raw_newest")), default=None)
+            if tot_raw == 0:
+                st.error(f"❌ News fetch returned **0 raw items across all "
+                         f"{len(ok_rows_for_diag)} stocks**. See error "
+                         f"details below to diagnose. Common causes:\n"
+                         f"1. **Stale Streamlit cache** — click "
+                         f"**'🔄 Force refresh news cache'** in the sidebar, "
+                         f"then rerun. Fresh fixes don't take effect until "
+                         f"the cache is cleared.\n"
+                         f"2. **Google News rate-limit / block** — wait "
+                         f"5-10 min and rerun.\n"
+                         f"3. **Network blocked** (corporate firewall, VPN) — "
+                         f"news.google.com and query.finance.yahoo.com need "
+                         f"to be reachable.")
+                # v3.2: expose the actual per-source errors so the user can
+                # see WHICH failure happened. Otherwise this diagnostic is
+                # just guessing.
+                try:
+                    errs = _news_last_errors()
+                except Exception:
+                    errs = {}
+                if errs:
+                    with st.expander(f"🔧 Fetch error log ({len(errs)} entries)  "
+                                     "— what actually failed"):
+                        _err_rows = [{"source_or_key": k,
+                                      "source": v[0], "error": v[1]}
+                                     for k, v in list(errs.items())[:30]]
+                        st.dataframe(pd.DataFrame(_err_rows),
+                                     use_container_width=True, hide_index=True)
+                        st.caption("Rows prefixed with `__google:` are per-query "
+                                   "Google News failures (one per query attempted). "
+                                   "Other rows are yfinance per-ticker failures. "
+                                   "If you see **URLError / HTTP 429 / timeout**, "
+                                   "it's rate-limiting — wait and rerun. If you see "
+                                   "**Name or service not known / getaddrinfo failed**, "
+                                   "your network is blocking those hosts.")
+                else:
+                    st.caption("(No per-source errors captured — this suggests the "
+                               "fetch didn't even run, i.e. results were served from "
+                               "cache. Click 🔄 Force refresh news cache and rerun.)")
+            elif tot_kept == 0:
+                st.warning(f"⚠️ News fetch worked ({tot_raw} raw items across "
+                           f"{n_stocks_any} stocks, dates {oldest} → {newest}) "
+                           f"but **all {tot_ahead} items post-dated the cutoff "
+                           f"{cutoff.isoformat()}** and were correctly dropped "
+                           f"(no-look-ahead). Google News RSS is recency-"
+                           f"biased and doesn't return old items for small "
+                           f"caps. Try: (a) increase News Lookback to 14 in "
+                           f"the sidebar, (b) pick a more recent cutoff, "
+                           f"or (c) accept that pre-cutoff news isn't "
+                           f"available for this universe on this date.")
+            else:
+                st.success(f"📰 News pass: **{tot_kept} kept articles across "
+                           f"{n_stocks_kept}/{len(ok_rows_for_diag)} stocks** "
+                           f"(window {cutoff - dt.timedelta(days=news_lookback)} "
+                           f"→ {cutoff}). Fetched {tot_raw} raw items across "
+                           f"{n_stocks_any} stocks; dropped {tot_ahead} for "
+                           f"look-ahead (dated after cutoff) and {tot_old} "
+                           f"for age (dated before window).")
+
     all_df = pd.DataFrame(rows)
     ok_df = all_df[all_df.get("status") == "ok"].copy() if "status" in all_df.columns else all_df.copy()
     signalled = ok_df[ok_df.get("signals_today", False)].copy() if "signals_today" in ok_df.columns else pd.DataFrame()
@@ -527,10 +1174,17 @@ def main():
                        f"{pre_cap_n - len(signalled)} correlated names.")
 
     # --- Signal decay ---
+    # Sort by rank_score (news-tilted) instead of raw confidence — so hot-news
+    # winners aren't dropped in favour of quiet-history stocks.
     if use_decay and len(signalled) > max_signals_per_day:
-        signalled = signalled.sort_values("confidence", ascending=False).head(max_signals_per_day)
-        st.caption(f"⚡ Signal decay: kept top {max_signals_per_day} by confidence "
+        signalled = signalled.sort_values("rank_score", ascending=False).head(max_signals_per_day)
+        st.caption(f"⚡ Signal decay: kept top {max_signals_per_day} by rank_score "
                    f"(from {pre_cap_n}). Prevents co-signal over-concentration.")
+
+    # Sort the final shortlist by rank_score so the daily-scanner-style table
+    # matches Tonight's Investment Analysis ordering.
+    if not signalled.empty:
+        signalled = signalled.sort_values("rank_score", ascending=False).reset_index(drop=True)
 
     if signalled.empty:
         st.info(f"No stocks made it through all filters on {cutoff.isoformat()}. "
@@ -540,13 +1194,93 @@ def main():
     st.success(f"**{len(signalled)} stocks passed all filters** on {cutoff.isoformat()} "
                f"(from {len(ok_df)} scanned OK).")
 
-    # =============== TABLE: shortlist ===============
-    st.subheader(f"🎯 Shortlist as-of {cutoff.isoformat()}")
-    sl_view = signalled[["ticker", "sector", "confidence", "hist_winrate_seq",
-                          "cutoff_close", "plan_entry", "target_price", "stop_price"]].copy()
-    sl_view.columns = ["Stock", "Sector", "Conf", "Hist Win%",
-                        "Close", "BUY @", "Target", "Stop"]
-    st.dataframe(sl_view, use_container_width=True, hide_index=True)
+    # ========================================================================
+    # TABLE 1: "AS OF CUTOFF" — matches Tonight's Investment Analysis layout
+    # ------------------------------------------------------------------------
+    # Every column the daily scanner shows for TODAY's signals, shown here for
+    # what fired on the cutoff date. Same order, same names, same formulas.
+    # ========================================================================
+    st.subheader(f"🎯 Tonight's Investment Analysis  —  as of {cutoff.isoformat()}")
+    st.caption("Same column layout as the live Daily Scanner — this is exactly what "
+               "the scanner WOULD have shown on the cutoff date, using only data "
+               "available on or before that day.")
+
+    has_news_col = ("news_score" in signalled.columns) and \
+                   (signalled["news_score"].abs().sum() > 0
+                    or signalled.get("news_n", pd.Series([0]*len(signalled))).sum() > 0)
+    has_penalty = ("ranking_penalty_reason" in signalled.columns) and \
+                  signalled["ranking_penalty_reason"].astype(str).str.len().gt(0).any()
+
+    base_cols = ["ticker", "category", "sector", "regime_today", "rank_score",
+                 "stage2_score", "confidence", "rel_strength"]
+    if has_news_col:  base_cols += ["news_score"]
+    if has_penalty:   base_cols += ["ranking_penalty_reason"]
+    base_cols += ["entry_ref", "plan_entry", "target_price", "stop_price", "stop_%",
+                  "exp_days_to_target", "last_atr_pct", "stage2_reason"]
+
+    inv = signalled[[c for c in base_cols if c in signalled.columns]].copy()
+    _entry_label = "BUY limit ₹" if entry_mode == "Limit" else "Entry (open)"
+    rename_map = {
+        "ticker": "Stock", "category": "Cap", "sector": "Sector",
+        "regime_today": "Signal", "rank_score": "Rank",
+        "stage2_score": "Stage-2",
+        "confidence": "Conf(/day)", "rel_strength": "RS%",
+        "news_score": "News", "ranking_penalty_reason": "Rank penalty",
+        "entry_ref": "Close@cutoff", "plan_entry": _entry_label,
+        "target_price": "Objective ₹", "stop_price": "Stop ₹",
+        "stop_%": "Stop %", "exp_days_to_target": "Exp. days→objective",
+        "last_atr_pct": "ATR%",
+        "stage2_reason": "Why Stage-2",
+    }
+    inv = inv.rename(columns=rename_map)
+    st.dataframe(inv, use_container_width=True, hide_index=True, height=min(400, 60 + 32*len(inv)))
+    st.download_button(
+        f"⬇️ Download 'as of {cutoff.isoformat()}' analysis",
+        inv.to_csv(index=False).encode(),
+        file_name=f"forward_asof_{cutoff.isoformat()}.csv", mime="text/csv"
+    )
+
+    # =============== SECONDARY TABLE: legacy compact shortlist ===============
+    with st.expander("📋 Compact shortlist (legacy view)"):
+        sl_view = signalled[["ticker", "sector", "confidence", "hist_winrate_seq",
+                              "cutoff_close", "plan_entry", "target_price", "stop_price"]].copy()
+        sl_view.columns = ["Stock", "Sector", "Conf", "Hist Win%",
+                            "Close", "BUY @", "Target", "Stop"]
+        st.dataframe(sl_view, use_container_width=True, hide_index=True)
+
+    # ========================================================================
+    # NEWS DEEP-DIVE — Top + Latest headline per signalling stock
+    # ------------------------------------------------------------------------
+    # Shows, for each cutoff-day candidate, the biggest-impact headline
+    # (Top) AND the most-recent headline (Latest) in the news window. These
+    # can differ: a +4 "beats estimates" from 4 days ago will be the Top
+    # slot while a -3 "resigns" from yesterday will be the Latest.
+    # ========================================================================
+    if use_news and HAVE_NEWS and "news_score" in signalled.columns:
+        _from = signalled["news_window_from"].dropna().iloc[0] if signalled["news_window_from"].notna().any() else None
+        _to   = signalled["news_window_to"].dropna().iloc[0]   if signalled["news_window_to"].notna().any()   else None
+        _win_txt = (f"{_from} → {_to}" if (_from and _to)
+                    else f"{news_lookback}d ending {cutoff.isoformat()}")
+        with st.expander(f"📰 News deep-dive for signalling candidates  "
+                         f"(window: {_win_txt}, no look-ahead)",
+                         expanded=False):
+            nd_view = signalled[["ticker", "sector", "news_score", "news_n",
+                                  "news_top", "news_top_date",
+                                  "news_latest", "news_latest_date",
+                                  "news_matched"]].copy()
+            nd_view.columns = ["Stock", "Sector", "News", "# articles",
+                                "Top headline", "Top date",
+                                "Latest headline", "Latest date",
+                                "Keywords matched"]
+            st.dataframe(nd_view, use_container_width=True, hide_index=True, height=280)
+            st.caption(f"⏳ **No look-ahead window: {_win_txt}** — every headline "
+                       f"here was published **on or before {cutoff.isoformat()}** "
+                       f"(the cutoff you picked). Any headline dated later was "
+                       f"filtered out at fetch time.\n\n"
+                       "**Top headline** = largest single-|score| story "
+                       "in the window. **Latest headline** = most recent by "
+                       "publication date within the window — always ≤ cutoff. "
+                       "Both feed the aggregate news score.")
 
     # =============== TABLE: forward outcomes ===============
     st.subheader("🔮 Forward outcome per stock")
@@ -650,6 +1384,116 @@ def main():
             elif days <= 7:
                 st.caption("Fast stops (3-7d) = normal pullback caught by tight stops. "
                            "FIX: widen stops moderately, or accept as cost of the strategy.")
+
+    # ========================================================================
+    # NEWS-DRIVEN WATCHLIST — non-signalling stocks with material news
+    # ------------------------------------------------------------------------
+    # Every stock that PASSED fundamentals + technical scan but did NOT fire
+    # a technical signal, AND has meaningful news activity (|score| ≥ 0.15)
+    # in the news window. These are the "news says something's happening but
+    # the technical pattern hasn't caught up yet" stocks — often 1-3 days
+    # ahead of the signal.
+    #
+    # This mirrors the live scanner's news watchlist expander and directly
+    # addresses the "why didn't ACUTAAS get suggested despite hot news"
+    # question — you can now see it here even though the technical pass didn't
+    # flag it.
+    # ========================================================================
+    if use_news and HAVE_NEWS and "news_score" in ok_df.columns:
+        watchlist = ok_df[(~ok_df.get("signals_today", False))
+                          & (ok_df["news_score"].abs() >= 0.15)].copy()
+        watchlist = watchlist.sort_values(
+            "news_score", key=lambda s: s.abs(), ascending=False)
+        if not watchlist.empty:
+            n_pos = int((watchlist["news_score"] > 0).sum())
+            n_neg = int((watchlist["news_score"] < 0).sum())
+            with st.expander(f"📰 News-driven WATCHLIST — {len(watchlist)} "
+                             f"stocks with material news at cutoff but NO "
+                             f"technical signal  ({n_pos} pos / {n_neg} neg)",
+                             expanded=False):
+                st.caption(f"Stocks that passed the fundamentals gate but did "
+                           f"NOT fire a technical signal on {cutoff.isoformat()}, "
+                           f"yet had material news activity in the "
+                           f"{news_lookback}-day window ending {cutoff.isoformat()} "
+                           f"(**no look-ahead** — every headline here was "
+                           f"published on or before the cutoff). "
+                           f"**Positive news** → possible pre-signal catalyst "
+                           f"(monitor for a technical setup in the next 2-3 "
+                           f"sessions). **Negative news** → avoid re-entering "
+                           f"these until sentiment stabilises. News does NOT "
+                           f"bypass the technical signal — this section is "
+                           f"informational, surfacing what the pure-technical "
+                           f"pass missed.")
+                wl_view = watchlist[["ticker", "sector", "news_score", "news_n",
+                                      "news_top", "news_top_date",
+                                      "news_latest", "news_latest_date",
+                                      "news_matched"]].copy()
+                wl_view.columns = ["Stock", "Sector", "News", "# articles",
+                                    "Top headline", "Top date",
+                                    "Latest headline", "Latest date",
+                                    "Keywords matched"]
+                st.dataframe(wl_view, use_container_width=True,
+                             hide_index=True, height=320)
+                st.download_button(
+                    "⬇️ Download news watchlist",
+                    wl_view.to_csv(index=False).encode(),
+                    file_name=f"forward_news_watchlist_{cutoff.isoformat()}.csv",
+                    mime="text/csv",
+                )
+
+        # -------- FULL news audit — every scanned stock with any news --------
+        full_news = ok_df[(ok_df.get("news_n", 0).fillna(0) > 0)
+                          | (ok_df.get("news_score", 0.0).fillna(0) != 0)].copy()
+        if not full_news.empty:
+            n_all = len(full_news)
+            n_material = int((full_news["news_score"].abs() >= 0.15).sum())
+            with st.expander(f"📊 Full news audit — {n_all} scanned stocks with "
+                             f"any news activity  ({n_material} material)"):
+                st.caption(f"Every fundamentally-passing stock's news score "
+                           f"in the {news_lookback}-day window ending "
+                           f"**{cutoff.isoformat()}** (no look-ahead — headlines "
+                           f"dated after the cutoff were filtered out at fetch time). "
+                           f"Sorted by |news score|. Zero-score rows are stocks "
+                           f"where headlines existed but none matched the "
+                           f"sentiment lexicon (neutral coverage).")
+                full_news["|news|"] = full_news["news_score"].abs()
+                full_news = full_news.sort_values("|news|", ascending=False).drop(columns=["|news|"])
+                fv_view = full_news[["ticker", "sector", "signals_today",
+                                     "news_score", "news_n",
+                                     "news_top", "news_top_date",
+                                     "news_latest", "news_latest_date",
+                                     "news_matched"]].copy()
+                fv_view.columns = ["Stock", "Sector", "Signals?", "News",
+                                    "# articles",
+                                    "Top headline", "Top date",
+                                    "Latest headline", "Latest date",
+                                    "Keywords matched"]
+                st.dataframe(fv_view, use_container_width=True,
+                             hide_index=True, height=380)
+                st.download_button(
+                    "⬇️ Download full news audit",
+                    fv_view.to_csv(index=False).encode(),
+                    file_name=f"forward_news_audit_{cutoff.isoformat()}.csv",
+                    mime="text/csv",
+                )
+
+    # ========================================================================
+    # FUNDAMENTALS-REJECTED AUDIT — never reached the technical scan
+    # ========================================================================
+    if apply_funda_gate and not funda_rejects_df.empty:
+        with st.expander(f"🚫 {len(funda_rejects_df)} stocks rejected by "
+                         f"fundamentals gate  (never reached the technical scan)"):
+            st.caption("These would have been in the scan universe but failed "
+                       "the no-trade filter (low ROE, high D/E, promoter pledge, "
+                       "auditor issues, etc.).")
+            st.dataframe(funda_rejects_df, use_container_width=True,
+                         hide_index=True, height=300)
+            st.download_button(
+                "⬇️ Download fundamentals rejects",
+                funda_rejects_df.to_csv(index=False).encode(),
+                file_name=f"forward_funda_rejects_{cutoff.isoformat()}.csv",
+                mime="text/csv",
+            )
 
     # =============== METHODOLOGY EXPANDER ===============
     with st.expander("🎓 What each toggle does + honest caveats"):

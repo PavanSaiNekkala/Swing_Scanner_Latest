@@ -53,14 +53,16 @@ st.set_page_config(page_title="NSE Trading Suite",
 # Lazy-import the two apps AFTER set_page_config
 # (module load doesn't call their main() since imports guard __main__)
 # ------------------------------------------------------------------
-scanner  = _load("_ts_scanner",  "swing_scanner_app.py")
-monitor  = _load("_ts_monitor",  "monitor_app.py")
-wishlist = _load("_ts_wishlist", "wishlist_app.py")
+scanner   = _load("_ts_scanner",   "swing_scanner_app.py")
+monitor   = _load("_ts_monitor",   "monitor_app.py")
+wishlist  = _load("_ts_wishlist",  "wishlist_app.py")
+validator = _load("_ts_validator", "forward_validate_app.py")
 
-# Sanity check — all three must expose body() (added in the split refactor)
-for name, mod in (("swing_scanner_app", scanner),
-                   ("monitor_app",      monitor),
-                   ("wishlist_app",     wishlist)):
+# Sanity check — all four must expose body() (added in the split refactor)
+for name, mod in (("swing_scanner_app",    scanner),
+                   ("monitor_app",         monitor),
+                   ("wishlist_app",        wishlist),
+                   ("forward_validate_app", validator)):
     if not hasattr(mod, "body"):
         st.error(f"{name}.py is missing the required `body()` function. "
                  f"Update the file so main() calls body() (see docstring).")
@@ -68,12 +70,14 @@ for name, mod in (("swing_scanner_app", scanner),
 
 
 MODES = {
-    "🔍 Daily Scanner":     ("Scan the market for new setups.  "
-                              "Runs after market close on a chosen universe."),
-    "📊 Position Monitor":  ("Analyze positions you already hold.  "
-                              "Reads positions.csv and recommends hold / exit / add."),
-    "🔮 Wishlist Tracker":  ("Track scanner predictions vs actual behaviour.  "
-                              "Reads wishlist.csv, logs one observation per stock per run."),
+    "🔍 Daily Scanner":      ("Scan the market for new setups.  "
+                               "Runs after market close on a chosen universe."),
+    "📊 Position Monitor":   ("Analyze positions you already hold.  "
+                               "Reads positions.csv and recommends hold / exit / add."),
+    "🔮 Wishlist Tracker":   ("Track scanner predictions vs actual behaviour.  "
+                               "Reads wishlist.csv, logs one observation per stock per run."),
+    "🧪 Forward Validator":  ("Walk-forward test the algorithm at any historical cutoff.  "
+                               "Compares predicted vs realized outcomes; surfaces failure clusters."),
 }
 
 
@@ -85,7 +89,8 @@ def main():
             "MODE",
             list(MODES.keys()),
             key="_suite_mode",
-            help="Switch between finding new setups and managing existing holdings.",
+            help="Switch between finding new setups, managing existing holdings, "
+                 "and back-testing the algorithm on past dates.",
         )
         st.caption(MODES[mode])
         st.divider()
@@ -96,8 +101,10 @@ def main():
         scanner.body()
     elif mode.startswith("📊"):
         monitor.body()
-    else:
+    elif mode.startswith("🔮"):
         wishlist.body()
+    else:
+        validator.body()
 
 
 if __name__ == "__main__":

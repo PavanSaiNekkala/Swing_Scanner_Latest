@@ -17,13 +17,12 @@ __pycache__/
 # Streamlit
 .streamlit/secrets.toml
 
-# yfinance cache
-cache/
+# SQLite cache/database files
 *.db
 *.db-shm
 *.db-wal
 
-# generated data
+# Generated data
 data/*.csv
 data/*.xlsx
 data/duckdb/
@@ -38,15 +37,14 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 
-
 # Environment / secrets
 .env
 **/.env
 .env.*
 !.env.example
 
-# Environment / secrets
-.env
-**/.env
-.env.*
-!.env.example
+# Application cache contents only
+app/cache/__pycache__/
+app/cache/*.db
+app/cache/*.db-shm
+app/cache/*.db-wal

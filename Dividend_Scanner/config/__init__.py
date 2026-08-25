@@ -1,0 +1,3 @@
+"""
+Dividend Scanner Configuration Package
+"""

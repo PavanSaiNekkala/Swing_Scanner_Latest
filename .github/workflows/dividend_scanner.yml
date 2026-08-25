@@ -1,0 +1,66 @@
+name: Weekly Dividend Scanner
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    defaults:
+      run:
+        working-directory: Dividend_Scanner
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create Required Directories
+        run: |
+          mkdir -p data/database
+          mkdir -p data/cache
+          mkdir -p data/output
+
+      - name: Run Dividend Scanner
+        run: python -m main
+
+      - name: Commit and Push Changes
+        working-directory: .
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add Dividend_Scanner/data/database/
+          git add Dividend_Scanner/data/output/
+          git add Dividend_Scanner/data/cache/
+
+          if git diff --cached --quiet; then
+            echo "No changes detected."
+            exit 0
+          fi
+
+          git commit -m "Weekly dividend scan $(date -u +'%Y-%m-%d')"
+          git push
+
+      - name: Upload Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dividend-report
+          path: Dividend_Scanner/data/output/dividend_report.xlsx

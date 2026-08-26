@@ -261,12 +261,13 @@ jobs:
 
           git fetch origin main
 
-          git commit \
-            -m "chore(scanner): update AllNSE history [skip ci]"
+          git rebase origin/main
 
-          git pull \
-            --rebase \
-            origin main
+          git add downloads/history/*.xlsx
+
+          git commit \
+            -m "chore(scanner): update AllNSE history [skip ci]" \
+            || echo "No changes to commit."
 
           git push origin HEAD:main
 

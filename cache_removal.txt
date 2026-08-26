@@ -1,29 +1,32 @@
-# Remove SQLite database
-rm -f data/database/scanner.db
+# Remove SQLite databases/caches
+find . -type f \( -name "*.db" -o -name "*.db-shm" -o -name "*.db-wal" \) -delete
 
-# Remove DiskCache
-rm -rf data/cache/disk
+# Remove DiskCache / cache directories
+find . -type d \( -name "cache" -o -name ".cache" -o -name "disk" -o -name "sqlite" \) -exec rm -rf {} +
 
-# Remove SQLite cache (if present)
-rm -rf data/cache/sqlite
+# Remove cached JSON files only
+find . -type f -path "*/cache/*" -name "*.json" -delete
 
-# Remove JSON cache files
-find data -type f -name "*.json" -delete
-
-# Remove JSON cache directories (if used)
-rm -rf data/cache/json
-
-# Remove all Python cache folders
+# Remove Python cache directories
 find . -type d -name "__pycache__" -exec rm -rf {} +
 
 # Remove compiled Python files
 find . -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete
 
-# Remove pytest cache (if present)
-rm -rf .pytest_cache
+# Remove pytest cache
+find . -type d -name ".pytest_cache" -exec rm -rf {} +
 
-# Remove Ruff cache (if present)
-rm -rf .ruff_cache
+# Remove Ruff cache
+find . -type d -name ".ruff_cache" -exec rm -rf {} +
 
-# Remove mypy cache (if present)
-rm -rf .mypy_cache
+# Remove mypy cache
+find . -type d -name ".mypy_cache" -exec rm -rf {} +
+
+# Remove coverage cache/files
+find . -type f \( -name ".coverage" -o -name "*.coverage" \) -delete
+
+# Remove temporary files
+find . -type f \( -name "*.tmp" -o -name "*.temp" \) -delete
+
+# Remove OS/editor temporary files
+find . -type f \( -name ".DS_Store" -o -name "*~" \) -delete

@@ -1,6 +1,5 @@
 name: Swing Scanner - AllNSE
 
-
 ###############################################################################
 # Trigger
 ###############################################################################
@@ -9,16 +8,13 @@ on:
 
   workflow_dispatch:
 
-
   schedule:
 
     # DAILY AT 7:00 AM IST = 01:30 AM UTC
     # DAILY AT 16:00 PM IST = 10:30 AM UTC
 
     - cron: "30 1 * * 1-5"
-
     - cron: "30 10 * * 1-5"
-
 
 
 ###############################################################################
@@ -30,7 +26,6 @@ permissions:
   contents: write
 
 
-
 ###############################################################################
 # Concurrency
 ###############################################################################
@@ -38,9 +33,7 @@ permissions:
 concurrency:
 
   group: swing-scanner-allnse
-
   cancel-in-progress: false
-
 
 
 ###############################################################################
@@ -49,22 +42,13 @@ concurrency:
 
 jobs:
 
-
   scan:
 
-
     name: Scan - AllNSE
-
-
     runs-on: ubuntu-latest
-
-
-    timeout-minutes: 60
-
-
+    timeout-minutes: 120
 
     steps:
-
 
       #########################################################################
       # Checkout
@@ -129,11 +113,8 @@ jobs:
         run: |
 
           set -euo pipefail
-
           python -m pip install --upgrade pip
-
           pip install -r requirements.txt
-
 
 
       #########################################################################
@@ -147,9 +128,7 @@ jobs:
         run: |
 
           set -euo pipefail
-
           python -m playwright install --with-deps chromium
-
 
 
       #########################################################################
@@ -163,13 +142,9 @@ jobs:
         run: |
 
           set -euo pipefail
-
           mkdir -p downloads/history
-
           mkdir -p downloads/_temporary
-
           mkdir -p workflow_debug
-
 
 
       #########################################################################
@@ -182,24 +157,17 @@ jobs:
 
           PYTHONUNBUFFERED: "1"
 
-
         shell: bash
 
         run: |
 
           set -euo pipefail
 
-
           echo "=========================================="
-
           echo "Starting Swing Scanner"
-
           echo "Segment: AllNSE"
-
           echo "Stock limit: Maximum available"
-
           echo "=========================================="
-
 
           python scan_workflow_monitor.py \
             --segment AllNSE
@@ -220,9 +188,7 @@ jobs:
 
           set -euo pipefail
 
-
           ls -lah downloads/history/
-
 
           WORKBOOK_COUNT="$(
             find downloads/history \
@@ -235,7 +201,6 @@ jobs:
 
           echo "Workbook count: ${WORKBOOK_COUNT}"
 
-
           if [ "$WORKBOOK_COUNT" -eq 0 ]; then
 
             echo "ERROR: No Excel history workbook created."
@@ -243,7 +208,6 @@ jobs:
             exit 1
 
           fi
-
 
           echo "Excel verification passed."
 
@@ -262,14 +226,9 @@ jobs:
         run: |
 
           set -euo pipefail
-
-
           git branch --show-current
-
           git rev-parse HEAD
-
           git status --short
-
 
 
       #########################################################################
@@ -286,19 +245,13 @@ jobs:
 
           set -euo pipefail
 
-
           git config user.name \
             "github-actions[bot]"
-
 
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
 
-
-
           git add downloads/history/*.xlsx
-
-
 
           if git diff --cached --quiet; then
 
@@ -308,21 +261,14 @@ jobs:
 
           fi
 
-
-
           git fetch origin main
-
 
           git commit \
             -m "chore(scanner): update AllNSE history [skip ci]"
 
-
-
           git pull \
             --rebase \
             origin main
-
-
 
           git push origin HEAD:main
 

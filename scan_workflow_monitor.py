@@ -64,6 +64,7 @@ import subprocess
 import sys
 import time
 import io
+import pickle
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -177,13 +178,6 @@ FILE_READY_TIMEOUT_SECONDS: Final[int] = 30
 POLL_INTERVAL_SECONDS: Final[float] = 1.0
 
 CONTROL_POLL_INTERVAL_SECONDS: Final[float] = 0.5
-
-
-LAST_SCAN_PROGRESS = {
-    "scanned": 0,
-    "total": 0,
-    "symbol": "",
-}
 
 
 # ============================================================
@@ -2743,139 +2737,102 @@ def is_scan_completion_available(
     return False
 
 
-def get_streamlit_scan_progress(
-    page: Page,
-) -> tuple[int, int, str]:
+
+def get_scan_checkpoint_progress() -> tuple[int, int]:
     """
-    Extract live scanner progress from Streamlit UI.
+    Read scanner progress from checkpoint file.
 
     Returns:
         completed stocks,
-        total stocks,
-        current symbol
+        total stocks
     """
 
     try:
 
-        texts = []
-
-
-        # ----------------------------------------------------
-        # Streamlit markdown containers
-        # ----------------------------------------------------
-
-        containers = page.locator(
-            '[data-testid="stMarkdownContainer"]'
+        checkpoint_path = (
+            Path(__file__).parent
+            / ".scanner_checkpoint.pkl"
         )
 
-        count = containers.count()
-
-        for index in range(
-            count
-        ):
-
-            try:
-
-                text = containers.nth(
-                    index
-                ).inner_text(
-                    timeout=2000
-                )
-
-                if text:
-
-                    texts.append(
-                        text
-                    )
-
-            except PlaywrightError:
-
-                continue
-
-
-        # ----------------------------------------------------
-        # Body fallback
-        # ----------------------------------------------------
-
-        try:
-
-            body_text = page.locator(
-                "body"
-            ).inner_text(
-                timeout=5000
-            )
-
-            if body_text:
-
-                texts.append(
-                    body_text
-                )
-
-        except PlaywrightError:
-
-            pass
-
-
-        combined_text = "\n".join(
-            texts
-        )
-
-        logger.debug(
-            "Scanner progress DOM text:\n%s",
-            combined_text[:1000],
-        )
-
-
-        # ----------------------------------------------------
-        # Progress extraction
-        # ----------------------------------------------------
-
-        match = re.search(
-
-            r"\[(\d+)\s*/\s*(\d+)\]"
-            r".*?"
-            r"stock\s+\d+\s*/\s*\d+"
-            r"\s*·\s*([A-Z0-9&./_\-]+)",
-
-            combined_text,
-
-            re.IGNORECASE | re.DOTALL,
-
-        )
-
-        if match:
-
-            LAST_SCAN_PROGRESS["scanned"] = int(
-                match.group(1)
-            )
-
-            LAST_SCAN_PROGRESS["total"] = int(
-                match.group(2)
-            )
-
-            LAST_SCAN_PROGRESS["symbol"] = (
-                match.group(3)
-            )
+        if not checkpoint_path.exists():
 
             return (
-                LAST_SCAN_PROGRESS["scanned"],
-                LAST_SCAN_PROGRESS["total"],
-                LAST_SCAN_PROGRESS["symbol"],
+                0,
+                0,
             )
+
+
+        with open(
+            checkpoint_path,
+            "rb",
+        ) as file:
+
+            checkpoint = pickle.load(
+                file
+            )
+
+
+        rows = checkpoint.get(
+            "rows",
+            [],
+        )
+
+        total_batches = checkpoint.get(
+            "total_batches",
+            0,
+        )
+
+        batches_done = checkpoint.get(
+            "batches_done",
+            0,
+        )
+
+
+        total = checkpoint.get(
+                "max_n",
+                0,
+            )
+
+        if not total:
+
+            total = checkpoint.get(
+                "total_stocks",
+                0,
+            )
+
+
+        scanned = len(rows)
+
+
+        if total == 0 and total_batches > 0:
+
+            total = (
+                total_batches
+                *
+                max(
+                    len(rows),
+                    1,
+                )
+            )
+
+
+        return (
+            scanned,
+            total,
+        )
 
 
     except Exception as exc:
 
         logger.debug(
-            "Unable to extract Streamlit scan progress: %s",
+            "Unable to read scanner checkpoint: %s",
             exc,
         )
 
-    return (
-        LAST_SCAN_PROGRESS["scanned"],
-        LAST_SCAN_PROGRESS["total"],
-        LAST_SCAN_PROGRESS["symbol"],
-    )
+        return (
+            0,
+            0,
+        )
 
 
 def wait_for_scan_completion(
@@ -2935,10 +2892,8 @@ def wait_for_scan_completion(
         ):
 
 
-            scanned, total, symbol = (
-                get_streamlit_scan_progress(
-                    page
-                )
+            scanned, total = (
+                get_scan_checkpoint_progress()
             )
 
 
@@ -2947,12 +2902,10 @@ def wait_for_scan_completion(
                 logger.info(
                     "Market scan still running | "
                     "Elapsed=%d seconds | "
-                    "Stocks scanned=%d/%d | "
-                    "Current=%s",
+                    "Stocks scanned=%d/%d",
                     elapsed_seconds,
                     scanned,
                     total,
-                    symbol,
                 )
 
 
@@ -2961,7 +2914,7 @@ def wait_for_scan_completion(
                 logger.info(
                     "Market scan still running | "
                     "Elapsed=%d seconds | "
-                    "Progress not detected",
+                    "Checkpoint unavailable",
                     elapsed_seconds,
                 )
 
@@ -2975,19 +2928,10 @@ def wait_for_scan_completion(
             page
         ):
 
-            final_scanned, final_total, final_symbol = (
-                get_streamlit_scan_progress(
-                    page
-                )
-            )
-
             logger.info(
                 "Market scan completed successfully | "
-                "Elapsed=%d seconds | "
-                "Stocks scanned=%d/%d",
+                "Elapsed=%d seconds",
                 elapsed_seconds,
-                final_scanned,
-                final_total,
             )
 
             return

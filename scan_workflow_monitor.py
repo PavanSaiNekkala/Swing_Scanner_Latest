@@ -2736,6 +2736,85 @@ def is_scan_completion_available(
     return False
 
 
+def get_scan_progress(
+    page: Page,
+) -> tuple[int, int]:
+
+    """
+    Extract stock progress information
+    from Streamlit page.
+
+    Returns:
+        scanned stocks,
+        total stocks
+    """
+
+    try:
+
+        text = page.locator(
+            "body"
+        ).inner_text(
+            timeout=5000
+        )
+
+
+        import re
+
+
+        # Pattern:
+        # 100 stocks in LargeCap
+        match = re.search(
+            r"(\d+)\s+stocks\s+in\s+\w+",
+            text,
+            re.IGNORECASE,
+        )
+
+
+        if match:
+
+            total = int(
+                match.group(1)
+            )
+
+            return (
+                0,
+                total,
+            )
+
+
+        # Pattern:
+        # completed/total stocks
+        match = re.search(
+            r"(\d+)\s*/\s*(\d+)\s*(?:stocks|symbols)",
+            text,
+            re.IGNORECASE,
+        )
+
+
+        if match:
+
+            return (
+
+                int(match.group(1)),
+
+                int(match.group(2)),
+
+            )
+
+
+    except Exception as exc:
+
+        logger.debug(
+            "Unable to read scan progress: %s",
+            exc,
+        )
+
+
+    return (
+        0,
+        0,
+    )
+
 def wait_for_scan_completion(
     page: Page,
     *,
@@ -2785,11 +2864,28 @@ def wait_for_scan_completion(
             >= 30
         ):
 
-            logger.info(
-                "Market scan still running | "
-                "Elapsed=%d seconds",
-                elapsed_seconds,
+            scanned, total = get_scan_progress(
+                page
             )
+
+            if total > 0:
+
+                logger.info(
+                    "Market scan still running | "
+                    "Elapsed=%d seconds | "
+                    "Stocks scanned=%d/%d",
+                    elapsed_seconds,
+                    scanned,
+                    total,
+                )
+
+            else:
+
+                logger.info(
+                    "Market scan still running | "
+                    "Elapsed=%d seconds",
+                    elapsed_seconds,
+                )
 
             last_logged_seconds = (
                 elapsed_seconds

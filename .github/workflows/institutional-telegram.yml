@@ -9,7 +9,7 @@ on:
   workflow_run:
 
     workflows:
-      - "Swing Scanner - All Segments"
+      - "Swing Scanner - AllNSE"
 
     types:
       - completed

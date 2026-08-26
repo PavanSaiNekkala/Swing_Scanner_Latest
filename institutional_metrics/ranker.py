@@ -59,7 +59,21 @@ class InstitutionalRanker:
             len(signals) + 1,
         )
 
+        result = result.sort_values(
+            by=[
+                "Institutional Rank",
+            ],
+            ascending=True,
+            na_position="last",
+            kind="stable",
+        ).reset_index(
+            drop=True
+        )
+
+
         return result
+
+        
 
     def classify(
         self,

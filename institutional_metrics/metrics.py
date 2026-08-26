@@ -143,13 +143,20 @@ class DerivedMetricsCalculator:
 
         result[
             "Backtest Duration Valid"
-        ] = (
-            result["BT from"].notna()
-            & result["BT to"].notna()
-            & (
-                result["BT to"]
-                >= result["BT from"]
-            )
+        ] = pd.Series(
+            [
+                bool(value)
+                for value in (
+                    result["BT from"].notna()
+                    & result["BT to"].notna()
+                    & (
+                        result["BT to"]
+                        >= result["BT from"]
+                    )
+                )
+            ],
+            index=result.index,
+            dtype=object,
         )
 
         return result

@@ -27,15 +27,28 @@ class StockDeduplicator:
             & result["Stock"].ne("")
         ].copy()
 
+
         result["BT to"] = pd.to_datetime(
             result["BT to"],
             errors="coerce",
         )
 
+
+        # -----------------------------------------------------
+        # Source metadata is added by HistoryLoader.
+        # Unit tests and external callers may not provide it.
+        # -----------------------------------------------------
+
+        if "Source Modified" not in result.columns:
+
+            result["Source Modified"] = pd.NaT
+
+
         result["Source Modified"] = pd.to_datetime(
             result["Source Modified"],
             errors="coerce",
         )
+
 
         # -----------------------------------------------------
         # Prefer:
@@ -56,6 +69,7 @@ class StockDeduplicator:
             kind="stable",
         )
 
+
         duplicate_rows = (
             result[
                 result["Stock"].duplicated(
@@ -65,6 +79,7 @@ class StockDeduplicator:
             .copy()
         )
 
+
         deduplicated = (
             result
             .drop_duplicates(
@@ -73,6 +88,7 @@ class StockDeduplicator:
             )
             .reset_index(drop=True)
         )
+
 
         return (
             deduplicated,

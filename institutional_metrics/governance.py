@@ -76,11 +76,14 @@ class GovernanceEngine:
 
         result[
             "Institutional Eligible"
-        ] = (
-            result[gate_columns]
-            .all(axis=1)
-        )
-
+        ] = [
+            bool(value)
+            for value in (
+                result[gate_columns]
+                .all(axis=1)
+            )
+        ]
+        
         result[
             "Governance Flags"
         ] = result.apply(

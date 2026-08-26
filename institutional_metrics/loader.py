@@ -45,6 +45,7 @@ class HistoryLoader:
         )
         
 
+
     def discover_workbooks(
         self,
     ) -> list[Path]:
@@ -57,24 +58,23 @@ class HistoryLoader:
             )
 
 
-        workbook = (
-            self.history_directory
-            /
-            "swing_scanner_allnse_history.xlsx"
+        workbooks = sorted(
+            self.history_directory.glob(
+                "*.xlsx"
+            )
         )
 
 
-        if not workbook.exists():
+        if not workbooks:
 
             raise NoSourceDataError(
-                "Required NSE history workbook missing: "
-                f"{workbook}"
+                "No Excel history workbooks found in: "
+                f"{self.history_directory}"
             )
 
 
-        return [
-            workbook
-        ]
+        return workbooks
+
 
 
     def find_latest_scan_sheets(

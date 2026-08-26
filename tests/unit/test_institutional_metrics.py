@@ -1302,3 +1302,4 @@ def test_core_pipeline_stages_work_together() -> None:
         3,
         4,
     ]
+

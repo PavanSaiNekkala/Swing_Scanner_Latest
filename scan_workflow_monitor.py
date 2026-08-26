@@ -4776,6 +4776,7 @@ def parse_arguments(
         type=int,
         default=12000,
         help=(
+            
             "Maximum seconds to wait for scan completion."
         ),
     )

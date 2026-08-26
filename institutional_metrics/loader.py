@@ -43,22 +43,39 @@ class HistoryLoader:
             .replace("-", "")
             .replace(" ", "")
         )
+        
 
     def discover_workbooks(
         self,
     ) -> list[Path]:
 
         if not self.history_directory.exists():
+
             raise NoSourceDataError(
                 f"History directory does not exist: "
                 f"{self.history_directory}"
             )
 
-        return sorted(
-            self.history_directory.glob(
-                "*.xlsx"
-            )
+
+        workbook = (
+            self.history_directory
+            /
+            "swing_scanner_allnse_history.xlsx"
         )
+
+
+        if not workbook.exists():
+
+            raise NoSourceDataError(
+                "Required NSE history workbook missing: "
+                f"{workbook}"
+            )
+
+
+        return [
+            workbook
+        ]
+
 
     def find_latest_scan_sheets(
         self,

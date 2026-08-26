@@ -64,7 +64,6 @@ import subprocess
 import sys
 import time
 import io
-import pickle
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -84,6 +83,7 @@ from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
     sync_playwright,
 )
+
 
 
 # ============================================================
@@ -2650,9 +2650,11 @@ def start_market_scan(
         "Starting market scan."
     )
 
+
     button = get_scan_market_button(
         page
     )
+
 
     try:
 
@@ -2664,6 +2666,13 @@ def start_market_scan(
             timeout=PAGE_TIMEOUT_MS,
         )
 
+
+        # Allow Streamlit workflow to initialize
+        page.wait_for_timeout(
+            1000
+        )
+
+
     except PlaywrightError as error:
 
         save_debug_screenshot(
@@ -2674,6 +2683,7 @@ def start_market_scan(
         raise RuntimeError(
             "Failed to click the Scan Market button."
         ) from error
+
 
     logger.info(
         "Market scan triggered successfully."
@@ -2737,104 +2747,7 @@ def is_scan_completion_available(
     return False
 
 
-
-def get_scan_checkpoint_progress() -> tuple[int, int]:
-    """
-    Read scanner progress from checkpoint file.
-
-    Returns:
-        completed stocks,
-        total stocks
-    """
-
-    try:
-
-        checkpoint_path = (
-            Path(__file__).parent
-            / ".scanner_checkpoint.pkl"
-        )
-
-        if not checkpoint_path.exists():
-
-            return (
-                0,
-                0,
-            )
-
-
-        with open(
-            checkpoint_path,
-            "rb",
-        ) as file:
-
-            checkpoint = pickle.load(
-                file
-            )
-
-
-        rows = checkpoint.get(
-            "rows",
-            [],
-        )
-
-        total_batches = checkpoint.get(
-            "total_batches",
-            0,
-        )
-
-        batches_done = checkpoint.get(
-            "batches_done",
-            0,
-        )
-
-
-        total = checkpoint.get(
-                "max_n",
-                0,
-            )
-
-        if not total:
-
-            total = checkpoint.get(
-                "total_stocks",
-                0,
-            )
-
-
-        scanned = len(rows)
-
-
-        if total == 0 and total_batches > 0:
-
-            total = (
-                total_batches
-                *
-                max(
-                    len(rows),
-                    1,
-                )
-            )
-
-
-        return (
-            scanned,
-            total,
-        )
-
-
-    except Exception as exc:
-
-        logger.debug(
-            "Unable to read scanner checkpoint: %s",
-            exc,
-        )
-
-        return (
-            0,
-            0,
-        )
-
-
+    
 def wait_for_scan_completion(
     page: Page,
     *,
@@ -2843,7 +2756,7 @@ def wait_for_scan_completion(
     """
     Wait until the market scan completes.
 
-    Completion is determined by the availability of the
+    Completion is determined only by the
     Backtest Track Record download control.
     """
 
@@ -2891,33 +2804,11 @@ def wait_for_scan_completion(
             >= 30
         ):
 
-
-            scanned, total = (
-                get_scan_checkpoint_progress()
+            logger.info(
+                "Market scan still running | "
+                "Elapsed=%d seconds",
+                elapsed_seconds,
             )
-
-
-            if total > 0:
-
-                logger.info(
-                    "Market scan still running | "
-                    "Elapsed=%d seconds | "
-                    "Stocks scanned=%d/%d",
-                    elapsed_seconds,
-                    scanned,
-                    total,
-                )
-
-
-            else:
-
-                logger.info(
-                    "Market scan still running | "
-                    "Elapsed=%d seconds | "
-                    "Checkpoint unavailable",
-                    elapsed_seconds,
-                )
-
 
             last_logged_seconds = (
                 elapsed_seconds
@@ -2930,6 +2821,7 @@ def wait_for_scan_completion(
 
             logger.info(
                 "Market scan completed successfully | "
+                "Completion=download_button | "
                 "Elapsed=%d seconds",
                 elapsed_seconds,
             )
@@ -2955,6 +2847,7 @@ def wait_for_scan_completion(
         "Timed out waiting for market scan completion "
         f"after {timeout_seconds} seconds."
     )
+    
 
 # ============================================================
 # COMPLETE SCANNER UI CONFIGURATION

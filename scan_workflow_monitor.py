@@ -179,6 +179,13 @@ POLL_INTERVAL_SECONDS: Final[float] = 1.0
 CONTROL_POLL_INTERVAL_SECONDS: Final[float] = 0.5
 
 
+LAST_SCAN_PROGRESS = {
+    "scanned": 0,
+    "total": 0,
+    "symbol": "",
+}
+
+
 # ============================================================
 # BROWSER CONSTANTS
 # ============================================================
@@ -2736,84 +2743,140 @@ def is_scan_completion_available(
     return False
 
 
-def get_scan_progress(
+def get_streamlit_scan_progress(
     page: Page,
-) -> tuple[int, int]:
-
+) -> tuple[int, int, str]:
     """
-    Extract stock progress information
-    from Streamlit page.
+    Extract live scanner progress from Streamlit UI.
 
     Returns:
-        scanned stocks,
-        total stocks
+        completed stocks,
+        total stocks,
+        current symbol
     """
 
     try:
 
-        text = page.locator(
-            "body"
-        ).inner_text(
-            timeout=5000
+        texts = []
+
+
+        # ----------------------------------------------------
+        # Streamlit markdown containers
+        # ----------------------------------------------------
+
+        containers = page.locator(
+            '[data-testid="stMarkdownContainer"]'
+        )
+
+        count = containers.count()
+
+        for index in range(
+            count
+        ):
+
+            try:
+
+                text = containers.nth(
+                    index
+                ).inner_text(
+                    timeout=2000
+                )
+
+                if text:
+
+                    texts.append(
+                        text
+                    )
+
+            except PlaywrightError:
+
+                continue
+
+
+        # ----------------------------------------------------
+        # Body fallback
+        # ----------------------------------------------------
+
+        try:
+
+            body_text = page.locator(
+                "body"
+            ).inner_text(
+                timeout=5000
+            )
+
+            if body_text:
+
+                texts.append(
+                    body_text
+                )
+
+        except PlaywrightError:
+
+            pass
+
+
+        combined_text = "\n".join(
+            texts
+        )
+
+        logger.debug(
+            "Scanner progress DOM text:\n%s",
+            combined_text[:1000],
         )
 
 
-        import re
+        # ----------------------------------------------------
+        # Progress extraction
+        # ----------------------------------------------------
 
-
-        # Pattern:
-        # 100 stocks in LargeCap
         match = re.search(
-            r"(\d+)\s+stocks\s+in\s+\w+",
-            text,
-            re.IGNORECASE,
-        )
 
+            r"\[(\d+)\s*/\s*(\d+)\]"
+            r".*?"
+            r"stock\s+\d+\s*/\s*\d+"
+            r"\s*·\s*([A-Z0-9&./_\-]+)",
+
+            combined_text,
+
+            re.IGNORECASE | re.DOTALL,
+
+        )
 
         if match:
 
-            total = int(
+            LAST_SCAN_PROGRESS["scanned"] = int(
                 match.group(1)
             )
 
-            return (
-                0,
-                total,
+            LAST_SCAN_PROGRESS["total"] = int(
+                match.group(2)
             )
 
-
-        # Pattern:
-        # completed/total stocks
-        match = re.search(
-            r"(\d+)\s*/\s*(\d+)\s*(?:stocks|symbols)",
-            text,
-            re.IGNORECASE,
-        )
-
-
-        if match:
+            LAST_SCAN_PROGRESS["symbol"] = (
+                match.group(3)
+            )
 
             return (
-
-                int(match.group(1)),
-
-                int(match.group(2)),
-
+                LAST_SCAN_PROGRESS["scanned"],
+                LAST_SCAN_PROGRESS["total"],
+                LAST_SCAN_PROGRESS["symbol"],
             )
 
 
     except Exception as exc:
 
         logger.debug(
-            "Unable to read scan progress: %s",
+            "Unable to extract Streamlit scan progress: %s",
             exc,
         )
 
-
     return (
-        0,
-        0,
+        LAST_SCAN_PROGRESS["scanned"],
+        LAST_SCAN_PROGRESS["total"],
+        LAST_SCAN_PROGRESS["symbol"],
     )
+
 
 def wait_for_scan_completion(
     page: Page,
@@ -2833,30 +2896,37 @@ def wait_for_scan_completion(
             "Scan timeout must be greater than zero."
         )
 
+
     logger.info(
         "Waiting for market scan completion | "
         "Timeout=%d seconds",
         timeout_seconds,
     )
 
+
     started_at = time.monotonic()
+
 
     deadline = (
         started_at
         + timeout_seconds
     )
 
+
     last_logged_seconds = -30
+
 
     while (
         time.monotonic()
         < deadline
     ):
 
+
         elapsed_seconds = int(
             time.monotonic()
             - started_at
         )
+
 
         if (
             elapsed_seconds
@@ -2864,44 +2934,64 @@ def wait_for_scan_completion(
             >= 30
         ):
 
-            scanned, total = get_scan_progress(
-                page
+
+            scanned, total, symbol = (
+                get_streamlit_scan_progress(
+                    page
+                )
             )
+
 
             if total > 0:
 
                 logger.info(
                     "Market scan still running | "
                     "Elapsed=%d seconds | "
-                    "Stocks scanned=%d/%d",
+                    "Stocks scanned=%d/%d | "
+                    "Current=%s",
                     elapsed_seconds,
                     scanned,
                     total,
+                    symbol,
                 )
+
 
             else:
 
                 logger.info(
                     "Market scan still running | "
-                    "Elapsed=%d seconds",
+                    "Elapsed=%d seconds | "
+                    "Progress not detected",
                     elapsed_seconds,
                 )
+
 
             last_logged_seconds = (
                 elapsed_seconds
             )
 
+
         if is_scan_completion_available(
             page
         ):
 
+            final_scanned, final_total, final_symbol = (
+                get_streamlit_scan_progress(
+                    page
+                )
+            )
+
             logger.info(
                 "Market scan completed successfully | "
-                "Elapsed=%d seconds",
+                "Elapsed=%d seconds | "
+                "Stocks scanned=%d/%d",
                 elapsed_seconds,
+                final_scanned,
+                final_total,
             )
 
             return
+
 
         page.wait_for_timeout(
             int(
@@ -2910,16 +3000,17 @@ def wait_for_scan_completion(
             )
         )
 
+
     save_debug_screenshot(
         page,
         "scan_completion_timeout",
     )
 
+
     raise PlaywrightTimeoutError(
         "Timed out waiting for market scan completion "
         f"after {timeout_seconds} seconds."
     )
-
 
 # ============================================================
 # COMPLETE SCANNER UI CONFIGURATION

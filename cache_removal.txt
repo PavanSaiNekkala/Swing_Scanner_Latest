@@ -7,6 +7,12 @@ rm -rf data/cache/disk
 # Remove SQLite cache (if present)
 rm -rf data/cache/sqlite
 
+# Remove JSON cache files
+find data -type f -name "*.json" -delete
+
+# Remove JSON cache directories (if used)
+rm -rf data/cache/json
+
 # Remove all Python cache folders
 find . -type d -name "__pycache__" -exec rm -rf {} +
 

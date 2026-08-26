@@ -1,0 +1,377 @@
+name: Swing Scanner - AllNSE
+
+
+###############################################################################
+# Trigger
+###############################################################################
+
+on:
+
+  workflow_dispatch:
+
+
+  schedule:
+
+    # DAILY AT 7:00 AM IST = 01:30 AM UTC
+    # DAILY AT 16:00 PM IST = 10:30 AM UTC
+
+    - cron: "30 1 * * 1-5"
+
+    - cron: "30 10 * * 1-5"
+
+
+
+###############################################################################
+# Permissions
+###############################################################################
+
+permissions:
+
+  contents: write
+
+
+
+###############################################################################
+# Concurrency
+###############################################################################
+
+concurrency:
+
+  group: swing-scanner-allnse
+
+  cancel-in-progress: false
+
+
+
+###############################################################################
+# Job
+###############################################################################
+
+jobs:
+
+
+  scan:
+
+
+    name: Scan - AllNSE
+
+
+    runs-on: ubuntu-latest
+
+
+    timeout-minutes: 60
+
+
+
+    steps:
+
+
+      #########################################################################
+      # Checkout
+      #########################################################################
+
+      - name: Checkout main branch
+
+        uses: actions/checkout@v4
+
+        with:
+
+          ref: main
+
+          fetch-depth: 0
+
+
+
+      #########################################################################
+      # Python Setup
+      #########################################################################
+
+      - name: Set up Python
+
+        uses: actions/setup-python@v5
+
+        with:
+
+          python-version: "3.12"
+
+
+
+      #########################################################################
+      # Cache Python Dependencies
+      #########################################################################
+
+      - name: Cache Python dependencies
+
+        uses: actions/cache@v4
+
+        with:
+
+          path: ~/.cache/pip
+
+          key: >-
+            ${{ runner.os }}-python-3.12-
+            ${{ hashFiles('requirements.txt') }}
+
+          restore-keys: |
+
+            ${{ runner.os }}-python-3.12-
+
+
+
+      #########################################################################
+      # Install Dependencies
+      #########################################################################
+
+      - name: Install dependencies
+
+        shell: bash
+
+        run: |
+
+          set -euo pipefail
+
+          python -m pip install --upgrade pip
+
+          pip install -r requirements.txt
+
+
+
+      #########################################################################
+      # Install Playwright Chromium
+      #########################################################################
+
+      - name: Install Playwright Chromium
+
+        shell: bash
+
+        run: |
+
+          set -euo pipefail
+
+          python -m playwright install --with-deps chromium
+
+
+
+      #########################################################################
+      # Create Required Directories
+      #########################################################################
+
+      - name: Create workflow directories
+
+        shell: bash
+
+        run: |
+
+          set -euo pipefail
+
+          mkdir -p downloads/history
+
+          mkdir -p downloads/_temporary
+
+          mkdir -p workflow_debug
+
+
+
+      #########################################################################
+      # Run AllNSE Scanner
+      #########################################################################
+
+      - name: Run Swing Scanner - AllNSE
+
+        env:
+
+          PYTHONUNBUFFERED: "1"
+
+
+        shell: bash
+
+        run: |
+
+          set -euo pipefail
+
+
+          echo "=========================================="
+
+          echo "Starting Swing Scanner"
+
+          echo "Segment: AllNSE"
+
+          echo "Stock limit: Maximum available"
+
+          echo "=========================================="
+
+
+          python scan_workflow_monitor.py \
+            --segment AllNSE
+
+
+
+      #########################################################################
+      # Verify Excel Results
+      #########################################################################
+
+      - name: Verify Excel history workbook
+
+        if: success()
+
+        shell: bash
+
+        run: |
+
+          set -euo pipefail
+
+
+          ls -lah downloads/history/
+
+
+          WORKBOOK_COUNT="$(
+            find downloads/history \
+              -maxdepth 1 \
+              -type f \
+              -name '*.xlsx' \
+              | wc -l
+          )"
+
+
+          echo "Workbook count: ${WORKBOOK_COUNT}"
+
+
+          if [ "$WORKBOOK_COUNT" -eq 0 ]; then
+
+            echo "ERROR: No Excel history workbook created."
+
+            exit 1
+
+          fi
+
+
+          echo "Excel verification passed."
+
+
+
+      #########################################################################
+      # Diagnose Git
+      #########################################################################
+
+      - name: Diagnose Git worktree
+
+        if: success()
+
+        shell: bash
+
+        run: |
+
+          set -euo pipefail
+
+
+          git branch --show-current
+
+          git rev-parse HEAD
+
+          git status --short
+
+
+
+      #########################################################################
+      # Commit Excel History
+      #########################################################################
+
+      - name: Commit Excel history to main
+
+        if: success()
+
+        shell: bash
+
+        run: |
+
+          set -euo pipefail
+
+
+          git config user.name \
+            "github-actions[bot]"
+
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+
+          git add downloads/history/*.xlsx
+
+
+
+          if git diff --cached --quiet; then
+
+            echo "No Excel changes."
+
+            exit 0
+
+          fi
+
+
+
+          git fetch origin main
+
+
+          git commit \
+            -m "chore(scanner): update AllNSE history [skip ci]"
+
+
+
+          git pull \
+            --rebase \
+            origin main
+
+
+
+          git push origin HEAD:main
+
+
+
+      #########################################################################
+      # Upload Excel Artifact
+      #########################################################################
+
+      - name: Upload Excel history workbook
+
+        if: always()
+
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: swing-scanner-AllNSE-${{ github.run_number }}
+
+          path: |
+
+            downloads/history/*.xlsx
+
+          if-no-files-found: warn
+
+          retention-days: 30
+
+
+
+      #########################################################################
+      # Upload Debug Files
+      #########################################################################
+
+      - name: Upload debug artifacts
+
+        if: failure()
+
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: workflow-debug-AllNSE-${{ github.run_number }}
+
+          path: |
+
+            workflow_debug/**
+
+            downloads/_temporary/**
+
+          if-no-files-found: ignore
+
+          retention-days: 14

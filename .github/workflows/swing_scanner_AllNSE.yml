@@ -44,7 +44,7 @@ jobs:
 
     name: Scan - AllNSE
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 200
 
     steps:
 

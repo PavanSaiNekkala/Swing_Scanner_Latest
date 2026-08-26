@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 from institutional_metrics.engine import (
@@ -14,13 +17,16 @@ LOGGER = logging.getLogger(
 )
 
 
+# ============================================================
+# ARGUMENTS
+# ============================================================
+
 def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Build institutional metrics and "
-            "institutional ranking from scanner "
-            "history workbooks."
+            "Build institutional metrics "
+            "and institutional ranking."
         )
     )
 
@@ -31,10 +37,10 @@ def parse_args() -> argparse.Namespace:
             "downloads/history"
         ),
         help=(
-            "Directory containing scanner "
-            "history Excel workbooks."
+            "Scanner history workbook directory."
         ),
     )
+
 
     parser.add_argument(
         "--output-dir",
@@ -43,18 +49,41 @@ def parse_args() -> argparse.Namespace:
             "downloads/institutional_metrics"
         ),
         help=(
-            "Directory where institutional "
-            "outputs are written."
+            "Institutional output directory."
         ),
     )
+
+
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=[
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR",
+        ],
+        help="Logging level.",
+    )
+
 
     return parser.parse_args()
 
 
-def main() -> int:
+
+# ============================================================
+# LOGGING
+# ============================================================
+
+def configure_logging(
+    level: str,
+) -> None:
 
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(
+            logging,
+            level,
+        ),
         format=(
             "%(asctime)s | "
             "%(levelname)-8s | "
@@ -63,30 +92,42 @@ def main() -> int:
         ),
     )
 
-    args = parse_args()
 
-    LOGGER.info(
-        "Starting institutional metrics build."
+
+# ============================================================
+# VALIDATION
+# ============================================================
+
+def validate_directories(
+    history_dir: Path,
+    output_dir: Path,
+) -> None:
+
+
+    if not history_dir.exists():
+
+        raise FileNotFoundError(
+            f"History directory missing: "
+            f"{history_dir}"
+        )
+
+
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    LOGGER.info(
-        "History directory: %s",
-        args.history_dir,
-    )
 
-    LOGGER.info(
-        "Output directory: %s",
-        args.output_dir,
-    )
 
-    engine = (
-        InstitutionalMetricsEngine()
-    )
+# ============================================================
+# SUMMARY
+# ============================================================
 
-    result = engine.run(
-        history_directory=args.history_dir,
-        output_directory=args.output_dir,
-    )
+def print_summary(
+    result,
+    duration: float,
+) -> None:
+
 
     eligible = int(
         result.signals[
@@ -94,90 +135,194 @@ def main() -> int:
         ].sum()
     )
 
+
     rejected = (
         len(result.signals)
-        - eligible
+        -
+        eligible
     )
 
-    LOGGER.info(
-        "Institutional metrics build completed."
-    )
-
-    LOGGER.info(
-        "Unique universe: %d",
-        len(result.universe),
-    )
-
-    LOGGER.info(
-        "Active signals: %d",
-        len(result.signals),
-    )
-
-    LOGGER.info(
-        "Eligible signals: %d",
-        eligible,
-    )
-
-    LOGGER.info(
-        "Rejected signals: %d",
-        rejected,
-    )
-
-    LOGGER.info(
-        "Duplicate rows removed: %d",
-        len(result.duplicates),
-    )
-
-    LOGGER.info(
-        "CSV: %s",
-        result.csv_path,
-    )
-
-    LOGGER.info(
-        "Excel: %s",
-        result.excel_path,
-    )
 
     print()
+
     print("=" * 72)
+
     print(
         "INSTITUTIONAL METRICS BUILD COMPLETED"
     )
+
     print("=" * 72)
+
+    print(
+        f"Run duration          : "
+        f"{duration:.2f} seconds"
+    )
+
     print(
         f"Unique universe       : "
         f"{len(result.universe)}"
     )
+
     print(
         f"Signalled stocks      : "
         f"{len(result.signals)}"
     )
+
     print(
         f"Eligible signals      : "
         f"{eligible}"
     )
+
     print(
         f"Rejected signals      : "
         f"{rejected}"
     )
+
     print(
         f"Duplicates removed    : "
         f"{len(result.duplicates)}"
     )
+
     print(
         f"CSV                   : "
         f"{result.csv_path}"
     )
+
     print(
         f"Excel                 : "
         f"{result.excel_path}"
     )
+
     print("=" * 72)
 
-    return 0
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main() -> int:
+
+
+    args = parse_args()
+
+
+    configure_logging(
+        args.log_level
+    )
+
+
+    run_id = datetime.now().strftime(
+        "%Y%m%d_%H%M%S"
+    )
+
+
+    started = time.monotonic()
+
+
+    try:
+
+        LOGGER.info(
+            "Starting institutional metrics build."
+        )
+
+
+        LOGGER.info(
+            "Run ID: %s",
+            run_id,
+        )
+
+
+        LOGGER.info(
+            "History directory: %s",
+            args.history_dir,
+        )
+
+
+        LOGGER.info(
+            "Output directory: %s",
+            args.output_dir,
+        )
+
+
+        validate_directories(
+            args.history_dir,
+            args.output_dir,
+        )
+
+
+        engine = (
+            InstitutionalMetricsEngine()
+        )
+
+
+        result = engine.run(
+            history_directory=args.history_dir,
+            output_directory=args.output_dir,
+        )
+
+
+        duration = (
+            time.monotonic()
+            -
+            started
+        )
+
+
+        eligible = int(
+            result.signals[
+                "Institutional Eligible"
+            ].sum()
+        )
+
+
+        LOGGER.info(
+            "Build completed successfully."
+        )
+
+
+        LOGGER.info(
+            "Universe=%d | Signals=%d | Eligible=%d",
+            len(result.universe),
+            len(result.signals),
+            eligible,
+        )
+
+
+        LOGGER.info(
+            "CSV=%s",
+            result.csv_path,
+        )
+
+
+        LOGGER.info(
+            "Excel=%s",
+            result.excel_path,
+        )
+
+
+        print_summary(
+            result,
+            duration,
+        )
+
+
+        return 0
+
+
+
+    except Exception:
+
+        LOGGER.exception(
+            "Institutional metrics build failed."
+        )
+
+        return 1
+
 
 
 if __name__ == "__main__":
+
     raise SystemExit(
         main()
     )

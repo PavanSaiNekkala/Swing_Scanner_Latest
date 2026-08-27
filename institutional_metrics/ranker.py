@@ -267,7 +267,6 @@ class InstitutionalRanker:
             return "A+"
 
 
-
         if score >= 80:
 
             return "A"
@@ -279,11 +278,9 @@ class InstitutionalRanker:
             return "B+"
 
 
-
         if score >= 60:
 
             return "B"
-
 
 
         if score >= 50:
@@ -291,11 +288,9 @@ class InstitutionalRanker:
             return "C"
 
 
-
         if score >= 40:
 
             return "D"
-
 
 
         return "F"
@@ -306,120 +301,64 @@ class InstitutionalRanker:
 
     @staticmethod
     def _decision(
-
         row: pd.Series,
-
     ) -> str:
 
 
-
         if not bool(
-
             row.get(
-
                 "Signals today",
-
                 False,
-
             )
-
         ):
-
             return "NO_SIGNAL"
 
 
 
         if not bool(
-
             row.get(
-
                 "Institutional Eligible",
-
                 False,
-
             )
-
         ):
-
             return "REJECT"
 
 
 
-        score = float(
-
+        priority_score = float(
             row.get(
-
-                "Institutional Score",
-
+                "Institutional Priority Score",
                 0,
-
             )
-
             or 0
-
-        )
-
-
-
-        rank_score = float(
-
-            row.get(
-
-                "Rank Score",
-
-                0,
-
-            )
-
-            or 0
-
         )
 
 
 
         # ----------------------------------------------------
-        # Institutional decision thresholds
+        # Final decision based on combined institutional score
         #
-        # Calibrated against current production distribution:
+        # Institutional Priority Score:
         #
-        # Institutional Score:
-        #   Quality of historical edge
-        #
-        # Rank Score:
-        #   Current opportunity conviction
+        # 50% Historical Quality
+        # 50% Current Conviction
         #
         # ----------------------------------------------------
 
 
-        if (
-
-            score >= 70
-
-            and
-
-            rank_score >= 20
-
-        ):
+        if priority_score >= 75:
 
             return "STRONG_BUY"
 
 
 
-        if (
-
-            score >= 60
-
-            and
-
-            rank_score >= 15
-
-        ):
+        if priority_score >= 65:
 
             return "BUY"
 
 
 
-        if score >= 50:
+        if priority_score >= 55:
 
             return "WATCH"
 

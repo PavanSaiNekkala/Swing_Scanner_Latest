@@ -219,10 +219,11 @@ class TelegramMessageFormatter:
                 recommendations.iterrows()
             ):
 
-                institutional_rank = (
+                recommendation_rank = (
                     self._safe_int(
                         row.get(
-                            "Recommendation Rank"
+                            "Recommendation Rank",
+                            0,
                         )
                     )
                 )

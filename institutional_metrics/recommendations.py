@@ -116,6 +116,9 @@ class RecommendationConfig:
     top_n: int = 5
 
 
+    require_signal: bool = True
+
+
     allowed_decisions: frozenset[str] = (
         DEFAULT_DECISIONS
     )
@@ -140,8 +143,6 @@ class RecommendationConfig:
             raise ValueError(
                 "allowed_decisions cannot be empty."
             )
-
-
 
 
 # ============================================================

@@ -211,7 +211,7 @@ class InstitutionalPipeline:
             )
         )
 
-                eligible_signal_count = int(
+        eligible_signal_count = int(
             ranking_dataframe[
                 "Signals today"
             ]
@@ -219,17 +219,14 @@ class InstitutionalPipeline:
             .sum()
         )
 
-
         eligible_candidate_count = (
             recommendation_result
             .candidate_count
         )
 
-
         recommendations = (
             recommendation_result.recommendations
         )
-
 
         fingerprint = (
             recommendation_fingerprint(

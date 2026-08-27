@@ -285,19 +285,19 @@ class TelegramMessageFormatter:
 
 
                 lines.append(
-                    f"   Priority: "
+                    f"   Priority Score: "
                     f"{priority_score:.2f}"
                 )
 
 
                 lines.append(
-                    f"   Quality: "
+                    f"   Institutional Score: "
                     f"{institutional_score:.2f}"
                 )
 
 
                 lines.append(
-                    f"   Conviction: "
+                    f"   Conviction Score: "
                     f"{conviction_score:.2f}"
                 )
 

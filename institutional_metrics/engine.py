@@ -325,7 +325,6 @@ class InstitutionalMetricsEngine:
         )
 
 
-
         # -----------------------------------------------------
         # VALIDATE FINAL OUTPUT
         # -----------------------------------------------------
@@ -333,7 +332,6 @@ class InstitutionalMetricsEngine:
         self._validate_output(
             universe
         )
-
 
 
         # -----------------------------------------------------
@@ -367,6 +365,8 @@ class InstitutionalMetricsEngine:
             "Efficiency Contribution",
 
             "Institutional Score",
+
+            "Institutional Priority Score",
 
         ]
 

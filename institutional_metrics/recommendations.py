@@ -340,12 +340,14 @@ class InstitutionalRecommendationEngine:
             working
             .sort_values(
                 by=[
+                    "Institutional Priority Score",
                     RANK_SCORE_COLUMN,
                     SCORE_COLUMN,
                     STOCK_COLUMN,
                 ],
 
                 ascending=[
+                    False,
                     False,
                     False,
                     True,

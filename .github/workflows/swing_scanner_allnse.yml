@@ -44,7 +44,7 @@ jobs:
 
     name: Scan - AllNSE
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 150
 
     steps:
 
@@ -141,6 +141,7 @@ jobs:
 
           set -euo pipefail
           mkdir -p downloads/history
+          mkdir -p downloads/latest
           mkdir -p downloads/_temporary
           mkdir -p workflow_debug
 
@@ -212,6 +213,25 @@ jobs:
 
 
       #########################################################################
+      # Remove Runtime Files
+      #########################################################################
+
+      - name: Remove runtime generated files
+
+        if: success()
+
+        shell: bash
+
+        run: |
+
+          set -euo pipefail
+
+          rm -f .scanner_checkpoint.pkl
+
+          echo "Runtime files cleaned."
+
+
+      #########################################################################
       # Diagnose Git
       #########################################################################
 
@@ -224,9 +244,11 @@ jobs:
         run: |
 
           set -euo pipefail
+
           git branch --show-current
           git rev-parse HEAD
           git status --short
+
 
 
       #########################################################################
@@ -243,34 +265,77 @@ jobs:
 
           set -euo pipefail
 
+
           git config user.name \
             "github-actions[bot]"
+
 
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
 
+
+
+          #####################################################################
+          # Remove runtime generated files
+          #####################################################################
+
+          rm -f .scanner_checkpoint.pkl
+
+
+          #####################################################################
+          # Remove temporary workflow artifacts
+          #####################################################################
+
+          find . \
+            -name "*.tmp.xlsx" \
+            -delete \
+            || true
+
+
+
+          #####################################################################
+          # Synchronize with latest main
+          #####################################################################
+
+          git fetch origin main
+
+
+          git reset --hard origin/main
+
+
+
+          #####################################################################
+          # Stage generated Excel history
+          #####################################################################
+
           git add downloads/history/*.xlsx
+
+
+
+          #####################################################################
+          # Commit only if workbook changed
+          #####################################################################
 
           if git diff --cached --quiet; then
 
-            echo "No Excel changes."
+            echo "No Excel history changes."
 
             exit 0
 
           fi
 
-          git fetch origin main
 
-          git rebase origin/main
-
-          git add downloads/history/*.xlsx
 
           git commit \
-            -m "chore(scanner): update AllNSE history [skip ci]" \
-            || echo "No changes to commit."
+            -m "chore(scanner): update AllNSE history [skip ci]"
+
+
+
+          #####################################################################
+          # Push generated history
+          #####################################################################
 
           git push origin HEAD:main
-
 
 
       #########################################################################

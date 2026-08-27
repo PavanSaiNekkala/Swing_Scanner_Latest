@@ -48,3 +48,6 @@ app/cache/__pycache__/
 app/cache/*.db
 app/cache/*.db-shm
 app/cache/*.db-wal
+
+# Scanner runtime files
+.scanner_checkpoint.pkl

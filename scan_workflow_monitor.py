@@ -54,7 +54,6 @@ Part 4
 from __future__ import annotations
 
 import argparse
-import csv
 import hashlib
 import logging
 import os
@@ -63,10 +62,14 @@ import socket
 import subprocess
 import sys
 import time
-import io
+
+from zipfile import BadZipFile
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import (
+    datetime,
+    timedelta,
+)
 from pathlib import Path
 from typing import Final
 from openpyxl import load_workbook
@@ -152,6 +155,12 @@ WORKFLOW_TIMESTAMP_FORMAT: Final[str] = (
     "%Y%m%d_%H%M%S"
 )
 
+VALID_SIGNALS = {
+    "buy",
+    "strong buy",
+    "long",
+}
+
 
 # ============================================================
 # TIMEOUT CONSTANTS
@@ -191,6 +200,7 @@ DEFAULT_BROWSER_VIEWPORT_HEIGHT: Final[int] = 1200
 STREAMLIT_SERVER_HEADLESS: Final[bool] = True
 
 
+
 # ============================================================
 # CONFIGURATION MODELS
 # ============================================================
@@ -212,11 +222,10 @@ class WorkflowConfig:
 
     headless: bool = True
 
-    scan_timeout_seconds: int = 12000
+    scan_timeout_seconds: int = 9000
 
     keep_server_running: bool = False
 
-    limit_stocks: int = 25
 
     def __post_init__(
         self,
@@ -248,11 +257,6 @@ class WorkflowConfig:
                 "Port must be between 1 and 65535."
             )
 
-        if self.limit_stocks <= 0:
-
-            raise ValueError(
-                "Stock limit must be greater than zero."
-            )
 
         if self.scan_timeout_seconds <= 0:
 
@@ -327,6 +331,8 @@ class ManagedServer:
     process: subprocess.Popen[str] | None
 
     started_by_workflow: bool
+
+    log_handle: object | None = None
 
 
 # ============================================================
@@ -524,31 +530,37 @@ def build_workflow_paths(
             segment
         )
     )
-
     timestamp_value = (
         timestamp
         if timestamp is not None
         else get_workflow_timestamp()
     )
 
+
+    month_key = datetime.now().strftime(
+        "%Y%m"
+    )
+
+
     return WorkflowPaths(
         results_workbook_path=(
             HISTORY_RESULTS_DIR
-            / (
+            /
+            (
                 f"swing_scanner_"
                 f"{normalized_segment}_"
-                f"history.xlsx"
+                f"history_{month_key}.xlsx"
             )
         ),
         temporary_download_path=(
             TEMPORARY_DOWNLOAD_DIR
-            / (
+            /
+            (
                 f"backtest_{normalized_segment}"
                 f"_{timestamp_value}.csv"
             )
         ),
     )
-
 
 
 # ============================================================
@@ -619,6 +631,9 @@ def start_streamlit_server(
     The Streamlit server always runs in headless server mode.
     This prevents the `--headed` CLI option from affecting
     Streamlit startup.
+
+    Streamlit stdout/stderr are redirected to a log file
+    to prevent subprocess pipe deadlocks during long runs.
     """
 
     if not APP_PATH.exists():
@@ -627,6 +642,7 @@ def start_streamlit_server(
             "Could not find Streamlit scanner app: "
             f"{APP_PATH}"
         )
+
 
     command = [
         sys.executable,
@@ -648,9 +664,11 @@ def start_streamlit_server(
         "false",
     ]
 
+
     logger.info(
         "Starting managed Streamlit scanner."
     )
+
 
     logger.info(
         "Streamlit command: %s",
@@ -659,25 +677,64 @@ def start_streamlit_server(
         ),
     )
 
+
+    streamlit_log_directory = (
+        PROJECT_ROOT
+        /
+        "workflow_debug"
+    )
+
+
+    streamlit_log_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+
+    streamlit_log_file = (
+        streamlit_log_directory
+        /
+        "streamlit_server.log"
+    )
+
+
     try:
+
+        log_handle = open(
+            streamlit_log_file,
+            "a",
+            encoding="utf-8",
+        )
+
 
         process = subprocess.Popen(
             command,
             cwd=str(
                 PROJECT_ROOT
             ),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
         )
+
 
     except OSError as error:
 
         raise RuntimeError(
             "Failed to start Streamlit scanner."
         ) from error
+
+
+    logger.info(
+        "Managed Streamlit scanner started | "
+        "PID=%s | "
+        "Log=%s",
+        process.pid,
+        streamlit_log_file,
+    )
+
 
     return process
 
@@ -825,6 +882,7 @@ def acquire_streamlit_server(
         return ManagedServer(
             process=None,
             started_by_workflow=False,
+            log_handle=None,
         )
 
     process = (
@@ -1012,7 +1070,7 @@ def create_browser(
 
 def create_scanner_page(
     browser: Browser,
-) -> Page:
+):
     """
     Create and configure the scanner browser page.
     """
@@ -1042,7 +1100,7 @@ def create_scanner_page(
         DEFAULT_BROWSER_VIEWPORT_HEIGHT,
     )
 
-    return page
+    return context, page
 
 
 def open_scanner_page(
@@ -2356,150 +2414,40 @@ def get_slider_bounds(
     )
 
 
-def set_stock_limit(
+def set_stock_limit_slider_value(
     page: Page,
     *,
     limit: int,
 ) -> None:
     """
-    Set the maximum number of stocks to scan.
-
-    Keyboard interaction is used because Streamlit sliders can
-    be more reliable with real keyboard events than direct DOM
-    value mutation.
+    Set Streamlit range slider value using JavaScript.
     """
-
-    if limit <= 0:
-
-        raise ValueError(
-            "Stock limit must be greater than zero."
-        )
-
-    logger.info(
-        "Configuring stock limit | Limit=%d",
-        limit,
-    )
 
     slider = get_stock_limit_slider(
         page
     )
 
-    minimum_value, maximum_value = (
-        get_slider_bounds(
-            slider
-        )
+    page.evaluate(
+        """
+        (element, value) => {
+            element.value = value;
+            element.dispatchEvent(
+                new Event(
+                    'input',
+                    {bubbles:true}
+                )
+            );
+            element.dispatchEvent(
+                new Event(
+                    'change',
+                    {bubbles:true}
+                )
+            );
+        }
+        """,
+        slider,
+        str(limit),
     )
-
-    if not (
-        minimum_value
-        <= limit
-        <= maximum_value
-    ):
-
-        raise ValueError(
-            "Requested stock limit is outside the "
-            "supported slider range | "
-            f"Requested={limit} | "
-            f"Min={minimum_value} | "
-            f"Max={maximum_value}"
-        )
-
-    try:
-
-        current_value = int(
-            float(
-                slider.input_value()
-            )
-        )
-
-    except (
-        PlaywrightError,
-        ValueError,
-    ) as error:
-
-        raise RuntimeError(
-            "Could not read the current stock limit."
-        ) from error
-
-    logger.info(
-        "Stock-limit slider state | "
-        "Current=%d | Target=%d | "
-        "Range=%d-%d",
-        current_value,
-        limit,
-        minimum_value,
-        maximum_value,
-    )
-
-    if current_value == limit:
-
-        logger.info(
-            "Requested stock limit is already configured."
-        )
-
-        return
-
-    try:
-
-        slider.scroll_into_view_if_needed(
-            timeout=PAGE_TIMEOUT_MS,
-        )
-
-        slider.focus(
-            timeout=PAGE_TIMEOUT_MS,
-        )
-
-        logger.info(
-            "Setting slider directly | Current=%d | Target=%d",
-            current_value,
-            limit,
-        )
-
-        slider.evaluate(
-            """
-            (element, value) => {
-
-                element.value = value;
-
-                element.dispatchEvent(
-                    new Event(
-                        "input",
-                        { bubbles: true }
-                    )
-                );
-
-                element.dispatchEvent(
-                    new Event(
-                        "change",
-                        { bubbles: true }
-                    )
-                );
-
-            }
-            """,
-            str(limit),
-        )
-
-        page.wait_for_timeout(
-            500
-        )
-
-    except PlaywrightError as error:
-
-        save_debug_screenshot(
-            page,
-            "stock_limit_configuration_failed",
-        )
-
-        raise RuntimeError(
-            "Failed to configure stock limit."
-        ) from error
-
-    wait_for_stock_limit(
-        page,
-        expected_limit=limit,
-    )
-
 
 
 def set_stock_limit_to_maximum(
@@ -2530,7 +2478,7 @@ def set_stock_limit_to_maximum(
         maximum_value,
     )
 
-    set_stock_limit(
+    set_stock_limit_slider_value(
         page,
         limit=maximum_value,
     )
@@ -2805,8 +2753,8 @@ def wait_for_scan_completion(
         ):
 
             logger.info(
-                "Market scan still running | "
-                "Elapsed=%d seconds",
+                "Market scan still running | Status=%s | Elapsed=%d seconds",
+                status,
                 elapsed_seconds,
             )
 
@@ -3518,12 +3466,7 @@ def has_active_signal(
     value: object,
 ) -> bool:
     """
-    Determine whether a Signals today value represents an active
-    signal.
-
-    Empty values and explicit no-signal representations are
-    excluded. Any meaningful remaining value is treated as an
-    active scanner signal.
+    Determine whether scanner output contains a valid trading signal.
     """
 
     normalized = (
@@ -3536,21 +3479,13 @@ def has_active_signal(
 
         return False
 
-    no_signal_values = {
-        "no signal",
-        "no signals",
-        "no",
-        "false",
-        "0",
-        "neutral",
-        "none",
-        "not signalled",
-        "not signaled",
-    }
 
-    return (
-        normalized
-        not in no_signal_values
+    return any(
+        re.search(
+            rf"\b{re.escape(signal)}\b",
+            normalized
+        )
+        for signal in VALID_SIGNALS
     )
 
 
@@ -3619,7 +3554,6 @@ def extract_signalled_stocks(
 # EXCEL WORKBOOK PERSISTENCE
 # ============================================================
 
-
 EXCEL_ENGINE = "openpyxl"
 
 LATEST_SCAN_SHEET_NAME = "Latest_Scan"
@@ -3631,6 +3565,10 @@ SCAN_HISTORY_SHEET_PREFIX = "Scan"
 SIGNAL_HISTORY_SHEET_PREFIX = "Signals"
 
 MAX_EXCEL_SHEET_NAME_LENGTH = 31
+
+HISTORY_WORKBOOK_PREFIX = (
+    "swing_scanner"
+)
 
 
 def build_history_sheet_name(
@@ -3815,7 +3753,7 @@ def create_or_load_results_workbook(
     if workbook_path.exists():
 
         logger.info(
-            "Loading existing Excel history workbook | "
+            "Loading monthly Excel history workbook | "
             "File=%s",
             workbook_path,
         )
@@ -3920,7 +3858,9 @@ def validate_results_workbook(
             f"{workbook_path}"
         )
 
+
     workbook = None
+
 
     try:
 
@@ -3930,6 +3870,7 @@ def validate_results_workbook(
             data_only=False,
         )
 
+
         required_sheets = {
             LATEST_SCAN_SHEET_NAME,
             LATEST_SIGNAL_SHEET_NAME,
@@ -3937,12 +3878,15 @@ def validate_results_workbook(
             signal_history_sheet,
         }
 
+
         missing_sheets = (
             required_sheets
-            - set(
+            -
+            set(
                 workbook.sheetnames
             )
         )
+
 
         if missing_sheets:
 
@@ -3950,6 +3894,7 @@ def validate_results_workbook(
                 "Excel workbook is missing required sheets: "
                 f"{sorted(missing_sheets)}"
             )
+
 
         scan_sheet = workbook[
             scan_history_sheet
@@ -3959,15 +3904,18 @@ def validate_results_workbook(
             signal_history_sheet
         ]
 
+
         actual_scan_rows = max(
             scan_sheet.max_row - 1,
             0,
         )
 
+
         actual_signal_rows = max(
             signal_sheet.max_row - 1,
             0,
         )
+
 
         if actual_scan_rows != expected_scan_rows:
 
@@ -3977,6 +3925,7 @@ def validate_results_workbook(
                 f"Actual={actual_scan_rows}"
             )
 
+
         if actual_signal_rows != expected_signal_rows:
 
             raise RuntimeError(
@@ -3985,6 +3934,7 @@ def validate_results_workbook(
                 f"Actual={actual_signal_rows}"
             )
 
+
     except Exception as error:
 
         raise RuntimeError(
@@ -3992,18 +3942,19 @@ def validate_results_workbook(
             f"{workbook_path}"
         ) from error
 
+
     finally:
 
         if workbook is not None:
 
             workbook.close()
 
+
     logger.info(
         "Excel results workbook validated successfully | "
         "File=%s",
         workbook_path,
     )
-
 
 # ============================================================
 # COMPLETE RESULT PERSISTENCE
@@ -4308,30 +4259,43 @@ def run_scan_workflow(
     Workflow
     --------
     1. Validate configuration.
-    2. Build all workflow paths.
-    3. Acquire or start the Streamlit server.
-    4. Launch Playwright.
-    5. Open the scanner.
-    6. Configure and execute the market scan.
-    7. Download the Backtest Track Record.
-    8. Validate and process downloaded results.
-    9. Persist latest and historical scan/signal results.
-    10. Clean up temporary resources.
-    11. Stop the managed Streamlit server unless configured
-        to keep it running.
+    2. Build workflow paths.
+    3. Acquire Streamlit server.
+    4. Launch Playwright runtime.
+    5. Open scanner.
+    6. Configure and execute scan.
+    7. Download Backtest Track Record.
+    8. Process downloaded results.
+    9. Persist and validate Excel workbook.
+    10. Cleanup runtime resources.
+    11. Stop managed Streamlit server when required.
 
     External Streamlit servers are reused but never stopped.
     """
 
     configure_logging()
 
+
+    run_id = datetime.now().strftime(
+        "%Y%m%d_%H%M%S"
+    )
+
+
     logger.info(
         "=" * 72
     )
 
+
     logger.info(
         "Starting automated Swing Scanner workflow."
     )
+
+
+    logger.info(
+        "Workflow Run ID=%s",
+        run_id,
+    )
+
 
     logger.info(
         "Workflow configuration | "
@@ -4349,23 +4313,32 @@ def run_scan_workflow(
         config.keep_server_running,
     )
 
+
     paths = build_workflow_paths(
         segment=config.segment
     )
 
+
     managed_server: ManagedServer | None = None
 
-    browser: Browser | None = None
-
-    page: Page | None = None
+    playwright_context = None
 
     playwright: Playwright | None = None
 
+    browser: Browser | None = None
+
+    browser_context = None
+
+    page: Page | None = None
+
     workflow_error: Exception | None = None
+
 
     started_at = time.monotonic()
 
+
     try:
+
 
         # ----------------------------------------------------
         # STEP 1: ACQUIRE STREAMLIT SERVER
@@ -4377,11 +4350,14 @@ def run_scan_workflow(
             )
         )
 
+
         logger.info(
             "Streamlit server acquired | "
             "StartedByWorkflow=%s",
             managed_server.started_by_workflow,
         )
+
+
 
         # ----------------------------------------------------
         # STEP 2: START PLAYWRIGHT
@@ -4391,22 +4367,27 @@ def run_scan_workflow(
             "Starting Playwright runtime."
         )
 
+
         playwright_context = (
             sync_playwright()
         )
 
+
         playwright = (
             playwright_context.start()
         )
+
 
         browser = create_browser(
             playwright,
             headless=config.headless,
         )
 
-        page = create_scanner_page(
+
+        browser_context, page = create_scanner_page(
             browser
         )
+
 
         # ----------------------------------------------------
         # STEP 3: OPEN SCANNER
@@ -4417,14 +4398,18 @@ def run_scan_workflow(
             config=config,
         )
 
+
+
         # ----------------------------------------------------
-        # STEP 4: CONFIGURE AND EXECUTE SCAN
+        # STEP 4: EXECUTE MARKET SCAN
         # ----------------------------------------------------
 
         execute_market_scan(
             page,
             config=config,
         )
+
+
 
         # ----------------------------------------------------
         # STEP 5: DOWNLOAD BACKTEST TRACK RECORD
@@ -4439,11 +4424,14 @@ def run_scan_workflow(
             )
         )
 
+
         logger.info(
             "Backtest Track Record downloaded | "
             "File=%s",
             downloaded_file,
         )
+
+
 
         # ----------------------------------------------------
         # STEP 6: PROCESS RESULTS
@@ -4460,8 +4448,33 @@ def run_scan_workflow(
         )
 
 
+
         # ----------------------------------------------------
-        # STEP 7: BUILD FINAL RESULT
+        # STEP 7: VALIDATE EXCEL OUTPUT
+        # ----------------------------------------------------
+
+        validate_results_workbook(
+            workbook_path=(
+                paths.results_workbook_path
+            ),
+            scan_history_sheet=(
+                scan_history_sheet
+            ),
+            signal_history_sheet=(
+                signal_history_sheet
+            ),
+            expected_scan_rows=(
+                len(scan_dataframe)
+            ),
+            expected_signal_rows=(
+                len(signalled_dataframe)
+            ),
+        )
+
+
+
+        # ----------------------------------------------------
+        # STEP 8: BUILD FINAL RESULT
         # ----------------------------------------------------
 
         result = WorkflowResult(
@@ -4483,26 +4496,34 @@ def run_scan_workflow(
             ),
         )
 
+
         elapsed_seconds = (
             time.monotonic()
             - started_at
         )
+
 
         log_workflow_success(
             result,
             elapsed_seconds=elapsed_seconds,
         )
 
+
         return result
+
+
 
     except Exception as error:
 
+
         workflow_error = error
+
 
         elapsed_seconds = (
             time.monotonic()
             - started_at
         )
+
 
         if page is not None:
 
@@ -4516,36 +4537,68 @@ def run_scan_workflow(
             except Exception:
 
                 logger.exception(
-                    "Failed while creating final "
-                    "workflow failure screenshot."
+                    "Failed creating workflow failure screenshot."
                 )
+
 
         logger.exception(
             "Swing Scanner workflow failed | "
+            "RunID=%s | "
             "Elapsed=%.2f seconds | "
             "ErrorType=%s | "
             "Error=%s",
+            run_id,
             elapsed_seconds,
-            type(
-                error
-            ).__name__,
+            type(error).__name__,
             error,
         )
 
+
         raise
+
+
 
     finally:
 
-        # ----------------------------------------------------
-        # CLEANUP TEMPORARY DOWNLOAD
-        # ----------------------------------------------------
-
-        cleanup_temporary_download(
-            paths.temporary_download_path
-        )
 
         # ----------------------------------------------------
-        # CLOSE PLAYWRIGHT BROWSER
+        # CLOSE PAGE
+        # ----------------------------------------------------
+
+        if page is not None:
+
+            try:
+
+                page.close()
+
+            except Exception:
+
+                logger.exception(
+                    "Failed closing Playwright page."
+                )
+
+
+
+        # ----------------------------------------------------
+        # CLOSE BROWSER CONTEXT
+        # ----------------------------------------------------
+
+        if browser_context is not None:
+
+            try:
+
+                browser_context.close()
+
+            except Exception:
+
+                logger.exception(
+                    "Failed closing browser context."
+                )
+
+
+
+        # ----------------------------------------------------
+        # CLOSE BROWSER
         # ----------------------------------------------------
 
         if browser is not None:
@@ -4561,11 +4614,13 @@ def run_scan_workflow(
             except PlaywrightError:
 
                 logger.exception(
-                    "Failed to close Playwright browser."
+                    "Failed closing Playwright browser."
                 )
 
+
+
         # ----------------------------------------------------
-        # STOP PLAYWRIGHT RUNTIME
+        # STOP PLAYWRIGHT
         # ----------------------------------------------------
 
         if playwright is not None:
@@ -4581,8 +4636,28 @@ def run_scan_workflow(
             except PlaywrightError:
 
                 logger.exception(
-                    "Failed to stop Playwright runtime."
+                    "Failed stopping Playwright runtime."
                 )
+
+        # ----------------------------------------------------
+        # CLEANUP TEMPORARY FILE
+        # ----------------------------------------------------
+
+        if workflow_error is None:
+
+            cleanup_temporary_download(
+                paths.temporary_download_path
+            )
+
+        else:
+
+            logger.info(
+                "Preserving temporary download "
+                "because workflow failed | File=%s",
+                paths.temporary_download_path,
+            )
+
+
 
         # ----------------------------------------------------
         # STOP MANAGED STREAMLIT SERVER
@@ -4603,9 +4678,9 @@ def run_scan_workflow(
             except Exception:
 
                 logger.exception(
-                    "Failed to stop managed "
-                    "Streamlit server during cleanup."
+                    "Failed stopping managed Streamlit server."
                 )
+
 
         elif (
             managed_server is not None
@@ -4614,9 +4689,9 @@ def run_scan_workflow(
         ):
 
             logger.info(
-                "Keeping managed Streamlit server running "
-                "because --keep-server-running was specified."
+                "Keeping managed Streamlit server running."
             )
+
 
         elif (
             managed_server is not None
@@ -4624,12 +4699,14 @@ def run_scan_workflow(
         ):
 
             logger.info(
-                "External Streamlit server was reused and "
-                "will not be stopped."
+                "External Streamlit server reused. "
+                "Server will not be stopped."
             )
 
+
+
         # ----------------------------------------------------
-        # FINAL WORKFLOW STATE LOG
+        # FINAL STATE
         # ----------------------------------------------------
 
         if workflow_error is None:
@@ -4721,9 +4798,6 @@ def parse_arguments(
     --segment
         Required scanner market segment.
 
-    --limit
-        Maximum number of stocks to scan.
-
     --timeout
         Maximum time in seconds to wait for scan completion.
 
@@ -4760,15 +4834,6 @@ def parse_arguments(
         ),
     )
 
-    parser.add_argument(
-        "--limit",
-        dest="limit_stocks",
-        type=int,
-        default=25,
-        help=(
-            "Maximum number of stocks to scan."
-        ),
-    )
 
     parser.add_argument(
         "--timeout",
@@ -4834,7 +4899,6 @@ def build_workflow_config_from_arguments(
 
     return WorkflowConfig(
         segment=arguments.segment,
-        limit_stocks=arguments.limit_stocks,
         scan_timeout_seconds=(
             arguments.scan_timeout_seconds
         ),

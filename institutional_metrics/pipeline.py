@@ -58,7 +58,6 @@ class RankingOutputError(
 # RESULT
 # ============================================================
 
-
 @dataclass(
     frozen=True,
     slots=True,
@@ -80,6 +79,10 @@ class InstitutionalPipelineResult:
 
     generated_at: datetime
 
+    eligible_signal_count: int
+
+    eligible_candidate_count: int
+
     ranking_sheet: str = (
         DEFAULT_RANKING_SHEET
     )
@@ -93,11 +96,9 @@ class InstitutionalPipelineResult:
         )
 
 
-
 # ============================================================
 # PIPELINE
 # ============================================================
-
 
 class InstitutionalPipeline:
     """
@@ -210,6 +211,20 @@ class InstitutionalPipeline:
             )
         )
 
+                eligible_signal_count = int(
+            ranking_dataframe[
+                "Signals today"
+            ]
+            .astype(bool)
+            .sum()
+        )
+
+
+        eligible_candidate_count = (
+            recommendation_result
+            .candidate_count
+        )
+
 
         recommendations = (
             recommendation_result.recommendations
@@ -240,8 +255,7 @@ class InstitutionalPipeline:
                         .candidate_count
                     ),
                     eligible_signal_count=(
-                        recommendation_result
-                        .eligible_signal_count
+                        eligible_signal_count
                     ),
                     dry_run=(
                         dry_run
@@ -289,6 +303,14 @@ class InstitutionalPipeline:
             recommendation_fingerprint=fingerprint,
 
             generated_at=generated_at,
+
+            eligible_signal_count=(
+                eligible_signal_count
+            ),
+
+            eligible_candidate_count=(
+                eligible_candidate_count
+            ),
 
             ranking_sheet=self.ranking_sheet,
 

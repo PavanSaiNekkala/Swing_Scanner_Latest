@@ -245,14 +245,22 @@ class TelegramMessageFormatter:
                 )
 
 
-                rank_score = (
+                priority_score = (
+                    self._safe_float(
+                        row.get(
+                            "Institutional Priority Score"
+                        )
+                    )
+                )
+
+
+                conviction_score = (
                     self._safe_float(
                         row.get(
                             "Rank Score"
                         )
                     )
                 )
-
 
                 rating = self._escape(
                     row.get(
@@ -277,16 +285,21 @@ class TelegramMessageFormatter:
 
 
                 lines.append(
-                    f"   Score: "
+                    f"   Priority: "
+                    f"{priority_score:.2f}"
+                )
+
+
+                lines.append(
+                    f"   Quality: "
                     f"{institutional_score:.2f}"
                 )
 
 
                 lines.append(
                     f"   Conviction: "
-                    f"{rank_score:.2f}"
+                    f"{conviction_score:.2f}"
                 )
-
 
                 lines.append(
                     f"   Rating: {rating}"

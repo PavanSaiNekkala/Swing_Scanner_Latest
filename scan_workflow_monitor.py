@@ -2414,6 +2414,7 @@ def get_slider_bounds(
     )
 
 
+
 def set_stock_limit_slider_value(
     page: Page,
     *,
@@ -2427,27 +2428,35 @@ def set_stock_limit_slider_value(
         page
     )
 
-    page.evaluate(
+    slider.evaluate(
         """
         (element, value) => {
+
             element.value = value;
+
             element.dispatchEvent(
                 new Event(
-                    'input',
-                    {bubbles:true}
+                    "input",
+                    {
+                        bubbles: true
+                    }
                 )
             );
+
             element.dispatchEvent(
                 new Event(
-                    'change',
-                    {bubbles:true}
+                    "change",
+                    {
+                        bubbles: true
+                    }
                 )
             );
+
         }
         """,
-        slider,
         str(limit),
     )
+
 
 
 def set_stock_limit_to_maximum(
@@ -2753,8 +2762,7 @@ def wait_for_scan_completion(
         ):
 
             logger.info(
-                "Market scan still running | Status=%s | Elapsed=%d seconds",
-                status,
+                "Market scan still running | Elapsed=%d seconds",
                 elapsed_seconds,
             )
 
@@ -4839,7 +4847,7 @@ def parse_arguments(
         "--timeout",
         dest="scan_timeout_seconds",
         type=int,
-        default=12000,
+        default=9000,
         help=(
             
             "Maximum seconds to wait for scan completion."

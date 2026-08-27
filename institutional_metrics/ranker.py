@@ -45,7 +45,6 @@ class InstitutionalRanker:
         result = dataframe.copy()
 
 
-
         result[
             "Institutional Rank"
         ] = pd.Series(
@@ -59,22 +58,29 @@ class InstitutionalRanker:
         )
 
 
-
-        active_mask = (
-
-            result[
-                "Signals today"
-            ]
-
-            .astype(bool)
-
-        )
-
-
-
-        signals = result.loc[
-            active_mask
-        ].copy()
+        # ----------------------------------------------------
+        # Institutional Priority Score
+        #
+        # Final ranking metric:
+        #
+        # 70% Historical Quality
+        # 30% Current Conviction
+        #
+        # Institutional Score:
+        #   Backtest quality,
+        #   profitability,
+        #   risk,
+        #   robustness
+        #
+        # Rank Score:
+        #   Current opportunity:
+        #   confidence,
+        #   RS,
+        #   stage alignment,
+        #   freshness,
+        #   news
+        #
+        # ----------------------------------------------------
 
         result[
             "Institutional Priority Score"
@@ -94,6 +100,21 @@ class InstitutionalRanker:
             * 0.30
 
         )
+
+
+        active_mask = (
+
+            result[
+                "Signals today"
+            ]
+            .astype(bool)
+
+        )
+
+
+        signals = result.loc[
+            active_mask
+        ].copy()
 
         if signals.empty:
 

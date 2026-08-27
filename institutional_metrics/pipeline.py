@@ -1,20 +1,3 @@
-"""
-Institutional Metrics + Recommendation + Telegram Pipeline.
-
-Pipeline
---------
-History / Institutional Engine
-        ↓
-Institutional Ranking
-        ↓
-Recommendation Engine
-        ↓
-Telegram Notification
-
-The core metrics engine is injected as a dependency so this
-orchestrator does not duplicate existing business logic.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -30,6 +13,7 @@ from .recommendations import (
     RecommendationConfig,
     RecommendationResult,
 )
+
 from .telegram import (
     TelegramNotificationService,
     recommendation_fingerprint,
@@ -56,19 +40,18 @@ DEFAULT_RANKING_SHEET: Final[str] = (
 class InstitutionalPipelineError(
     RuntimeError
 ):
-    """Base institutional pipeline exception."""
+    """
+    Base pipeline exception.
+    """
 
 
 class RankingOutputError(
     InstitutionalPipelineError
 ):
-    """Raised when institutional ranking output is invalid."""
+    """
+    Invalid institutional ranking output.
+    """
 
-
-class DuplicateDeliveryError(
-    InstitutionalPipelineError
-):
-    """Raised when the same recommendation set was already sent."""
 
 
 # ============================================================
@@ -76,10 +59,13 @@ class DuplicateDeliveryError(
 # ============================================================
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(
+    frozen=True,
+    slots=True,
+)
 class InstitutionalPipelineResult:
     """
-    Complete pipeline result.
+    Final institutional recommendation result.
     """
 
     ranking_dataframe: pd.DataFrame
@@ -94,19 +80,18 @@ class InstitutionalPipelineResult:
 
     generated_at: datetime
 
-    ranking_workbook: Path | None = None
-
     ranking_sheet: str = (
         DEFAULT_RANKING_SHEET
     )
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
 
         object.__setattr__(
             self,
             "ranking_dataframe",
             self.ranking_dataframe.copy(),
         )
+
 
 
 # ============================================================
@@ -116,14 +101,22 @@ class InstitutionalPipelineResult:
 
 class InstitutionalPipeline:
     """
-    Production orchestration service.
+    Production institutional orchestration layer.
 
-    The actual Institutional Metrics Engine is supplied through
-    `ranking_builder`.
+    Responsibilities:
 
-    This is intentionally dependency-injected because your
-    existing loader/deduplicator/metrics/scoring/governance/
-    ranker/exporter modules remain the source of truth.
+    - Consume institutional ranking output
+    - Generate recommendations
+    - Send notifications
+
+    Does NOT:
+
+    - Calculate metrics
+    - Calculate scores
+    - Apply governance
+    - Rank stocks
+
+    Those belong to InstitutionalMetricsEngine.
     """
 
     def __init__(
@@ -133,22 +126,20 @@ class InstitutionalPipeline:
             [],
             pd.DataFrame,
         ],
-        recommendation_engine: (
+        recommendation_engine:
             InstitutionalRecommendationEngine
-            | None
-        ) = None,
-        telegram_service: (
+            | None = None,
+        telegram_service:
             TelegramNotificationService
-            | None
-        ) = None,
-        ranking_sheet: str = (
-            DEFAULT_RANKING_SHEET
-        ),
+            | None = None,
+        ranking_sheet: str = DEFAULT_RANKING_SHEET,
     ) -> None:
+
 
         self.ranking_builder = (
             ranking_builder
         )
+
 
         self.recommendation_engine = (
             recommendation_engine
@@ -168,17 +159,22 @@ class InstitutionalPipeline:
             )
         )
 
+
         self.telegram_service = (
             telegram_service
         )
+
 
         self.ranking_sheet = (
             ranking_sheet
         )
 
+
+
     # ========================================================
-    # MAIN EXECUTION
+    # EXECUTION
     # ========================================================
+
 
     def run(
         self,
@@ -187,39 +183,26 @@ class InstitutionalPipeline:
         send_telegram: bool = True,
         generated_at: datetime | None = None,
     ) -> InstitutionalPipelineResult:
-        """
-        Execute the complete recommendation pipeline.
-        """
 
-        started_at = datetime.now()
+
+        started = datetime.now()
+
 
         generated_at = (
             generated_at
-            or started_at
+            or started
         )
+
 
         logger.info(
-            "Starting Institutional Pipeline."
+            "Starting institutional recommendation pipeline."
         )
 
-        # ----------------------------------------------------
-        # STEP 1: BUILD INSTITUTIONAL RANKING
-        # ----------------------------------------------------
 
         ranking_dataframe = (
             self._build_ranking()
         )
 
-        logger.info(
-            "Institutional ranking generated | "
-            "Rows=%d | Columns=%d",
-            len(ranking_dataframe),
-            len(ranking_dataframe.columns),
-        )
-
-        # ----------------------------------------------------
-        # STEP 2: SELECT RECOMMENDATIONS
-        # ----------------------------------------------------
 
         recommendation_result = (
             self.recommendation_engine.select(
@@ -227,20 +210,11 @@ class InstitutionalPipeline:
             )
         )
 
+
         recommendations = (
             recommendation_result.recommendations
         )
 
-        logger.info(
-            "Recommendation stage completed | "
-            "Candidates=%d | Selected=%d",
-            recommendation_result.candidate_count,
-            recommendation_result.selected_count,
-        )
-
-        # ----------------------------------------------------
-        # STEP 3: FINGERPRINT
-        # ----------------------------------------------------
 
         fingerprint = (
             recommendation_fingerprint(
@@ -248,15 +222,13 @@ class InstitutionalPipeline:
             )
         )
 
-        # ----------------------------------------------------
-        # STEP 4: TELEGRAM
-        # ----------------------------------------------------
 
         message = ""
 
-        sent_to_telegram = False
+        sent = False
 
-        if self.telegram_service is not None:
+
+        if self.telegram_service:
 
             message = (
                 self.telegram_service
@@ -278,62 +250,61 @@ class InstitutionalPipeline:
                 )
             )
 
-            sent_to_telegram = (
+
+            sent = (
                 send_telegram
                 and not dry_run
             )
 
-        else:
-
-            logger.info(
-                "Telegram service not configured."
-            )
-
-        # ----------------------------------------------------
-        # STEP 5: COMPLETE
-        # ----------------------------------------------------
 
         elapsed = (
             datetime.now()
-            - started_at
+            - started
         ).total_seconds()
 
+
         logger.info(
-            "Institutional Pipeline completed | "
+            "Institutional pipeline completed | "
             "Selected=%d | "
-            "TelegramSent=%s | "
+            "Telegram=%s | "
             "Elapsed=%.2fs",
             recommendation_result.selected_count,
-            sent_to_telegram,
+            sent,
             elapsed,
         )
 
+
         return InstitutionalPipelineResult(
+
             ranking_dataframe=ranking_dataframe,
+
             recommendation_result=(
                 recommendation_result
             ),
+
             message=message,
-            sent_to_telegram=(
-                sent_to_telegram
-            ),
-            recommendation_fingerprint=(
-                fingerprint
-            ),
+
+            sent_to_telegram=sent,
+
+            recommendation_fingerprint=fingerprint,
+
             generated_at=generated_at,
+
             ranking_sheet=self.ranking_sheet,
+
         )
 
+
+
     # ========================================================
-    # RANKING BUILDER
+    # VALIDATION
     # ========================================================
+
 
     def _build_ranking(
         self,
     ) -> pd.DataFrame:
-        """
-        Execute the existing institutional metrics engine.
-        """
+
 
         try:
 
@@ -341,15 +312,13 @@ class InstitutionalPipeline:
                 self.ranking_builder()
             )
 
-        except Exception as exc:
-
-            logger.exception(
-                "Institutional ranking generation failed."
-            )
+        except Exception as error:
 
             raise RankingOutputError(
-                "Failed to generate Institutional_Ranking."
-            ) from exc
+                "Institutional ranking generation failed."
+            ) from error
+
+
 
         if not isinstance(
             dataframe,
@@ -357,98 +326,87 @@ class InstitutionalPipeline:
         ):
 
             raise RankingOutputError(
-                "ranking_builder must return "
-                "a pandas DataFrame."
+                "Ranking builder must return DataFrame."
             )
+
 
         if dataframe.empty:
 
             raise RankingOutputError(
-                "Institutional_Ranking is empty."
+                "Institutional ranking is empty."
             )
 
+
         required_columns = {
+
             "Stock",
+
             "Signals today",
-            "Institutional Eligible",
-            "Institutional Rank",
+
+            "Rank Score",
+
             "Institutional Score",
-            "Institutional Rating",
+
+            "Institutional Eligible",
+
             "Institutional Decision",
+
         }
+
 
         missing = sorted(
             required_columns
-            - set(
+            -
+            set(
                 dataframe.columns
             )
         )
 
+
         if missing:
 
             raise RankingOutputError(
-                "Institutional_Ranking is missing "
-                f"required columns: {missing}"
+                "Missing institutional columns: "
+                f"{missing}"
             )
+
 
         return dataframe.copy()
 
 
+
 # ============================================================
-# EXCEL RANKING LOADER
+# EXCEL ADAPTER
 # ============================================================
 
 
 class ExcelRankingLoader:
-    """
-    Adapter for consuming an already-generated
-    institutional_metrics.xlsx workbook.
-
-    Useful for the GitHub downstream workflow where the
-    scanner and institutional workbook already exist.
-    """
 
     def __init__(
         self,
         workbook_path: str | Path,
         *,
-        sheet_name: str = (
-            DEFAULT_RANKING_SHEET
-        ),
+        sheet_name: str = DEFAULT_RANKING_SHEET,
     ) -> None:
+
 
         self.workbook_path = Path(
             workbook_path
         )
 
-        self.sheet_name = (
-            sheet_name
-        )
+        self.sheet_name = sheet_name
+
+
 
     def load(self) -> pd.DataFrame:
-        """
-        Load Institutional_Ranking.
-        """
+
 
         if not self.workbook_path.exists():
 
             raise RankingOutputError(
-                "Institutional ranking workbook "
-                f"does not exist: "
-                f"{self.workbook_path}"
+                f"Workbook missing: {self.workbook_path}"
             )
 
-        if (
-            self.workbook_path
-            .suffix
-            .lower()
-            != ".xlsx"
-        ):
-
-            raise RankingOutputError(
-                "Institutional ranking workbook "
-                "must be an .xlsx file."
-            )
 
         try:
 
@@ -458,65 +416,45 @@ class ExcelRankingLoader:
                 engine="openpyxl",
             )
 
-        except ValueError as exc:
+
+        except Exception as error:
 
             raise RankingOutputError(
-                f"Sheet '{self.sheet_name}' was not "
-                f"found in {self.workbook_path}."
-            ) from exc
+                "Unable to read ranking workbook."
+            ) from error
 
-        except Exception as exc:
 
-            raise RankingOutputError(
-                "Failed to read institutional "
-                "ranking workbook."
-            ) from exc
 
         if dataframe.empty:
 
             raise RankingOutputError(
-                f"Sheet '{self.sheet_name}' is empty."
+                "Ranking worksheet is empty."
             )
 
-        logger.info(
-            "Institutional ranking workbook loaded | "
-            "File=%s | "
-            "Sheet=%s | "
-            "Rows=%d | "
-            "Columns=%d",
-            self.workbook_path,
-            self.sheet_name,
-            len(dataframe),
-            len(dataframe.columns),
-        )
 
         return dataframe
 
 
+
 # ============================================================
-# WORKBOOK-BASED PIPELINE FACTORY
+# FACTORY
 # ============================================================
 
 
 def build_workbook_pipeline(
     workbook_path: str | Path,
     *,
-    telegram_service: (
+    telegram_service:
         TelegramNotificationService
-        | None
-    ) = None,
+        | None = None,
     top_n: int = 5,
 ) -> InstitutionalPipeline:
-    """
-    Create a pipeline that consumes the existing
-    Institutional_Ranking workbook.
 
-    This is ideal for GitHub Actions.
-    """
 
     loader = ExcelRankingLoader(
         workbook_path
     )
+
 
     recommendation_engine = (
         InstitutionalRecommendationEngine(
@@ -535,12 +473,15 @@ def build_workbook_pipeline(
         )
     )
 
+
     return InstitutionalPipeline(
+
         ranking_builder=loader.load,
+
         recommendation_engine=(
             recommendation_engine
         ),
-        telegram_service=(
-            telegram_service
-        ),
+
+        telegram_service=telegram_service,
+
     )

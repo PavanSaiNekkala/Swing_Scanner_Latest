@@ -6,7 +6,14 @@ import pandas as pd
 
 class DerivedMetricsCalculator:
     """
-    Calculates deterministic metrics from raw scanner fields.
+    Calculates deterministic institutional metrics
+    from raw scanner fields.
+
+    This module DOES NOT:
+    - rank stocks
+    - apply market-cap weights
+    - calculate final Institutional Score
+    - apply news/stage/RS adjustments
     """
 
     def calculate(
@@ -16,27 +23,18 @@ class DerivedMetricsCalculator:
 
         result = dataframe.copy()
 
+
+        # -----------------------------------------------------
+        # Numeric normalization
+        # -----------------------------------------------------
+
         numeric_columns = [
+
             "Rank",
             "Exp/DAY%",
             "RS%",
             "Trades",
             "Win%",
-            "Target #",
-            "Target %",
-            "Trail #",
-            "Trail %",
-            "Stop #",
-            "Stop %",
-            "Time #",
-            "Time %",
-            "Time-win",
-            "Time-loss",
-            "MomExit #",
-            "MomExit %",
-            "Decay #",
-            "Decay %",
-            "Staircase #",
             "Expectancy%",
             "Avg win%",
             "Avg loss%",
@@ -50,113 +48,294 @@ class DerivedMetricsCalculator:
             "Max consec. losses",
             "Seq. trades",
             "Years",
+
         ]
+
 
         for column in numeric_columns:
 
-            result[column] = pd.to_numeric(
-                result[column],
-                errors="coerce",
-            )
+            if column in result.columns:
+
+                result[column] = pd.to_numeric(
+                    result[column],
+                    errors="coerce",
+                )
+
+
+        # -----------------------------------------------------
+        # Backtest dates
+        # -----------------------------------------------------
 
         result["BT from"] = pd.to_datetime(
             result["BT from"],
             errors="coerce",
         )
 
+
         result["BT to"] = pd.to_datetime(
             result["BT to"],
             errors="coerce",
         )
 
+
+        # -----------------------------------------------------
+        # Basic performance metrics
+        # -----------------------------------------------------
+
         result["Loss %"] = (
             100.0
-            - result["Win%"]
+            -
+            result["Win%"]
         )
 
+
         result["Trade Density"] = (
+
             result["Trades"]
-            / result["Years"].replace(
+
+            /
+
+            result["Years"]
+            .replace(
                 0,
                 np.nan,
             )
+
         )
+
 
         result[
             "Sequential Trade Density"
         ] = (
+
             result["Seq. trades"]
-            / result["Years"].replace(
+
+            /
+
+            result["Years"]
+            .replace(
                 0,
                 np.nan,
             )
+
         )
 
+
+        # -----------------------------------------------------
+        # Expected return
+        # -----------------------------------------------------
+
         win_probability = (
+
             result["Win%"]
-            / 100.0
+
+            /
+
+            100.0
+
         )
+
 
         loss_probability = (
             1.0
-            - win_probability
+            -
+            win_probability
         )
+
 
         result[
             "Expected Return / Trade %"
         ] = (
+
             win_probability
-            * result["Avg win%"]
-            + loss_probability
-            * result["Avg loss%"]
+            *
+            result["Avg win%"]
+
+            +
+
+            loss_probability
+            *
+            result["Avg loss%"]
+
         )
 
-        result["CAGR / Max DD"] = (
+
+        # -----------------------------------------------------
+        # Risk adjusted returns
+        # -----------------------------------------------------
+
+        result[
+            "CAGR / Max DD"
+        ] = (
+
             result["CAGR%"]
-            / result["Max DD%"]
+
+            /
+
+            result["Max DD%"]
             .abs()
             .replace(
                 0,
                 np.nan,
             )
+
         )
 
-        result["Expectancy / Day"] = (
+
+        result[
+            "Expectancy / Day"
+        ] = (
+
             result["Expectancy%"]
-            / result["Avg days"]
+
+            /
+
+            result["Avg days"]
             .replace(
                 0,
                 np.nan,
             )
+
         )
+
 
         result[
             "Expectancy × Profit Factor"
         ] = (
+
             result["Expectancy%"]
-            * result["Profit factor"]
+
+            *
+
+            result["Profit factor"]
+
         )
+
 
         result[
             "Max DD Magnitude %"
-        ] = result["Max DD%"].abs()
+        ] = (
+
+            result["Max DD%"]
+            .abs()
+
+        )
+
+
+        # -----------------------------------------------------
+        # Backtest validity
+        # -----------------------------------------------------
 
         result[
             "Backtest Duration Valid"
-        ] = pd.Series(
-            [
-                bool(value)
-                for value in (
-                    result["BT from"].notna()
-                    & result["BT to"].notna()
-                    & (
-                        result["BT to"]
-                        >= result["BT from"]
-                    )
-                )
-            ],
-            index=result.index,
-            dtype=object,
+        ] = (
+
+            result["BT from"].notna()
+
+            &
+
+            result["BT to"].notna()
+
+            &
+
+            (
+                result["BT to"]
+                >=
+                result["BT from"]
+            )
+
+        ).astype(bool)
+
+
+
+        # -----------------------------------------------------
+        # Confidence Score
+        #
+        # Historical edge quality:
+        #
+        # expectancy
+        # x win probability
+        # x sample size reliability
+        #
+        # scaled 0-100
+        # -----------------------------------------------------
+
+        expectancy_factor = (
+
+            result["Expectancy%"]
+            .clip(
+                lower=0
+            )
+
         )
+
+
+        win_rate_factor = (
+
+            result["Win%"]
+            /
+            100.0
+
+        )
+
+
+        sample_size_factor = (
+
+            result["Trades"]
+
+            /
+
+            (
+                result["Trades"]
+                +
+                100
+            )
+
+        )
+
+
+        result[
+            "Confidence Score"
+        ] = (
+
+            expectancy_factor
+
+            *
+
+            win_rate_factor
+
+            *
+
+            sample_size_factor
+
+            *
+
+            10
+
+        ).clip(
+            upper=100
+        )
+
+
+
+        # -----------------------------------------------------
+        # Confidence components
+        # -----------------------------------------------------
+
+        result[
+            "Confidence - Expectancy Factor"
+        ] = expectancy_factor
+
+
+        result[
+            "Confidence - Win Rate Factor"
+        ] = win_rate_factor
+
+
+        result[
+            "Confidence - Sample Size Factor"
+        ] = sample_size_factor
+
+
 
         return result

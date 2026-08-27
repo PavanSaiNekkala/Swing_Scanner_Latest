@@ -5,21 +5,52 @@ from pathlib import Path
 
 import pandas as pd
 
-from .exceptions import NoSourceDataError
-from .schemas import REQUIRED_COLUMNS
+from .exceptions import (
+    NoSourceDataError,
+)
+
+from .schemas import (
+    REQUIRED_COLUMNS,
+)
 
 
-@dataclass(frozen=True, slots=True)
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
 class LoadedSheet:
+    """
+    Loaded scanner sheet with lineage metadata.
+    """
+
     dataframe: pd.DataFrame
     workbook: Path
     sheet_name: str
 
 
+
+
 class HistoryLoader:
     """
-    Reads Latest Scan sheets from history workbooks.
+    Loads Latest Scan sheets from scanner history workbooks.
+
+    Responsibilities:
+
+    - Discover Excel history files
+    - Locate Latest Scan sheets
+    - Validate required columns
+    - Attach source metadata
+
+    Does NOT:
+
+    - deduplicate stocks
+    - calculate metrics
+    - score securities
+    - rank securities
     """
+
+
 
     def __init__(
         self,
@@ -30,21 +61,47 @@ class HistoryLoader:
             history_directory
         )
 
+
+
+    # =========================================================
+    # Sheet normalization
+    # =========================================================
+
     @staticmethod
     def normalize_sheet_name(
         name: str,
     ) -> str:
 
         return (
-            str(name)
-            .strip()
-            .lower()
-            .replace("_", "")
-            .replace("-", "")
-            .replace(" ", "")
-        )
-        
 
+            str(name)
+
+            .strip()
+
+            .lower()
+
+            .replace(
+                "_",
+                "",
+            )
+
+            .replace(
+                "-",
+                "",
+            )
+
+            .replace(
+                " ",
+                "",
+            )
+
+        )
+
+
+
+    # =========================================================
+    # Workbook discovery
+    # =========================================================
 
     def discover_workbooks(
         self,
@@ -58,103 +115,191 @@ class HistoryLoader:
             )
 
 
-        workbooks = sorted(
-            self.history_directory.glob(
-                "*.xlsx"
-            )
+        workbook = (
+            self.history_directory
+            /
+            "swing_scanner_allnse_history.xlsx"
         )
 
 
-        if not workbooks:
+        if not workbook.exists():
 
             raise NoSourceDataError(
-                "No Excel history workbooks found in: "
-                f"{self.history_directory}"
+                "Required history workbook not found: "
+                f"{workbook}"
             )
 
 
-        return workbooks
+        return [
+            workbook
+        ]
 
 
+
+    # =========================================================
+    # Latest Scan discovery
+    # =========================================================
 
     def find_latest_scan_sheets(
         self,
         workbook: Path,
     ) -> list[str]:
 
-        excel = pd.ExcelFile(
+
+        with pd.ExcelFile(
             workbook
+        ) as excel:
+
+
+            return [
+
+                sheet
+
+                for sheet in excel.sheet_names
+
+                if self.normalize_sheet_name(
+                    sheet
+                )
+                ==
+                "latestscan"
+
+            ]
+
+
+
+    # =========================================================
+    # Schema validation
+    # =========================================================
+
+    @staticmethod
+    def validate_columns(
+        dataframe: pd.DataFrame,
+    ) -> bool:
+
+
+        return all(
+
+            column in dataframe.columns
+
+            for column in REQUIRED_COLUMNS
+
         )
 
-        return [
-            sheet
-            for sheet in excel.sheet_names
-            if self.normalize_sheet_name(
-                sheet
-            )
-            == "latestscan"
-        ]
+
+
+    # =========================================================
+    # Load
+    # =========================================================
 
     def load(
         self,
     ) -> list[LoadedSheet]:
 
+
         loaded: list[LoadedSheet] = []
+
+
 
         for workbook in self.discover_workbooks():
 
-            sheets = (
+
+            latest_sheets = (
+
                 self.find_latest_scan_sheets(
                     workbook
                 )
+
             )
 
-            for sheet in sheets:
+
+
+            for sheet in latest_sheets:
+
 
                 dataframe = pd.read_excel(
+
                     workbook,
+
                     sheet_name=sheet,
+
                 )
 
-                missing = [
-                    column
-                    for column in REQUIRED_COLUMNS
-                    if column not in dataframe.columns
-                ]
 
-                if missing:
+
+                if not self.validate_columns(
+                    dataframe
+                ):
+
                     continue
 
-                dataframe = dataframe[
-                    list(REQUIRED_COLUMNS)
-                ].copy()
+
+
+                dataframe = (
+
+                    dataframe[
+                        list(REQUIRED_COLUMNS)
+                    ]
+
+                    .copy()
+
+                )
+
+
 
                 dataframe[
+
                     "Source Workbook"
+
                 ] = workbook.name
 
+
+
                 dataframe[
+
                     "Source Sheet"
+
                 ] = sheet
 
+
+
                 dataframe[
+
                     "Source Modified"
+
                 ] = pd.Timestamp(
+
                     workbook.stat().st_mtime,
+
                     unit="s",
+
                 )
+
+
 
                 loaded.append(
+
                     LoadedSheet(
+
                         dataframe=dataframe,
+
                         workbook=workbook,
+
                         sheet_name=sheet,
+
                     )
+
                 )
 
+
+
         if not loaded:
+
             raise NoSourceDataError(
+
                 "No valid Latest Scan sheets found."
+
             )
+
+
 
         return loaded

@@ -159,7 +159,6 @@ def telegram_config_from_environment() -> TelegramConfig:
 # MESSAGE FORMATTER
 # ============================================================
 
-
 class TelegramMessageFormatter:
     """
     Formats institutional recommendations into
@@ -220,21 +219,6 @@ class TelegramMessageFormatter:
                 recommendations.iterrows()
             ):
 
-                recommendation_rank = (
-                    self._safe_int(
-                        row.get(
-                            "Recommendation Rank"
-                        )
-                    )
-                )
-
-                stock = self._escape(
-                    row.get(
-                        "Stock",
-                        "UNKNOWN",
-                    )
-                )
-
                 institutional_rank = (
                     self._safe_int(
                         row.get(
@@ -243,11 +227,32 @@ class TelegramMessageFormatter:
                     )
                 )
 
-                score = self._safe_float(
+
+                stock = self._escape(
                     row.get(
-                        "Institutional Score"
+                        "Stock",
+                        "UNKNOWN",
                     )
                 )
+
+
+                institutional_score = (
+                    self._safe_float(
+                        row.get(
+                            "Institutional Score"
+                        )
+                    )
+                )
+
+
+                rank_score = (
+                    self._safe_float(
+                        row.get(
+                            "Rank Score"
+                        )
+                    )
+                )
+
 
                 rating = self._escape(
                     row.get(
@@ -256,6 +261,7 @@ class TelegramMessageFormatter:
                     )
                 )
 
+
                 decision = self._escape(
                     row.get(
                         "Institutional Decision",
@@ -263,34 +269,34 @@ class TelegramMessageFormatter:
                     )
                 )
 
+
                 lines.append(
-                    f"<b>{recommendation_rank}. "
+                    f"<b>#{institutional_rank} "
                     f"{stock}</b>"
                 )
 
-                lines.append(
-                    f"   Rank: #{institutional_rank}"
-                )
 
                 lines.append(
-                    f"   Score: {score:.2f}"
+                    f"   Score: "
+                    f"{institutional_score:.2f}"
                 )
+
+
+                lines.append(
+                    f"   Conviction: "
+                    f"{rank_score:.2f}"
+                )
+
 
                 lines.append(
                     f"   Rating: {rating}"
                 )
 
+
                 lines.append(
                     f"   Decision: {decision}"
                 )
 
-                self._append_optional_metric(
-                    lines,
-                    row,
-                    "Exp/DAY%",
-                    "Exp/Day",
-                    suffix="%",
-                )
 
                 self._append_optional_metric(
                     lines,
@@ -300,6 +306,16 @@ class TelegramMessageFormatter:
                     suffix="%",
                 )
 
+
+                self._append_optional_metric(
+                    lines,
+                    row,
+                    "Exp/DAY%",
+                    "Exp/Day",
+                    suffix="%",
+                )
+
+
                 self._append_optional_metric(
                     lines,
                     row,
@@ -307,6 +323,7 @@ class TelegramMessageFormatter:
                     "CAGR",
                     suffix="%",
                 )
+
 
                 self._append_optional_metric(
                     lines,
@@ -316,19 +333,14 @@ class TelegramMessageFormatter:
                     suffix="%",
                 )
 
-                self._append_optional_metric(
-                    lines,
-                    row,
-                    "Profit factor",
-                    "Profit Factor",
-                )
 
                 self._append_optional_metric(
                     lines,
                     row,
-                    "R:R",
-                    "R:R",
+                    "Profit factor",
+                    "PF",
                 )
+
 
                 lines.append("")
 

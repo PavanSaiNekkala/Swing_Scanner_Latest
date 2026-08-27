@@ -76,6 +76,24 @@ class InstitutionalRanker:
             active_mask
         ].copy()
 
+        signals[
+            "Institutional Priority Score"
+        ] = (
+
+            signals[
+                "Institutional Score"
+            ]
+            * 0.70
+
+            +
+
+            signals[
+                "Rank Score"
+            ]
+            * 3
+            * 0.30
+
+        )
 
 
         if signals.empty:
@@ -90,15 +108,19 @@ class InstitutionalRanker:
 
                 "Institutional Eligible",
 
-                "Rank Score",
+                "Institutional Priority Score",
 
                 "Institutional Score",
+
+                "Rank Score",
 
                 "Stock",
 
             ],
 
             ascending=[
+
+                False,
 
                 False,
 
@@ -113,7 +135,6 @@ class InstitutionalRanker:
             kind="stable",
 
         )
-
 
 
         result.loc[

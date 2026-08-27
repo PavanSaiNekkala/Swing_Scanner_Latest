@@ -1,9 +1,0 @@
-Dividend_Scanner
-NEWS_Daily_Report
-NSE_MARKET_REPORT
-analysis
-downloads
-institutional_metrics
-scripts
-tests
-workflow_debug

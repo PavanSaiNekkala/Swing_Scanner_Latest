@@ -51,3 +51,8 @@ app/cache/*.db-wal
 
 # Scanner runtime files
 .scanner_checkpoint.pkl
+
+# Python packaging
+*.egg-info/
+dist/
+build/

@@ -76,25 +76,24 @@ class InstitutionalRanker:
             active_mask
         ].copy()
 
-        signals[
+        result[
             "Institutional Priority Score"
         ] = (
 
-            signals[
+            result[
                 "Institutional Score"
             ]
             * 0.70
 
             +
 
-            signals[
+            result[
                 "Rank Score"
             ]
             * 3
             * 0.30
 
         )
-
 
         if signals.empty:
 

@@ -222,7 +222,7 @@ class TelegramMessageFormatter:
                 institutional_rank = (
                     self._safe_int(
                         row.get(
-                            "Institutional Rank"
+                            "Recommendation Rank"
                         )
                     )
                 )
@@ -279,7 +279,7 @@ class TelegramMessageFormatter:
 
 
                 lines.append(
-                    f"<b>#{institutional_rank} "
+                    f"<b>#{recommendation_rank} "
                     f"{stock}</b>"
                 )
 
@@ -344,6 +344,13 @@ class TelegramMessageFormatter:
                     "Max DD%",
                     "Max DD",
                     suffix="%",
+                )
+
+                self._append_optional_metric(
+                    lines,
+                    row,
+                    "CAGR / Max DD",
+                    "Return/DD",
                 )
 
 

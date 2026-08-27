@@ -6,14 +6,10 @@ from dataclasses import dataclass
 import logging
 from typing import Final
 
-
 import pandas as pd
 
 
-
 logger = logging.getLogger(__name__)
-
-
 
 
 # ============================================================
@@ -66,7 +62,6 @@ REQUIRED_COLUMNS: Final[tuple[str,...]] = (
 )
 
 
-
 DEFAULT_DECISIONS: Final[frozenset[str]] = frozenset(
     {
         "STRONG_BUY",
@@ -75,15 +70,12 @@ DEFAULT_DECISIONS: Final[frozenset[str]] = frozenset(
 )
 
 
-
 # ============================================================
 # EXCEPTIONS
 # ============================================================
 
-
 class RecommendationError(RuntimeError):
     pass
-
 
 
 class RecommendationSchemaError(
@@ -100,11 +92,9 @@ class NoRecommendationsError(
 
 
 
-
 # ============================================================
 # CONFIG
 # ============================================================
-
 
 @dataclass(
     frozen=True,
@@ -112,24 +102,19 @@ class NoRecommendationsError(
 )
 class RecommendationConfig:
 
-
     top_n: int = 5
-
 
     require_signal: bool = True
 
+    require_eligible: bool = True
 
     allowed_decisions: frozenset[str] = (
         DEFAULT_DECISIONS
     )
 
-
     fail_if_empty: bool = False
 
-
-
     def __post_init__(self):
-
 
         if self.top_n <= 0:
 
@@ -149,22 +134,17 @@ class RecommendationConfig:
 # RESULT
 # ============================================================
 
-
 @dataclass(
     frozen=True,
     slots=True,
 )
 class RecommendationResult:
 
-
     recommendations: pd.DataFrame
-
 
     candidate_count: int
 
-
     selected_count: int
-
 
 
     def __post_init__(self):
@@ -172,21 +152,16 @@ class RecommendationResult:
         object.__setattr__(
 
             self,
-
             "recommendations",
-
             self.recommendations.copy(),
 
         )
 
 
 
-
-
 # ============================================================
 # ENGINE
 # ============================================================
-
 
 class InstitutionalRecommendationEngine:
 
@@ -198,15 +173,10 @@ class InstitutionalRecommendationEngine:
 
 
         self.config = (
-
             config
-
             if config is not None
-
             else RecommendationConfig()
-
         )
-
 
 
 
@@ -216,7 +186,6 @@ class InstitutionalRecommendationEngine:
     ) -> RecommendationResult:
 
 
-
         working = (
             self._validate_dataframe(
                 dataframe
@@ -224,23 +193,15 @@ class InstitutionalRecommendationEngine:
         )
 
 
-
         working = working.copy()
 
 
-
         working[STOCK_COLUMN] = (
-
             working[STOCK_COLUMN]
-
             .astype("string")
-
             .str.strip()
-
             .str.upper()
-
         )
-
 
 
         working[SIGNAL_COLUMN] = (
@@ -254,43 +215,30 @@ class InstitutionalRecommendationEngine:
 
 
         working[ELIGIBLE_COLUMN] = (
-
             self._to_bool(
                 working[ELIGIBLE_COLUMN]
             )
-
         )
-
 
 
         working[RANK_SCORE_COLUMN] = pd.to_numeric(
-
             working[RANK_SCORE_COLUMN],
-
             errors="coerce",
 
         )
-
 
 
         working[SCORE_COLUMN] = pd.to_numeric(
-
             working[SCORE_COLUMN],
-
             errors="coerce",
-
         )
-
 
 
         working[DECISION_COLUMN] = (
 
             working[DECISION_COLUMN]
-
             .astype("string")
-
             .str.strip()
-
             .str.upper()
 
         )
@@ -395,47 +343,31 @@ class InstitutionalRecommendationEngine:
                 by=[
 
                     RANK_SCORE_COLUMN,
-
                     SCORE_COLUMN,
-
                     STOCK_COLUMN,
 
                 ],
 
                 ascending=[
-
                     False,
-
                     False,
-
                     True,
-
                 ],
-
                 kind="stable",
-
             )
-
             .head(
                 self.config.top_n
             )
-
             .copy()
-
         )
 
 
 
         recommendations[
-
             "Recommendation Rank"
-
         ] = range(
-
             1,
-
             len(recommendations)+1,
-
         )
 
 
@@ -446,7 +378,6 @@ class InstitutionalRecommendationEngine:
             "Candidates=%d | Selected=%d",
 
             candidate_count,
-
             len(recommendations),
 
         )
@@ -456,9 +387,7 @@ class InstitutionalRecommendationEngine:
         return RecommendationResult(
 
             recommendations=recommendations,
-
             candidate_count=candidate_count,
-
             selected_count=len(
                 recommendations
             ),
@@ -467,17 +396,14 @@ class InstitutionalRecommendationEngine:
 
 
 
-
     # ========================================================
     # VALIDATION
     # ========================================================
-
 
     @staticmethod
     def _validate_dataframe(
         dataframe: pd.DataFrame,
     ) -> pd.DataFrame:
-
 
 
         if not isinstance(
@@ -494,9 +420,7 @@ class InstitutionalRecommendationEngine:
         missing = [
 
             column
-
             for column in REQUIRED_COLUMNS
-
             if column not in dataframe.columns
 
         ]
@@ -542,42 +466,27 @@ class InstitutionalRecommendationEngine:
         return (
 
             series
-
             .astype("string")
-
             .str.lower()
-
             .isin(
 
                 {
-
                     "true",
-
                     "1",
-
                     "yes",
-
                     "y",
-
                     "signal",
-
                     "signalled",
-
                     "signaled",
-
                 }
-
             )
-
         )
-
 
 
 
 # ============================================================
 # Convenience API
 # ============================================================
-
 
 def select_top_recommendations(
     dataframe: pd.DataFrame,

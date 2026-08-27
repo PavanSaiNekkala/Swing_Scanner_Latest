@@ -56,3 +56,8 @@ app/cache/*.db-wal
 *.egg-info/
 dist/
 build/
+
+
+# Institutional generated outputs
+downloads/institutional_metrics/*.csv
+downloads/institutional_metrics/*.xlsx

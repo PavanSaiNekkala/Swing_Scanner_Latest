@@ -140,7 +140,7 @@ class RecommendationConfig:
 )
 class RecommendationResult:
 
-    dataframe: pd.DataFrame
+    recommendations: pd.DataFrame
 
     selected_count: int
 
@@ -152,13 +152,10 @@ class RecommendationResult:
     def __post_init__(self):
 
         object.__setattr__(
-
             self,
             "recommendations",
             self.recommendations.copy(),
-
         )
-
 
 
 # ============================================================
@@ -327,6 +324,8 @@ class InstitutionalRecommendationEngine:
 
                 selected_count=0,
 
+                eligible_signal_count=0,
+
             )
 
 
@@ -339,15 +338,11 @@ class InstitutionalRecommendationEngine:
         recommendations = (
 
             working
-
             .sort_values(
-
                 by=[
-
                     RANK_SCORE_COLUMN,
                     SCORE_COLUMN,
                     STOCK_COLUMN,
-
                 ],
 
                 ascending=[
@@ -393,7 +388,11 @@ class InstitutionalRecommendationEngine:
             selected_count=len(
                 recommendations
             ),
-
+            eligible_signal_count=int(
+                recommendations[
+                    ELIGIBLE_COLUMN
+                ].sum()
+            ),
         )
 
 

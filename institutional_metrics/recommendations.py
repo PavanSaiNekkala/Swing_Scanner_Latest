@@ -140,11 +140,13 @@ class RecommendationConfig:
 )
 class RecommendationResult:
 
-    recommendations: pd.DataFrame
+    dataframe: pd.DataFrame
+
+    selected_count: int
 
     candidate_count: int
 
-    selected_count: int
+    eligible_signal_count: int
 
 
     def __post_init__(self):

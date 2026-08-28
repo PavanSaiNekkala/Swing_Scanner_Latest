@@ -299,9 +299,7 @@ jobs:
 
           git fetch origin main
 
-
-          git reset --hard origin/main
-
+          git pull --rebase origin main
 
 
           #####################################################################

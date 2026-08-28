@@ -15,6 +15,7 @@ on:
     - cron: "30 1 * * 1-5"
 
 
+
 ###############################################################################
 # Permissions
 ###############################################################################
@@ -22,6 +23,7 @@ on:
 permissions:
 
   contents: write
+
 
 
 ###############################################################################
@@ -34,6 +36,7 @@ concurrency:
   cancel-in-progress: false
 
 
+
 ###############################################################################
 # Job
 ###############################################################################
@@ -43,10 +46,15 @@ jobs:
   scan:
 
     name: Scan - AllNSE
+
     runs-on: ubuntu-latest
+
     timeout-minutes: 150
 
+
+
     steps:
+
 
       #########################################################################
       # Checkout
@@ -94,6 +102,7 @@ jobs:
             ${{ runner.os }}-python-3.12-
             ${{ hashFiles('requirements.txt') }}
 
+
           restore-keys: |
 
             ${{ runner.os }}-python-3.12-
@@ -111,8 +120,11 @@ jobs:
         run: |
 
           set -euo pipefail
+
           python -m pip install --upgrade pip
+
           pip install -r requirements.txt
+
 
 
       #########################################################################
@@ -126,7 +138,9 @@ jobs:
         run: |
 
           set -euo pipefail
+
           python -m playwright install --with-deps chromium
+
 
 
       #########################################################################
@@ -140,14 +154,19 @@ jobs:
         run: |
 
           set -euo pipefail
+
           mkdir -p downloads/history
+
           mkdir -p downloads/latest
+
           mkdir -p downloads/_temporary
+
           mkdir -p workflow_debug
 
 
+
       #########################################################################
-      # Run AllNSE Scanner
+      # Run Scanner
       #########################################################################
 
       - name: Run Swing Scanner - AllNSE
@@ -156,17 +175,25 @@ jobs:
 
           PYTHONUNBUFFERED: "1"
 
+
         shell: bash
+
 
         run: |
 
           set -euo pipefail
 
+
           echo "=========================================="
+
           echo "Starting Swing Scanner"
+
           echo "Segment: AllNSE"
+
           echo "Stock limit: Maximum available"
+
           echo "=========================================="
+
 
           python scan_workflow_monitor.py \
             --segment AllNSE
@@ -174,7 +201,7 @@ jobs:
 
 
       #########################################################################
-      # Verify Excel Results
+      # Verify Excel
       #########################################################################
 
       - name: Verify Excel history workbook
@@ -187,7 +214,9 @@ jobs:
 
           set -euo pipefail
 
+
           ls -lah downloads/history/
+
 
           WORKBOOK_COUNT="$(
             find downloads/history \
@@ -200,6 +229,7 @@ jobs:
 
           echo "Workbook count: ${WORKBOOK_COUNT}"
 
+
           if [ "$WORKBOOK_COUNT" -eq 0 ]; then
 
             echo "ERROR: No Excel history workbook created."
@@ -207,6 +237,7 @@ jobs:
             exit 1
 
           fi
+
 
           echo "Excel verification passed."
 
@@ -226,9 +257,12 @@ jobs:
 
           set -euo pipefail
 
+
           rm -f .scanner_checkpoint.pkl
 
+
           echo "Runtime files cleaned."
+
 
 
       #########################################################################
@@ -245,8 +279,11 @@ jobs:
 
           set -euo pipefail
 
+
           git branch --show-current
+
           git rev-parse HEAD
+
           git status --short
 
 
@@ -276,14 +313,7 @@ jobs:
 
 
           #####################################################################
-          # Remove runtime generated files
-          #####################################################################
-
-          rm -f .scanner_checkpoint.pkl
-
-
-          #####################################################################
-          # Remove temporary workflow artifacts
+          # Remove temporary files
           #####################################################################
 
           find . \
@@ -299,11 +329,13 @@ jobs:
 
           git fetch origin main
 
-          git pull --rebase origin main
+
+          git reset --hard origin/main
+
 
 
           #####################################################################
-          # Stage generated Excel history
+          # Restore generated workbook after reset
           #####################################################################
 
           git add downloads/history/*.xlsx
@@ -311,7 +343,7 @@ jobs:
 
 
           #####################################################################
-          # Commit only if workbook changed
+          # Commit only workbook changes
           #####################################################################
 
           if git diff --cached --quiet; then
@@ -330,10 +362,11 @@ jobs:
 
 
           #####################################################################
-          # Push generated history
+          # Push
           #####################################################################
 
           git push origin HEAD:main
+
 
 
       #########################################################################
@@ -350,11 +383,14 @@ jobs:
 
           name: swing-scanner-AllNSE-${{ github.run_number }}
 
+
           path: |
 
             downloads/history/*.xlsx
 
+
           if-no-files-found: warn
+
 
           retention-days: 30
 
@@ -374,12 +410,15 @@ jobs:
 
           name: workflow-debug-AllNSE-${{ github.run_number }}
 
+
           path: |
 
             workflow_debug/**
 
             downloads/_temporary/**
 
+
           if-no-files-found: ignore
+
 
           retention-days: 14

@@ -89,15 +89,15 @@ class InstitutionalRanker:
             result[
                 "Institutional Score"
             ]
-            * 0.30
+            * 0.50
 
             +
 
             result[
                 "Rank Score"
             ]
-            * 3
-            * 0.70
+            * 4
+            * 0.50
 
         )
 
@@ -346,19 +346,19 @@ class InstitutionalRanker:
         # ----------------------------------------------------
 
 
-        if priority_score >= 75:
+        if priority_score >= 85:
 
             return "STRONG_BUY"
 
 
 
-        if priority_score >= 65:
+        if priority_score >= 75:
 
             return "BUY"
 
 
 
-        if priority_score >= 55:
+        if priority_score >= 65:
 
             return "WATCH"
 

@@ -490,7 +490,6 @@ def ensure_output_directories() -> None:
 # WORKFLOW PATH GENERATION
 # ============================================================
 
-
 def build_workflow_paths(
     *,
     segment: str,
@@ -3473,28 +3472,42 @@ def normalize_signal_value(
 def has_active_signal(
     value: object,
 ) -> bool:
-    """
-    Determine whether scanner output contains a valid trading signal.
-    """
 
-    normalized = (
-        normalize_signal_value(
-            value
-        )
-    )
-
-    if not normalized:
+    if pd.isna(value):
 
         return False
 
 
-    return any(
-        re.search(
-            rf"\b{re.escape(signal)}\b",
-            normalized
-        )
-        for signal in VALID_SIGNALS
+    if isinstance(
+        value,
+        bool,
+    ):
+
+        return value
+
+
+    normalized = (
+        str(value)
+        .strip()
+        .casefold()
     )
+
+
+    if normalized in {
+        "true",
+        "1",
+        "yes",
+        "y",
+        "buy",
+        "strong buy",
+        "long",
+        "signal",
+    }:
+
+        return True
+
+
+    return False
 
 
 # ============================================================

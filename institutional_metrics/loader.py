@@ -115,23 +115,34 @@ class HistoryLoader:
             )
 
 
-        workbook = (
-            self.history_directory
-            /
-            "swing_scanner_allnse_history.xlsx"
+        workbooks = sorted(
+
+            self.history_directory.glob(
+
+                "swing_scanner_allnse_history_*.xlsx"
+
+            ),
+
+            key=lambda path: path.stat().st_mtime,
+
+            reverse=True,
+
         )
 
 
-        if not workbook.exists():
+        if not workbooks:
 
             raise NoSourceDataError(
-                "Required history workbook not found: "
-                f"{workbook}"
+
+                "No AllNSE history workbook found."
+
             )
 
 
         return [
-            workbook
+
+            workbooks[0]
+
         ]
 
 

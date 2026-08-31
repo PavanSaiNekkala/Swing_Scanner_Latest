@@ -318,11 +318,6 @@ jobs:
           # Remove runtime generated files
           #####################################################################
 
-          rm -f .scanner_checkpoint.pkl
-
-          rm -f .universe_cache.json
-
-
           find . \
             -name "*.tmp.xlsx" \
             -delete \
@@ -331,21 +326,14 @@ jobs:
 
 
           #####################################################################
-          # Synchronize with latest main BEFORE commit
-          #####################################################################
-
-          git fetch origin main
-
-
-          git reset --hard origin/main
-
-
-
-          #####################################################################
           # Stage generated Excel history
           #####################################################################
 
-          git add downloads/history/*.xlsx
+          find downloads/history \
+            -maxdepth 1 \
+            -name "*.xlsx" \
+            -print0 \
+            | xargs -0 git add
 
 
 

@@ -32,7 +32,8 @@ permissions:
 
 concurrency:
 
-  group: swing-scanner-allnse
+  group: repository-write-operations
+
   cancel-in-progress: false
 
 
@@ -260,6 +261,8 @@ jobs:
 
           rm -f .scanner_checkpoint.pkl
 
+          rm -f .universe_cache.json
+
 
           echo "Runtime files cleaned."
 
@@ -287,7 +290,6 @@ jobs:
           git status --short
 
 
-
       #########################################################################
       # Commit Excel History
       #########################################################################
@@ -313,8 +315,13 @@ jobs:
 
 
           #####################################################################
-          # Remove temporary files
+          # Remove runtime generated files
           #####################################################################
+
+          rm -f .scanner_checkpoint.pkl
+
+          rm -f .universe_cache.json
+
 
           find . \
             -name "*.tmp.xlsx" \
@@ -323,9 +330,20 @@ jobs:
 
 
 
-          #########################################################################
+          #####################################################################
+          # Synchronize with latest main BEFORE commit
+          #####################################################################
+
+          git fetch origin main
+
+
+          git reset --hard origin/main
+
+
+
+          #####################################################################
           # Stage generated Excel history
-          #########################################################################
+          #####################################################################
 
           git add downloads/history/*.xlsx
 

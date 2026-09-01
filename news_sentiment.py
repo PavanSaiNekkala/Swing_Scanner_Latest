@@ -90,9 +90,21 @@ _POSITIVE = {
     # Expansion / momentum
     r"\bexpansion\b": 1, r"\bnew (plant|facility|capacity|hub)\b": 2,
     r"\blaunch(es|ed)?\b": 1,
-    r"\b(all.?time|52.?week|record|life.?time) high\b": 2,
-    r"\bhits? upper circuit\b": 3, r"\bsurge[sd]?\b": 2, r"\bralli(es|ed)\b": 1,
-    r"\bmulti[- ]?bagger\b": 2,
+    # v4 (Aug-2026 EVIDENCE-DRIVEN): "hits X-high" / "surges" / "rallies" are
+    # RETROSPECTIVE — the move ALREADY happened before the headline was written.
+    # Weekly Nifty-500 test showed PVRINOX at news_score 0.599 (dominated by
+    # "rallies … hits 52-week high") delivered −2.73%. Weighting these as
+    # BULLISH LEADING was wrong. Now they carry a small NEGATIVE weight
+    # (priced-in tax) unless paired with genuinely forward-looking language.
+    r"\b(all.?time|52.?week|record|life.?time)\s+high\b": -1,
+    r"\bshares?\s+(soar|soars|surge|surges|jump|jumps|rally|rallies)\s+\d+": -2,
+    r"\bstock\s+(soars|surges|jumps|rallies|rockets)\b": -1,
+    r"\brallies?\s+\d+\s*%": -1,
+    r"\bup\s+\d+\s*%\s+(today|this\s+week|ytd|so\s+far)\b": -1,
+    r"\bhits? upper circuit\b": 3,   # KEEP positive — imminent momentum lock-up, not retrospective
+    r"\bsurge[sd]?\b": 0,            # neutralised (was +2) — needs pairing with a specific reason
+    r"\bralli(es|ed)\b": 0,          # neutralised (was +1) — same reason
+    r"\bmulti[- ]?bagger\b": 1,      # softened (was +2) — usually said AFTER the move
     # Legal wins
     r"\b(court|judge) (clears?|dismisses?|drops?|acquits?)\b": 3,
     r"\bcharges? (dismissed?|dropped?|cleared?)\b": 4,

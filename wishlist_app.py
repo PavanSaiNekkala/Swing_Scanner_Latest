@@ -1,33 +1,33 @@
 """
-wishlist_app.py — SCANNER PREDICTION TRACKER
-============================================
-The "did-my-prediction-actually-work?" module.
+wishlist_app.py — WISHLIST TRACKER v2  (Aug-2026 rewrite)
+=========================================================
+Reads the Excel workbook that the daily scanner auto-populates
+(`wishlist.xlsx`, three sheets) and produces per-sheet analysis outputs
+that are:
+  * displayed in Streamlit tabs
+  * persisted to `wishlist_observations.xlsx` (three matching sheets)
 
-The scanner suggests a stock might reach +15% in N days. This app:
-  1. Reads that prediction from wishlist.csv
-  2. Fetches today's price
-  3. Compares actual behaviour to the prediction
-  4. Assigns a verdict:
-       ✅ TARGET_HIT / AHEAD_OF_PACE / ON_TRACK
-       ⚠️  BEHIND_PACE / REVERSED
-       🛑 STOP_HIT / EXPIRED
-  5. APPENDS today's observation to wishlist_observations.csv (never overwrites)
+Sheet 1 — signaled_today
+  - Was the buy-limit hit within the fill window? (fill-rate check)
+  - Current PnL / peak PnL, targeting the algorithm's stated objective
+  - Did the stock reach its expected days-to-target on schedule?
+  - Aggregate: does higher rank_score correlate with higher realised PnL?
 
-Over 3-6 months of daily runs, you accumulate a track record that lets you
-answer the questions no scanner can answer on Day 1:
-  - What % of my scanner's predictions actually hit their target?
-  - Is it more accurate on Nifty 100 vs smallcaps?
-  - Are 12-day predictions more accurate than 30-day predictions?
-  - Do BREAKOUT signals work better than REVERSAL signals?
+Sheet 2 — positive_news (no signal, but news_score ≥ 0.15)
+  - Assumes market-at-open buy the NEXT trading session after obs date
+  - Tracks working-day PnL evolution
+  - Verdict buckets: WORKING / STALLED / FAILED
 
-USAGE
------
-    streamlit run wishlist_app.py
-Or in the trading suite: Mode → 🔮 Wishlist Tracker
+Sheet 3 — top_movers (user manual entry)
+  - % change on the observation date
+  - Was the ticker in the signalled sheet that day? in positive-news sheet?
+  - If in NEITHER, why the algorithm missed it (best-effort reason lookup)
+
+All elapsed timings are counted in WORKING DAYS (numpy.busday_count).
+The observations workbook is refreshed on every run — no CSV drift.
 """
 import os
 import io
-import re as _re
 import time
 import importlib.util
 import datetime as dt
@@ -40,1481 +40,812 @@ try:
 except Exception:
     yf = None
 
-
-# ======================================================================================
-#  ENGINE & OPTIONAL HELPERS
-# ======================================================================================
+# ---------------- Shared engine + store ----------------
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ENGINE_PATH = os.path.join(_HERE, "swing_screener_app.py")
 _spec = importlib.util.spec_from_file_location("engine", _ENGINE_PATH)
 engine = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(engine)
 
-# Reuse monitor's helpers where possible (encoding-tolerant loader, live-price
-# fetcher, projection helpers) — one source of truth, no drift.
-_MON_PATH = os.path.join(_HERE, "monitor_app.py")
-_mspec = importlib.util.spec_from_file_location("_wl_monitor", _MON_PATH)
-_monitor = importlib.util.module_from_spec(_mspec)
-_mspec.loader.exec_module(_monitor)
-
-try:
-    from news_sentiment import fetch_news_score as _news_score
-    HAVE_NEWS = True
-except Exception:
-    HAVE_NEWS = False
-
-try:
-    from universe_loader import load_full_universe as _ul_load
-    HAVE_UNIVERSE = True
-except Exception:
-    HAVE_UNIVERSE = False
+import wishlist_store as store
+from wishlist_store import (
+    WISHLIST_XLSX, OBS_XLSX,
+    SHEET_SIGNALED, SHEET_NEWS, SHEET_MOVERS,
+    working_days_between, add_working_days, initialize_workbook,
+)
 
 
-WISHLIST_CSV = os.path.join(_HERE, "wishlist.csv")
-OBS_LOG_CSV  = os.path.join(_HERE, "wishlist_observations.csv")
-POSITIONS_CSV = os.path.join(_HERE, "positions.csv")   # for promote-to-positions
-
-
-# ======================================================================================
-#  CSV LOADER (mirrors monitor's tolerance)
-# ======================================================================================
-REQUIRED_COLS = ("ticker", "signal_date")     # Only these two are truly required
-OPTIONAL_COLS = ("signal_price", "buy_limit", "target_price",
-                 "expected_days", "expected_days_thin",
-                 "expected_confidence", "stop_price",
-                 "news_score_at_signal",
-                 "category", "strategy", "regime_at_signal", "trade_type",
-                 "priority", "sector", "notes")
-
-# SEBI's OFFICIAL market-cap classification (3-way, exhaustive):
-#   LargeCap = top 100 stocks by market cap (Nifty 100)
-#   MidCap   = ranks 101-250        (Nifty Midcap 150)
-#   SmallCap = ranks 251 and beyond (everything else, ~2121 stocks)
-# Every NSE-listed EQ/BE stock lands in exactly ONE of these three.
-CATEGORY_PRIORITY = ("LargeCap", "MidCap", "SmallCap")
-
-# Column aliases — normalise the many variants users paste from the scanner
-COLUMN_ALIASES = {
-    "last close":            "signal_price",
-    "last_close":            "signal_price",
-    "signal_price":          "signal_price",
-    "signal price":          "signal_price",
-    "buy limit ?":           "buy_limit",     # ₹ corrupted to ?
-    "buy limit ₹":           "buy_limit",
-    "buy_limit":             "buy_limit",
-    "buy limit":             "buy_limit",
-    "buy price":             "buy_limit",
-    "target_price":          "target_price",
-    "target price":          "target_price",
-    "objective ₹":           "target_price",
-    "objective":             "target_price",
-    "stop_price":            "stop_price",
-    "stop price":            "stop_price",
-    "stop ₹":                "stop_price",
-    "stop":                  "stop_price",
-    "news score":            "news_score_at_signal",
-    "news_score":            "news_score_at_signal",
-    "news_score_at_signal":  "news_score_at_signal",
-    "news":                  "news_score_at_signal",
-    "conf":                  "expected_confidence",
-    "conf(/day)":            "expected_confidence",
-    "conf/day":              "expected_confidence",
-    "confidence":            "expected_confidence",
-    "expected_confidence":   "expected_confidence",
-    "rank":                  "expected_confidence",
-    "expected_days":         "expected_days",
-    "exp. days→objective":   "expected_days",
-    "exp days":              "expected_days",
-    "days_to_target":        "expected_days",
-    "ticker":                "ticker",
-    "stock":                 "ticker",
-    "symbol":                "ticker",
-    "signal_date":           "signal_date",
-    "signal date":           "signal_date",
-    "category":              "category",
-    "strategy":              "strategy",
-    "regime_at_signal":      "regime_at_signal",
-    "regime":                "regime_at_signal",
-    "trade_type":            "trade_type",
-    "signal":                "trade_type",
-    "priority":              "priority",
-    "sector":                "sector",
-    "notes":                 "notes",
-    "remark":                "notes",
-    "remarks":               "notes",
-}
-
-
-def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename columns using COLUMN_ALIASES so downstream code sees canonical names."""
-    lower_map = {c: c.strip().lower() for c in df.columns}
-    rename = {c: COLUMN_ALIASES.get(lower_map[c], c) for c in df.columns}
-    return df.rename(columns=rename)
-
-
-def _parse_expected_days(v) -> tuple:
-    """Parse strings like '14d', '2d ? thin', '11d ? thin' into (int, thin_flag).
-    Returns (None, False) if parsing fails."""
-    if pd.isna(v) or str(v).strip() in ("", "nan", "None"):
-        return None, False
-    s = str(v).strip().lower()
-    thin = "thin" in s or "?" in s
-    m = _re.search(r"(\d+)", s)
-    if m:
-        return int(m.group(1)), thin
-    return None, False
-
-
-def _is_news_only(row: pd.Series) -> bool:
-    """A row is news-only when it has no price data (signal_price + target_price both missing)."""
-    sp = row.get("signal_price"); tp = row.get("target_price")
-    sp_missing = pd.isna(sp) or sp in (0, None, "")
-    tp_missing = pd.isna(tp) or tp in (0, None, "")
-    return sp_missing and tp_missing
-
-_TICKER_ALLOWED = _re.compile(r"[^A-Z0-9&\-]")
-
-def _clean_ticker(raw: str) -> str:
-    if not isinstance(raw, str): return ""
-    return _TICKER_ALLOWED.sub("", raw.strip().upper())
-
-def _parse_flex_date(v):
-    if pd.isna(v) or str(v).strip() in ("", "nan", "None"):
-        return None
-    s = str(v).strip()
-    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d"):
-        try: return dt.datetime.strptime(s, fmt).date()
-        except ValueError: continue
-    try: return pd.to_datetime(s, dayfirst=True, errors="coerce").date()
-    except Exception: return None
-
-
-def load_wishlist(path: str = WISHLIST_CSV) -> tuple:
-    """Robust loader: handles column aliases, string expected_days ('14d ? thin'),
-    news-only rows (no price data), and duplicate rows."""
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=list(REQUIRED_COLS) + list(OPTIONAL_COLS)), \
-               [f"File not found: {path}"]
-
-    df = None
-    for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
-        try:
-            df = pd.read_csv(path, comment="#", skip_blank_lines=True, encoding=enc)
-            break
-        except Exception:
-            continue
-    if df is None:
-        try:
-            with open(path, "rb") as f: raw = f.read()
-            df = pd.read_csv(io.StringIO(raw.decode("utf-8", errors="replace")),
-                              comment="#", skip_blank_lines=True)
-        except Exception as e:
-            return pd.DataFrame(), [f"Read error: {e}"]
-
-    # Normalise column names via aliases
-    df = _normalize_columns(df)
-
-    errors = []
-    for c in REQUIRED_COLS:
-        if c not in df.columns:
-            errors.append(f"Missing required column: {c}")
-    if errors:
-        return pd.DataFrame(), errors
-    for c in OPTIONAL_COLS:
-        if c not in df.columns:
-            df[c] = np.nan
-
-    # Sanitize tickers
-    orig_tk = df["ticker"].astype(str).copy()
-    df["ticker"] = orig_tk.apply(_clean_ticker)
-    cleaned = {o: n for o, n in zip(orig_tk, df["ticker"]) if o.strip() != n and n}
-    if cleaned:
-        errors.append("Cleaned ticker(s): " +
-                       ", ".join(f"'{o.strip()}' → '{n}'" for o, n in list(cleaned.items())[:5])
-                       + (" ..." if len(cleaned) > 5 else ""))
-    df = df[df["ticker"].str.len() > 0]
-    df = df[~df["ticker"].str.contains("EXAMPLE", na=False)]
-    if df.empty:
-        return df, ["No real wishlist items — edit wishlist.csv and re-run."]
-
-    # Coerce numerics (expected_days handled specially below — it's a string like '14d')
-    for c in ("signal_price", "buy_limit", "target_price", "stop_price",
-              "expected_confidence", "news_score_at_signal"):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    # Parse expected_days from strings like "14d", "2d ? thin"
-    days_parsed = df["expected_days"].apply(_parse_expected_days)
-    df["expected_days"]      = days_parsed.apply(lambda x: x[0])
-    df["expected_days_thin"] = days_parsed.apply(lambda x: x[1])
-    df["expected_days"] = pd.to_numeric(df["expected_days"], errors="coerce")
-
-    df["signal_date"] = df["signal_date"].apply(_parse_flex_date)
-    for c in ("category", "strategy", "regime_at_signal", "trade_type",
-              "priority", "sector", "notes"):
-        df[c] = df[c].fillna("").astype(str).str.strip()
-
-    # Detect news-only rows and flag them explicitly
-    df["is_news_only"] = df.apply(_is_news_only, axis=1)
-
-    # Row-level validation:
-    #   Every row needs: ticker + signal_date
-    #   TA rows also need: signal_price + target_price
-    #   News-only rows need: news_score_at_signal (non-zero, meaningful)
-    bad_mask = df["signal_date"].isna() | (df["ticker"].str.len() == 0)
-    # For TA rows, price data must be present
-    ta_missing = (~df["is_news_only"]) & (
-        df["signal_price"].isna() | df["target_price"].isna()
-    )
-    # For news-only rows, at least a news_score must be present
-    news_missing = df["is_news_only"] & df["news_score_at_signal"].isna()
-    bad_mask = bad_mask | ta_missing | news_missing
-
-    bad = df[bad_mask]
-    if not bad.empty:
-        errors.append(f"⚠️ {len(bad)} row(s) dropped for missing required fields: "
-                      f"{list(bad['ticker'])[:10]}"
-                      + (" ..." if len(bad) > 10 else ""))
-    df = df[~bad_mask].reset_index(drop=True)
-
-    # DEDUPLICATE on (ticker, signal_date) — keep first occurrence
-    n_before = len(df)
-    df = df.drop_duplicates(subset=["ticker", "signal_date"], keep="first").reset_index(drop=True)
-    n_dupes = n_before - len(df)
-    if n_dupes:
-        errors.append(f"ℹ️ Removed {n_dupes} duplicate row(s) (same ticker + signal_date).")
-
-    # Informational flags
-    n_news_only     = int(df["is_news_only"].sum())
-    n_ta            = int((~df["is_news_only"]).sum())
-    n_missing_stop  = int(df.loc[~df["is_news_only"], "stop_price"].isna().sum())
-    n_missing_days  = int(df.loc[~df["is_news_only"], "expected_days"].isna().sum())
-    n_thin          = int(df["expected_days_thin"].fillna(False).sum())
-    n_missing_sector = int((df["sector"].str.strip() == "").sum())
-
-    errors.append(f"📊 Loaded **{len(df)}** row(s): {n_ta} technical · {n_news_only} news-only.")
-    if n_missing_stop:
-        errors.append(f"ℹ️ {n_missing_stop} TA row(s) have no stop_price — auto-derive from ATR at signal_date.")
-    if n_missing_days:
-        errors.append(f"ℹ️ {n_missing_days} TA row(s) have no expected_days — auto-derive from historical median.")
-    if n_thin:
-        errors.append(f"⚠️ {n_thin} row(s) flagged 'thin' (limited historical sample) — treat their day estimates with caution.")
-    if n_missing_sector:
-        errors.append(f"ℹ️ {n_missing_sector} row(s) have no sector — auto-fill from NSE map.")
-    return df, errors
-
-
-# ======================================================================================
-#  DATA HELPERS
-# ======================================================================================
-def _to_yahoo(sym: str) -> str:
-    s = str(sym).strip().upper()
-    return s if s.endswith((".NS", ".BO")) else s + ".NS"
-
-
-@st.cache_data(ttl=30 * 60, show_spinner=False)
-def _fetch_full_history(ticker_yahoo: str, start_year: int = 2015) -> pd.DataFrame:
-    """Full daily OHLCV history from `start_year` to today. Used for both
-    historical (at signal_date) and current TA snapshots."""
-    if yf is None: return pd.DataFrame()
+# ============================================================================
+#  PRICE FETCHER  (unadjusted current + auto-adjusted history for TA)
+# ============================================================================
+@st.cache_data(ttl=15 * 60, show_spinner=False)
+def _fetch_history(ticker_yahoo: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+    if yf is None:
+        return pd.DataFrame()
     try:
-        df = yf.Ticker(ticker_yahoo).history(
-            start=f"{start_year}-01-01",
-            end=(dt.date.today() + dt.timedelta(days=1)),
-            interval="1d", auto_adjust=True)
+        df = yf.Ticker(ticker_yahoo).history(start=start, end=end,
+                                              interval="1d", auto_adjust=True)
     except Exception:
         return pd.DataFrame()
-    if df is None or df.empty: return pd.DataFrame()
+    if df is None or df.empty:
+        return pd.DataFrame()
     df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
     df.index = pd.to_datetime(df.index).tz_localize(None)
     return df.dropna()
 
 
-def _bar_on_or_before(df: pd.DataFrame, target_date: dt.date):
-    """Return the row of df on `target_date`, or the nearest preceding trading
-    bar. Returns None if none exists."""
-    if df is None or df.empty: return None
-    ts = pd.Timestamp(target_date)
-    subset = df.loc[df.index <= ts]
-    return subset.iloc[-1] if not subset.empty else None
+def _to_yahoo(sym: str) -> str:
+    s = str(sym).strip().upper()
+    return s if s.endswith((".NS", ".BO")) else s + ".NS"
 
 
-# ======================================================================================
-#  DERIVE MISSING FIELDS FROM DATA AT SIGNAL DATE
-# ======================================================================================
-def _derive_stop_from_signal_date(df: pd.DataFrame, signal_date: dt.date,
-                                    signal_price: float, atr_mult: float = 2.0,
-                                    max_pct: float = 10.0) -> tuple:
-    """Compute stop-loss using ATR at signal_date (not today).
-    Returns (stop, method_str). Never returns None."""
-    df_at = df.loc[df.index <= pd.Timestamp(signal_date)]
-    if df_at.empty or len(df_at) < 30:
-        return round(signal_price * (1 - max_pct / 100), 2), \
-               f"{max_pct:.0f}% flat (insufficient signal-date history)"
-    df_ind = engine.compute_indicators(df_at)
-    if df_ind.empty:
-        return round(signal_price * (1 - max_pct / 100), 2), f"{max_pct:.0f}% flat"
-    atr_pct_at_signal = float(df_ind.iloc[-1].get("atr_pct", np.nan))
-    if not np.isfinite(atr_pct_at_signal) or atr_pct_at_signal <= 0:
-        return round(signal_price * (1 - max_pct / 100), 2), \
-               f"{max_pct:.0f}% flat (ATR unavailable at signal date)"
-    atr_abs = signal_price * atr_pct_at_signal / 100
-    stop = signal_price - atr_mult * atr_abs
-    floor = signal_price * (1 - max_pct / 100)
-    stop = max(stop, floor)
-    return round(stop, 2), \
-        (f"2×ATR at signal date ({atr_pct_at_signal:.1f}% ATR → "
-         f"{atr_mult*atr_pct_at_signal:.1f}% risk), capped at {max_pct:.0f}%")
+def _safe_date(v):
+    if v is None or (isinstance(v, float) and not np.isfinite(v)):
+        return None
+    try:
+        return pd.to_datetime(v).date()
+    except Exception:
+        return None
 
 
-def _derive_category(ticker: str, universe_buckets: dict) -> str:
-    """SEBI's OFFICIAL 3-way market-cap classification — every NSE-listed
-    stock lands in exactly ONE of LargeCap / MidCap / SmallCap.
+# ============================================================================
+#  ANALYSIS 1 — SIGNALED_TODAY
+# ============================================================================
+def analyze_signaled(sig_df: pd.DataFrame, obs_run_date: dt.date) -> pd.DataFrame:
+    """One row per (observation_date, ticker) — with per-day evolution
+    computed from that entry's signal_date forward using the LATEST price
+    available at analysis time."""
+    if sig_df.empty:
+        return pd.DataFrame(columns=[
+            "observation_date", "ticker", "signal_date",
+            "working_days_elapsed", "working_days_remaining",
+            "buy_limit", "was_limit_hit", "entry_actual_price", "entry_actual_date",
+            "signal_price", "current_price", "peak_price_since_signal",
+            "current_pnl_pct", "peak_pnl_pct",
+            "target_price", "distance_to_target_pct",
+            "stop_price", "distance_to_stop_pct",
+            "expected_days_to_target",
+            "rank_score", "category", "sector", "status_at_signal",
+            "verdict", "note",
+        ])
 
-    Rules (checked in order):
-      1. LargeCap  — in Nifty 100 (top 100 by market cap)
-      2. MidCap    — in Nifty Midcap 150 (ranks 101-250)
-      3. SmallCap  — everything else (SEBI: ranks 251+ = ALL are small caps)
-                     Includes both the curated Nifty Smallcap 250 AND the
-                     ~1,871 microcap-territory stocks beyond Nifty 500.
-      4. Unknown   — not in any NSE bucket (delisted / renamed / typo)
-    """
-    if not universe_buckets: return "Unknown"
-
-    # Tier 1: LargeCap (top 100)
-    if ticker in universe_buckets.get("LargeCap", []):
-        return "LargeCap"
-    # Tier 2: MidCap (ranks 101-250)
-    if ticker in universe_buckets.get("MidCap", []):
-        return "MidCap"
-    # Tier 3: SmallCap — SEBI's definition = everything else that trades
-    #   Includes: Nifty Smallcap 250 (curated top 250 smallcaps) + all
-    #   microcap-tier stocks beyond Nifty 500. If it's in AllNSE at all,
-    #   it counts as a small cap per SEBI.
-    if ticker in universe_buckets.get("AllNSE", []):
-        return "SmallCap"
-    return "Unknown"
-
-
-def _derive_regime_at_signal(bench_hist: pd.DataFrame, signal_date: dt.date) -> str:
-    """Compute what market regime was in effect on signal_date, using only
-    benchmark bars <= signal_date (no look-ahead). Same convention as
-    monitor_app._regime_from_bench.
-    Returns: 'RISK-ON' / 'NEUTRAL' / 'RISK-OFF' / 'UNKNOWN'."""
-    if bench_hist is None or bench_hist.empty:
-        return "UNKNOWN"
-    sub = bench_hist.loc[bench_hist.index <= pd.Timestamp(signal_date)]
-    if len(sub) < 210:
-        return "UNKNOWN"
-    c = sub["Close"]
-    s200 = float(c.rolling(200).mean().iloc[-1])
-    last = float(c.iloc[-1])
-    above = last > s200
-    roc10 = (c.iloc[-1] / c.iloc[-11] - 1) * 100 if len(c) > 11 else 0.0
-    if above and roc10 > -1.0: return "RISK-ON"
-    if above or roc10 > -3.0:  return "NEUTRAL"
-    return "RISK-OFF"
-
-
-@st.cache_data(ttl=30 * 60, show_spinner=False)
-def _fetch_bench_history(bench_ticker: str = "^CRSLDX") -> pd.DataFrame:
-    """Bench history for regime lookup — cached separately from stock history."""
-    if yf is None: return pd.DataFrame()
-    for tick in (bench_ticker, "^NSEI"):
-        try:
-            df = yf.Ticker(tick).history(start="2015-01-01",
-                                          end=dt.date.today() + dt.timedelta(days=1),
-                                          interval="1d", auto_adjust=True)
-            if df is not None and not df.empty:
-                df = df[["Open", "High", "Low", "Close"]].copy()
-                df.index = pd.to_datetime(df.index).tz_localize(None)
-                return df.dropna()
-        except Exception:
+    out_rows = []
+    prog = st.progress(0.0)
+    total = len(sig_df)
+    for i, (_, r) in enumerate(sig_df.iterrows()):
+        prog.progress((i + 1) / total)
+        ticker      = str(r["ticker"]).upper()
+        sig_date    = _safe_date(r["signal_date"])
+        obs_date    = _safe_date(r["observation_date"])
+        if sig_date is None or obs_date is None:
             continue
-    return pd.DataFrame()
-
-
-def _derive_expected_days(df: pd.DataFrame, signal_date: dt.date,
-                           target_pct: float) -> int:
-    """Use historical median days-to-target on THIS stock as-of signal_date.
-    Falls back to 15 sessions."""
-    df_at = df.loc[df.index <= pd.Timestamp(signal_date)]
-    if len(df_at) < 100:
-        return 15
-    df_ind = engine.compute_indicators(df_at)
-    hist = _monitor._historical_target_stats(df_ind, target_pct=target_pct,
-                                              window_days=30, lookback=500)
-    if hist and hist.get("med_days"):
-        return int(hist["med_days"])
-    return 15
-
-
-# ======================================================================================
-#  VERDICT ENGINE
-# ======================================================================================
-def _news_only_verdict(orig_news_score: float, current_news_score: float,
-                        price_at_signal: float, current_price: float,
-                        days_elapsed: int) -> dict:
-    """Verdict engine for news-only rows (no price target, only sentiment).
-
-    Two dimensions:
-      A. NEWS EVOLUTION — has sentiment shifted since signal date?
-      B. PRICE DRIFT — did the market actually move in the news direction?
-
-    Verdicts:
-      NEWS_CONFIRMED    — market moved in same direction as news signal (+ for pos, - for neg)
-      NEWS_STALLED      — market flat; news didn't catalyze
-      NEWS_FAILED       — market moved OPPOSITE to news signal (contrarian)
-      NEWS_FADED        — original signal strong but current news score has weakened
-      NEWS_INTENSIFIED  — original signal strong and current news even stronger
-      NEWS_NEUTRAL      — original signal wasn't strong enough to track
-    """
-    if price_at_signal and price_at_signal > 0:
-        drift_pct = (current_price / price_at_signal - 1) * 100
-    else:
-        drift_pct = 0
-
-    # Categorize original signal strength
-    positive = orig_news_score >= 0.15
-    negative = orig_news_score <= -0.15
-
-    if not (positive or negative):
-        return {"status": "NEWS_NEUTRAL", "label": "ℹ️ NEWS_NEUTRAL",
-                "on_track_pct": 50, "drift_pct": drift_pct,
-                "note": (f"Original news score {orig_news_score:+.2f} "
-                         f"below tracking threshold (±0.15).")}
-
-    # Positive news signal
-    if positive:
-        if drift_pct > 3:
-            status, label = "NEWS_CONFIRMED", "✅ NEWS_CONFIRMED"
-            note = (f"Positive news ({orig_news_score:+.2f}) confirmed — "
-                    f"price up {drift_pct:+.1f}% since signal.")
-            on_track = 90
-        elif drift_pct > -1:
-            status, label = "NEWS_STALLED", "🟡 NEWS_STALLED"
-            note = (f"Positive news ({orig_news_score:+.2f}) but price flat "
-                    f"({drift_pct:+.1f}%) — market didn't buy the story.")
-            on_track = 40
-        else:
-            status, label = "NEWS_FAILED", "🔴 NEWS_FAILED"
-            note = (f"Positive news ({orig_news_score:+.2f}) FAILED — "
-                    f"price fell {drift_pct:+.1f}% despite the headline.")
-            on_track = 5
-    else:  # negative news
-        if drift_pct < -3:
-            status, label = "NEWS_CONFIRMED", "✅ NEWS_CONFIRMED"
-            note = (f"Negative news ({orig_news_score:+.2f}) confirmed — "
-                    f"price down {drift_pct:+.1f}% since signal.")
-            on_track = 90
-        elif drift_pct < 1:
-            status, label = "NEWS_STALLED", "🟡 NEWS_STALLED"
-            note = (f"Negative news ({orig_news_score:+.2f}) but price flat "
-                    f"({drift_pct:+.1f}%) — market ignored it.")
-            on_track = 40
-        else:
-            status, label = "NEWS_FAILED", "🔴 NEWS_FAILED"
-            note = (f"Negative news ({orig_news_score:+.2f}) FAILED — "
-                    f"price ROSE {drift_pct:+.1f}% despite the headline.")
-            on_track = 5
-
-    # Overlay: has current news score weakened / intensified?
-    news_delta = current_news_score - orig_news_score
-    if abs(news_delta) > 0.2:
-        if (positive and news_delta < -0.2) or (negative and news_delta > 0.2):
-            note += (f" · NEWS_FADED (score moved from {orig_news_score:+.2f} "
-                     f"to {current_news_score:+.2f})")
-        elif (positive and news_delta > 0.2) or (negative and news_delta < -0.2):
-            note += (f" · NEWS_INTENSIFIED (score moved from {orig_news_score:+.2f} "
-                     f"to {current_news_score:+.2f})")
-
-    return {"status": status, "label": label,
-            "on_track_pct": on_track, "drift_pct": drift_pct,
-            "note": note}
-
-
-def _verdict(signal_price: float, target_price: float, current_price: float,
-              stop_price: float, expected_days: int, days_elapsed: int,
-              ta_now: dict) -> dict:
-    """Compute the verdict for one wishlist observation.
-    Returns {status, label, on_track_pct, note}.
-    Status is one of:
-      TARGET_HIT / STOP_HIT / EXPIRED
-      AHEAD_OF_PACE / ON_TRACK / BEHIND_PACE / REVERSED
-    """
-    # Absolute terminal conditions first
-    if current_price >= target_price:
-        return {"status": "TARGET_HIT", "label": "✅ TARGET_HIT",
-                "on_track_pct": 100,
-                "note": (f"Target ₹{target_price:.2f} reached — "
-                         f"prediction correct in {days_elapsed}d "
-                         f"(expected {expected_days}d).")}
-    if current_price <= stop_price:
-        return {"status": "STOP_HIT", "label": "🛑 STOP_HIT",
-                "on_track_pct": 0,
-                "note": (f"Stop ₹{stop_price:.2f} hit — signal invalidated. "
-                         f"Would have lost {100*(stop_price/signal_price-1):+.1f}%.")}
-
-    # Time budget check (allow 50% overrun before EXPIRED)
-    if days_elapsed > expected_days * 1.5:
-        return {"status": "EXPIRED", "label": "⏰ EXPIRED",
-                "on_track_pct": 0,
-                "note": (f"Beyond {expected_days}d expected duration "
-                         f"({days_elapsed}d elapsed). No target hit — "
-                         f"consider dropping from wishlist.")}
-
-    # Pace analysis
-    total_move = target_price - signal_price
-    if total_move <= 0:
-        return {"status": "REVERSED", "label": "⚠️ INVALID_TARGET",
-                "on_track_pct": 0,
-                "note": "Target is at or below signal price — check the CSV row."}
-
-    elapsed_frac = min(1.0, max(0.01, days_elapsed / max(1, expected_days)))
-    expected_price_by_now = signal_price + total_move * elapsed_frac
-    actual_move = current_price - signal_price
-    expected_move = expected_price_by_now - signal_price
-    move_ratio = actual_move / max(expected_move, 0.001)
-    progress_pct = 100 * actual_move / total_move       # 0..100 (or negative)
-
-    if actual_move < 0:
-        status = "REVERSED"
-        label = "⚠️ REVERSED"
-        note = (f"Down {100*actual_move/signal_price:+.1f}% from signal — "
-                f"signal weakening. TA: RSI {ta_now.get('rsi14', np.nan):.0f} · "
-                f"MACD {'+' if ta_now.get('macd_hist', 0) > 0 else '-'}.")
-    elif move_ratio >= 1.15:
-        status = "AHEAD_OF_PACE"
-        label = "🚀 AHEAD_OF_PACE"
-        note = (f"{progress_pct:.0f}% done in {100*elapsed_frac:.0f}% of expected time — "
-                f"prediction beating schedule.")
-    elif move_ratio >= 0.85:
-        status = "ON_TRACK"
-        label = "✅ ON_TRACK"
-        note = (f"{progress_pct:.0f}% done in {100*elapsed_frac:.0f}% of expected time — "
-                f"matching schedule closely.")
-    else:
-        status = "BEHIND_PACE"
-        label = "⚠️ BEHIND_PACE"
-        note = (f"Only {progress_pct:.0f}% done in {100*elapsed_frac:.0f}% of expected "
-                f"time — slower than predicted. Watch for signal fade.")
-    return {"status": status, "label": label,
-            "on_track_pct": round(min(100, max(0, progress_pct)), 1),
-            "note": note}
-
-
-# ======================================================================================
-#  OBSERVATION LOG (append-only, never overwrites)
-# ======================================================================================
-OBS_FIELDS = ("observation_date", "ticker",
-              # segmentation metadata — for downstream analytics
-              "category", "sector", "strategy",
-              "regime_at_signal", "trade_type", "priority",
-              # time & price
-              "signal_date", "days_elapsed", "expected_days", "days_remaining",
-              "signal_price", "current_price", "peak_price_since_signal",
-              "current_return_pct", "peak_return_pct",
-              "expected_return_pct_by_now", "deviation_pct",
-              # verdict + supporting data
-              "verdict", "on_track_pct",
-              "rsi14", "macd_hist", "adx14", "news_score", "note")
-
-
-def _load_observation_log(path: str = OBS_LOG_CSV) -> pd.DataFrame:
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=list(OBS_FIELDS))
-    for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+        buy_limit   = float(r["buy_limit"])    if pd.notna(r.get("buy_limit"))    else np.nan
+        target_p    = float(r["target_price"]) if pd.notna(r.get("target_price")) else np.nan
+        stop_p      = float(r["stop_price"])   if pd.notna(r.get("stop_price"))   else np.nan
+        signal_p    = float(r["signal_price"]) if pd.notna(r.get("signal_price")) else np.nan
+        exp_days_s  = str(r.get("expected_days_to_target", "") or "")
+        # Extract leading digits from strings like "10d" or "8d ⚠ thin"
         try:
-            return pd.read_csv(path, encoding=enc)
+            exp_days = int("".join(ch for ch in exp_days_s if ch.isdigit()) or "0")
         except Exception:
+            exp_days = 0
+
+        # Fetch history from signal date to today
+        ty = _to_yahoo(ticker)
+        hist = _fetch_history(ty, sig_date - dt.timedelta(days=3),
+                              obs_run_date + dt.timedelta(days=2))
+        if hist.empty:
+            out_rows.append(_row_signal_no_data(r, obs_run_date, sig_date))
             continue
-    return pd.DataFrame(columns=list(OBS_FIELDS))
+        # Post-signal path only (strict > sig_date). Signal-day bar itself is
+        # the ENTRY-INTENT bar; fills happen next session onwards.
+        post = hist[hist.index.date > sig_date]
+
+        # ---------- LIMIT-FILL DETECTION ----------
+        was_hit, fill_price, fill_date = _check_limit_fill(post, buy_limit,
+                                                          fill_days=int(r.get("limit_pct", 1) or 1) or 1,
+                                                          r_entry_mode=str(r.get("entry_mode", "Market open")))
+        if was_hit is None:
+            was_hit_lbl = "Pending"
+        elif was_hit:
+            was_hit_lbl = "Yes"
+        else:
+            was_hit_lbl = "No"
+
+        # ---------- v4 (Aug-2026): NEXT-SESSION AUDIT ----------
+        # Snapshot the FIRST post-signal session's OHLC so the user can see
+        # exactly how the stock opened vs the buy_limit. Answers "did we lose
+        # the stock even though it rose?" — if open > limit AND intraday_low
+        # > limit, the limit never had a chance to fill; if the stock kept
+        # rising after, opportunity_cost_pct quantifies the forfeited move.
+        next_open = next_high = next_low = next_close = np.nan
+        open_gap_pct = intraday_low_gap_pct = opportunity_cost_pct = np.nan
+        if not post.empty:
+            _p0 = post.iloc[0]
+            next_open  = float(_p0["Open"])
+            next_high  = float(_p0["High"])
+            next_low   = float(_p0["Low"])
+            next_close = float(_p0["Close"])
+            if pd.notna(buy_limit) and buy_limit > 0:
+                open_gap_pct         = (next_open / buy_limit - 1) * 100
+                intraday_low_gap_pct = (next_low  / buy_limit - 1) * 100
+                opportunity_cost_pct = ((curr_price if False else float(post["Close"].iloc[-1]))
+                                        / buy_limit - 1) * 100
+
+        # ---------- CURRENT / PEAK ----------
+        curr_price = float(post["Close"].iloc[-1]) if not post.empty else float(hist["Close"].iloc[-1])
+        peak_price = float(post["High"].max())     if not post.empty else np.nan
+        # Now that curr_price is finalised, refresh opportunity_cost using it
+        if not post.empty and pd.notna(buy_limit) and buy_limit > 0 and np.isfinite(curr_price):
+            opportunity_cost_pct = (curr_price / buy_limit - 1) * 100
+
+        # ---------- EFFECTIVE ENTRY  (v3 — user rule: always monitor) ----------
+        # If Limit was hit → use actual fill price. If Limit was NOT hit → per
+        # user rule "consider market price as buy price and monitor the stock":
+        # fall back to the first post-signal open. Market entries always use
+        # the first post-signal open.
+        entry_source = "market"
+        if pd.notna(fill_price):
+            entry_effective = fill_price
+            entry_source = "limit_hit"
+        elif not post.empty:
+            entry_effective = float(post["Open"].iloc[0])
+            fill_date = fill_date or post.index[0].date()   # for display
+            if str(r.get("entry_mode", "Market open")) == "Limit" and was_hit is False:
+                entry_source = "market_fallback"   # limit skipped, monitoring anyway
+        else:
+            entry_effective = signal_p
+            entry_source = "signal_close"
+
+        curr_pnl_pct = (curr_price / entry_effective - 1) * 100 if entry_effective else np.nan
+        peak_pnl_pct = (peak_price / entry_effective - 1) * 100 if (entry_effective and pd.notna(peak_price)) else np.nan
+        dist_target_pct = (target_p / curr_price - 1) * 100 if (curr_price and pd.notna(target_p)) else np.nan
+        dist_stop_pct   = (stop_p   / curr_price - 1) * 100 if (curr_price and pd.notna(stop_p))   else np.nan
+
+        # ---------- WORKING-DAYS ELAPSED / REMAINING ----------
+        wd_elapsed = working_days_between(sig_date, obs_run_date)
+        wd_remain  = max(0, int(exp_days) - int(wd_elapsed))
+
+        # ---------- VERDICT ----------
+        verdict, note = _verdict_signaled(
+            curr_price=curr_price, peak_price=peak_price,
+            entry_effective=entry_effective,
+            target_price=target_p, stop_price=stop_p,
+            wd_elapsed=wd_elapsed, exp_days=exp_days,
+            was_hit=was_hit, entry_mode=str(r.get("entry_mode", "Market open")),
+            entry_source=entry_source,
+        )
+        if entry_source == "market_fallback":
+            # v4 (Aug-2026): explicit "why the limit missed" prefix so the
+            # user can see whether the stock gapped above and never returned,
+            # and how much of the move was forfeited.
+            _open_txt = (f"opened at ₹{next_open:.2f} "
+                         f"({open_gap_pct:+.1f}% vs limit ₹{buy_limit:.2f})"
+                         if pd.notna(next_open) and pd.notna(buy_limit) else "")
+            _low_txt  = (f", intraday low ₹{next_low:.2f} "
+                         f"({intraday_low_gap_pct:+.1f}% vs limit)"
+                         if pd.notna(next_low) and pd.notna(intraday_low_gap_pct)
+                         else "")
+            _opp_txt  = (f", opportunity-cost {opportunity_cost_pct:+.1f}% "
+                         f"(current ₹{curr_price:.2f} vs limit)"
+                         if pd.notna(opportunity_cost_pct) else "")
+            note = (f"[Limit NEVER filled — {_open_txt}{_low_txt}{_opp_txt}. "
+                    f"Monitoring at market fallback.] ") + note
+            # Escalate verdict when the limit was missed but the stock is up
+            # meaningfully: user's exact scenario ("stock rising but we lost it").
+            if (pd.notna(opportunity_cost_pct) and opportunity_cost_pct >= 2.0
+                    and verdict in ("ON_TRACK", "AHEAD_OF_PACE", "BEHIND_PACE")):
+                verdict = "MISSED_LIMIT_STOCK_ROSE"
+
+        out_rows.append({
+            "observation_date":     obs_run_date,
+            "ticker":               ticker,
+            "signal_date":          sig_date,
+            "working_days_elapsed": int(wd_elapsed),
+            "working_days_remaining": int(wd_remain),
+            "buy_limit":            round(buy_limit, 2) if pd.notna(buy_limit) else None,
+            "was_limit_hit":        was_hit_lbl,
+            "entry_actual_price":   round(fill_price, 2) if pd.notna(fill_price) else None,
+            "entry_actual_date":    fill_date,
+            # v4 (Aug-2026) — next-session executability audit
+            "next_session_open":       round(next_open,  2) if pd.notna(next_open)  else None,
+            "next_session_high":       round(next_high,  2) if pd.notna(next_high)  else None,
+            "next_session_low":        round(next_low,   2) if pd.notna(next_low)   else None,
+            "next_session_close":      round(next_close, 2) if pd.notna(next_close) else None,
+            "open_gap_vs_limit_pct":   round(open_gap_pct, 2)         if pd.notna(open_gap_pct)         else None,
+            "intraday_low_vs_limit_pct": round(intraday_low_gap_pct, 2) if pd.notna(intraday_low_gap_pct) else None,
+            "opportunity_cost_pct":    round(opportunity_cost_pct, 2) if pd.notna(opportunity_cost_pct) else None,
+            "signal_price":         round(signal_p, 2) if pd.notna(signal_p) else None,
+            "current_price":        round(curr_price, 2) if pd.notna(curr_price) else None,
+            "peak_price_since_signal": round(peak_price, 2) if pd.notna(peak_price) else None,
+            "current_pnl_pct":      round(curr_pnl_pct, 2) if pd.notna(curr_pnl_pct) else None,
+            "peak_pnl_pct":         round(peak_pnl_pct, 2) if pd.notna(peak_pnl_pct) else None,
+            "target_price":         round(target_p, 2) if pd.notna(target_p) else None,
+            "distance_to_target_pct": round(dist_target_pct, 2) if pd.notna(dist_target_pct) else None,
+            "stop_price":           round(stop_p, 2) if pd.notna(stop_p) else None,
+            "distance_to_stop_pct": round(dist_stop_pct, 2) if pd.notna(dist_stop_pct) else None,
+            "expected_days_to_target": int(exp_days) if exp_days else None,
+            "rank_score":           float(r.get("rank_score")) if pd.notna(r.get("rank_score")) else None,
+            "category":             r.get("category"),
+            "sector":               r.get("sector"),
+            "status_at_signal":     r.get("status"),
+            "verdict":              verdict,
+            "note":                 note,
+        })
+    prog.empty()
+    return pd.DataFrame(out_rows)
 
 
-def _append_observation(row: dict, path: str = OBS_LOG_CSV) -> None:
-    """Append one row to the observation log. Creates header if new file."""
-    file_exists = os.path.exists(path)
-    df_row = pd.DataFrame([{k: row.get(k, "") for k in OBS_FIELDS}])
-    df_row.to_csv(path, mode="a", header=not file_exists, index=False,
-                   encoding="utf-8")
-
-
-def _dedupe_today(obs_df: pd.DataFrame, ticker: str, today: dt.date) -> pd.DataFrame:
-    """Return obs_df with any existing row for (ticker, today) removed —
-    prevents duplicate rows if the user runs the app twice in one day."""
-    if obs_df.empty: return obs_df
-    obs_df = obs_df.copy()
-    obs_df["observation_date"] = pd.to_datetime(obs_df["observation_date"],
-                                                  errors="coerce").dt.date
-    mask = (obs_df["ticker"] == ticker) & (obs_df["observation_date"] == today)
-    return obs_df[~mask]
-
-
-def _rewrite_observation_log(df: pd.DataFrame, path: str = OBS_LOG_CSV) -> None:
-    df.to_csv(path, index=False, encoding="utf-8")
-
-
-# ======================================================================================
-#  PER-STOCK ANALYSIS
-# ======================================================================================
-def analyze_wishlist_item(row: pd.Series, sector_map: dict,
-                            universe_buckets: dict = None,
-                            bench_history: pd.DataFrame = None,
-                            use_news: bool = True) -> dict:
-    """Full analysis for one wishlist item. Fetches history, derives missing
-    fields (category, regime, sector, stop, expected_days), computes
-    current state + verdict. Handles BOTH technical rows and news-only rows."""
-    ticker = str(row["ticker"]).upper()
-    ty = _to_yahoo(ticker)
-    signal_date = row["signal_date"]
-
-    is_news_only = bool(row.get("is_news_only", False))
-    signal_price = float(row["signal_price"]) if pd.notna(row.get("signal_price")) else None
-    target_price = float(row["target_price"]) if pd.notna(row.get("target_price")) else None
-    buy_limit    = float(row["buy_limit"])    if pd.notna(row.get("buy_limit"))    else None
-    news_score_at_signal = (float(row["news_score_at_signal"])
-                              if pd.notna(row.get("news_score_at_signal")) else 0.0)
-
-    result = {
-        "ticker": ticker, "yahoo": ty,
-        "signal_date": signal_date, "signal_price": signal_price,
-        "target_price": target_price,
-        "buy_limit": buy_limit,
-        "news_score_at_signal": news_score_at_signal,
-        "is_news_only": is_news_only,
-        "expected_days_thin": bool(row.get("expected_days_thin", False)),
-        "stop_price": row.get("stop_price"),
-        "expected_days": row.get("expected_days"),
-        "expected_confidence": row.get("expected_confidence"),
-        "category": (row.get("category") or "").strip(),
-        "strategy": (row.get("strategy") or "").strip(),
-        "regime_at_signal": (row.get("regime_at_signal") or "").strip(),
-        "trade_type": (row.get("trade_type") or "").strip(),
-        "priority": (row.get("priority") or "").strip(),
-        "sector": (row.get("sector") or "").strip(),
-        "notes": row.get("notes", ""),
+def _row_signal_no_data(r, obs_run_date, sig_date):
+    return {
+        "observation_date":     obs_run_date,
+        "ticker":               str(r["ticker"]).upper(),
+        "signal_date":          sig_date,
+        "working_days_elapsed": working_days_between(sig_date, obs_run_date),
+        "working_days_remaining": None,
+        "buy_limit":            None,
+        "was_limit_hit":        "no data",
+        "entry_actual_price":   None,
+        "entry_actual_date":    None,
+        "next_session_open":    None,
+        "next_session_high":    None,
+        "next_session_low":     None,
+        "next_session_close":   None,
+        "open_gap_vs_limit_pct": None,
+        "intraday_low_vs_limit_pct": None,
+        "opportunity_cost_pct": None,
+        "signal_price":         None,
+        "current_price":        None,
+        "peak_price_since_signal": None,
+        "current_pnl_pct":      None,
+        "peak_pnl_pct":         None,
+        "target_price":         None,
+        "distance_to_target_pct": None,
+        "stop_price":           None,
+        "distance_to_stop_pct": None,
+        "expected_days_to_target": None,
+        "rank_score":           None,
+        "category":             r.get("category"),
+        "sector":               r.get("sector"),
+        "status_at_signal":     r.get("status"),
+        "verdict":              "NO_DATA",
+        "note":                 "yfinance history unavailable",
     }
 
-    # ---- Auto-derive category from universe buckets ----
-    if not result["category"] and universe_buckets:
-        result["category"] = _derive_category(ticker, universe_buckets)
-        result["category_source"] = "auto (NSE bucket)"
-    elif not result["category"]:
-        result["category"] = "Unknown"
-        result["category_source"] = "unknown"
-    else:
-        result["category_source"] = "user"
 
-    # ---- Auto-derive regime at signal date ----
-    if not result["regime_at_signal"]:
-        if bench_history is not None and not bench_history.empty:
-            result["regime_at_signal"] = _derive_regime_at_signal(
-                bench_history, signal_date)
-            result["regime_source"] = "auto (bench at signal_date)"
+def _check_limit_fill(post_df: pd.DataFrame, buy_limit: float,
+                      fill_days: int = 1, r_entry_mode: str = "Market open"):
+    """Return (was_hit, fill_price, fill_date).
+    was_hit: True/False/None (None if we can't tell — insufficient forward data)
+    For Market-open trades, "was_hit" is trivially True; entry is next-day open.
+    """
+    if r_entry_mode != "Limit" or (buy_limit is None) or not np.isfinite(buy_limit):
+        # Market entry — first post-signal open IS the fill
+        if post_df.empty:
+            return None, np.nan, None
+        return True, float(post_df["Open"].iloc[0]), post_df.index[0].date()
+    # Limit entry: walk forward up to fill_days sessions
+    fill_days = max(1, int(fill_days))
+    window = post_df.head(fill_days)
+    if window.empty:
+        return None, np.nan, None
+    for ts, row in window.iterrows():
+        if row["Open"] <= buy_limit:
+            return True, float(row["Open"]), ts.date()   # gap fill at open
+        if row["Low"] <= buy_limit:
+            return True, float(buy_limit), ts.date()     # touched limit intraday
+    # Window fully elapsed without a fill
+    return False, np.nan, None
+
+
+def _verdict_signaled(curr_price, peak_price, entry_effective,
+                      target_price, stop_price,
+                      wd_elapsed, exp_days,
+                      was_hit, entry_mode, entry_source="market"):
+    """Categorize the current outcome vs the algorithm's plan.
+    v3 (Aug-2026): NOT_FILLED no longer short-circuits — we monitor via
+    market-price fallback per user rule 4.i.iv."""
+    if entry_effective is None or not np.isfinite(entry_effective):
+        return "NO_DATA", "Missing entry price."
+    # Absolute terminal
+    if pd.notna(target_price) and curr_price >= target_price:
+        return "TARGET_HIT", f"Reached target ₹{target_price:.2f}."
+    if pd.notna(stop_price) and curr_price <= stop_price:
+        return "STOP_HIT", f"Stop ₹{stop_price:.2f} triggered."
+    # Time-based
+    curr_pnl = (curr_price / entry_effective - 1) * 100
+    total_move = ((target_price / entry_effective - 1) * 100) if pd.notna(target_price) else 15.0
+    if exp_days and wd_elapsed > exp_days * 1.5:
+        return "EXPIRED", (f"Held {wd_elapsed}w-days > 1.5× expected ({exp_days}w-days) "
+                           f"without hitting target. Current PnL {curr_pnl:+.2f}%.")
+    # Pace
+    if total_move <= 0:
+        return "INVALID_PLAN", "Target ≤ effective entry — check row."
+    elapsed_frac = min(1.0, max(0.05, (wd_elapsed / max(1, exp_days)) if exp_days else 0.5))
+    expected_pnl_by_now = total_move * elapsed_frac
+    if curr_pnl < 0:
+        return "REVERSED", (f"Down {curr_pnl:+.2f}% from effective entry "
+                            f"({wd_elapsed}w-days elapsed of {exp_days}w-day plan).")
+    if curr_pnl >= expected_pnl_by_now * 1.15:
+        return "AHEAD_OF_PACE", (f"{curr_pnl:+.2f}% vs expected {expected_pnl_by_now:+.2f}% "
+                                 f"by day {wd_elapsed}. Beating schedule.")
+    if curr_pnl >= expected_pnl_by_now * 0.85:
+        return "ON_TRACK", (f"{curr_pnl:+.2f}% vs expected {expected_pnl_by_now:+.2f}% — matching plan.")
+    return "BEHIND_PACE", (f"Only {curr_pnl:+.2f}% vs expected {expected_pnl_by_now:+.2f}% "
+                           f"({wd_elapsed}w-days into {exp_days}w-day plan). Watch.")
+
+
+# ============================================================================
+#  ANALYSIS 2 — POSITIVE_NEWS
+# ============================================================================
+def analyze_positive_news(news_df: pd.DataFrame, obs_run_date: dt.date) -> pd.DataFrame:
+    """For each positive-news row assume a market-open BUY on the FIRST
+    trading session AFTER the observation date. Report working-day PnL."""
+    if news_df.empty:
+        return pd.DataFrame()
+
+    out_rows = []
+    prog = st.progress(0.0)
+    total = len(news_df)
+    for i, (_, r) in enumerate(news_df.iterrows()):
+        prog.progress((i + 1) / total)
+        ticker    = str(r["ticker"]).upper()
+        obs_date  = _safe_date(r["observation_date"])
+        sig_price = float(r["signal_price"]) if pd.notna(r.get("signal_price")) else np.nan
+        if obs_date is None:
+            continue
+        ty = _to_yahoo(ticker)
+        hist = _fetch_history(ty, obs_date - dt.timedelta(days=3),
+                              obs_run_date + dt.timedelta(days=2))
+        if hist.empty:
+            out_rows.append(_news_row_no_data(r, obs_run_date))
+            continue
+        post = hist[hist.index.date > obs_date]
+        if post.empty:
+            out_rows.append(_news_row_no_data(r, obs_run_date,
+                                              note="No post-observation trading yet."))
+            continue
+        buy_open_price = float(post["Open"].iloc[0])
+        buy_open_date  = post.index[0].date()
+        curr_price     = float(post["Close"].iloc[-1])
+        peak_price     = float(post["High"].max())
+
+        curr_pnl = (curr_price / buy_open_price - 1) * 100 if buy_open_price else np.nan
+        peak_pnl = (peak_price / buy_open_price - 1) * 100 if buy_open_price else np.nan
+        wd_elapsed = working_days_between(buy_open_date, obs_run_date)
+
+        # Verdict buckets aligned with the user's ask
+        if pd.notna(curr_pnl) and curr_pnl >= 3.0:
+            verdict = "WORKING"
+            note = f"News thesis playing out: {curr_pnl:+.2f}% since assumed entry."
+        elif pd.notna(curr_pnl) and curr_pnl <= -3.0:
+            verdict = "FAILED"
+            note = f"News failed to convert: {curr_pnl:+.2f}%."
         else:
-            result["regime_at_signal"] = "UNKNOWN"
-            result["regime_source"] = "unavailable"
-    else:
-        result["regime_source"] = "user"
+            verdict = "STALLED"
+            note = f"Sideways since entry: {curr_pnl:+.2f}%. Watch."
 
-    # ---- Default strategy & trade_type ----
-    if not result["strategy"]:
-        result["strategy"] = "PASS_combined"
-        result["strategy_source"] = "default"
-    else:
-        result["strategy_source"] = "user"
-
-    if not result["trade_type"]:
-        result["trade_type"] = "UPTREND"
-
-    if not result["priority"]:
-        result["priority"] = "medium"
-
-    # Fetch full price history
-    hist = _fetch_full_history(ty)
-    if hist.empty:
-        result.update({"status": "NO_DATA", "label": "⚪ NO_DATA",
-                        "note": "no yfinance data",
-                        "current_price": None,
-                        "days_elapsed": (dt.date.today() - signal_date).days,
-                        "current_return_pct": 0,
-                        "expected_return_pct_by_now": 0,
-                        "deviation_pct": 0,
-                        "peak_price_since_signal": None, "peak_return_pct": 0,
-                        "days_remaining": 0,
-                        "stop_source": "n/a", "sector_source": "unavailable",
-                        "expected_days_source": "n/a",
-                        "expected_days": result.get("expected_days") or 15})
-        return result
-
-    # Auto-derive sector (applies to both TA + news-only rows)
-    if not result["sector"]:
-        result["sector"] = sector_map.get(ticker, "-") or "-"
-        result["sector_source"] = "auto (NSE map)" if result["sector"] != "-" else "unknown"
-    else:
-        result["sector_source"] = "user"
-
-    # =====================================================================
-    # NEWS-ONLY BRANCH — no price target, only sentiment tracking
-    # =====================================================================
-    if is_news_only:
-        # Fetch price at signal_date + today's price
-        sig_bar = _bar_on_or_before(hist, signal_date)
-        price_at_signal = float(sig_bar["Close"]) if sig_bar is not None else None
-        live = _monitor._fetch_live_price(ty)
-        current_price = float(live.get("price") or hist["Close"].iloc[-1])
-        result.update({
-            "signal_price": price_at_signal,   # backfill from actual close
-            "current_price": round(current_price, 2),
-            "price_asof": live.get("as_of"),
-            "price_source": live.get("source", "daily close"),
-            "stop_source": "n/a (news-only)",
-            "expected_days_source": "n/a (news-only)",
-            "expected_days": result.get("expected_days") or 30,
-            "days_elapsed": (dt.date.today() - signal_date).days,
+        out_rows.append({
+            "observation_date":       obs_run_date,
+            "ticker":                 ticker,
+            "signal_date":            obs_date,
+            "working_days_elapsed":   int(wd_elapsed),
+            "buy_at_open_price":      round(buy_open_price, 2),
+            "buy_at_open_date":       buy_open_date,
+            "signal_price":           round(sig_price, 2) if pd.notna(sig_price) else None,
+            "current_price":          round(curr_price, 2),
+            "current_pnl_pct":        round(curr_pnl, 2) if pd.notna(curr_pnl) else None,
+            "peak_pnl_pct":           round(peak_pnl, 2) if pd.notna(peak_pnl) else None,
+            "news_score":             r.get("news_score"),
+            "news_top_headline":      r.get("news_top_headline"),
+            "signal_reject_reason":   r.get("signal_reject_reason"),
+            "reject_category":        r.get("reject_category"),
+            "verdict":                verdict,
+            "note":                   note,
         })
-        result["days_remaining"] = max(0, result["expected_days"] - result["days_elapsed"])
-        # Live news score for comparison
-        current_news = {"score": 0.0, "n_articles": 0, "top_headline": None}
-        if use_news and HAVE_NEWS:
-            try: current_news = _news_score(ty)
-            except Exception: pass
-        result["news"] = current_news
-        # Peak / return since signal
-        if price_at_signal:
-            peak_bar = hist.loc[hist.index >= pd.Timestamp(signal_date)]
-            if not peak_bar.empty:
-                result["peak_price_since_signal"] = round(float(peak_bar["High"].max()), 2)
-                result["peak_return_pct"] = round(
-                    (peak_bar["High"].max() / price_at_signal - 1) * 100, 2)
-            else:
-                result["peak_price_since_signal"] = current_price
-                result["peak_return_pct"] = 0
-            result["current_return_pct"] = round((current_price/price_at_signal - 1) * 100, 2)
-        else:
-            result["peak_price_since_signal"] = None
-            result["peak_return_pct"] = 0
-            result["current_return_pct"] = 0
-        result["expected_return_pct_by_now"] = 0
-        result["deviation_pct"] = 0
-        # News-only verdict
-        v = _news_only_verdict(
-            orig_news_score=news_score_at_signal,
-            current_news_score=current_news.get("score", 0.0),
-            price_at_signal=price_at_signal or 0,
-            current_price=current_price,
-            days_elapsed=result["days_elapsed"])
-        result.update(v)
-        return result
-
-    # =====================================================================
-    # TECHNICAL BRANCH — full analysis with target/stop/verdict
-    # =====================================================================
-    # Auto-derive stop from ATR at signal_date
-    if pd.isna(result["stop_price"]) or not result["stop_price"]:
-        stop_val, stop_method = _derive_stop_from_signal_date(
-            hist, signal_date, signal_price)
-        result["stop_price"] = stop_val
-        result["stop_source"] = f"auto: {stop_method}"
-    else:
-        result["stop_source"] = "user"
-
-    # Auto-derive expected_days from historical median (as-of signal_date)
-    if pd.isna(result["expected_days"]) or not result["expected_days"]:
-        tgt_pct = (target_price / signal_price - 1) * 100
-        result["expected_days"] = _derive_expected_days(hist, signal_date, tgt_pct)
-        result["expected_days_source"] = "auto: historical median"
-    else:
-        result["expected_days"] = int(result["expected_days"])
-        result["expected_days_source"] = "user"
-
-    # Live price + TA snapshot (uses monitor's fetcher for consistency)
-    live = _monitor._fetch_live_price(ty)
-    if live.get("price") is not None:
-        current_price = float(live["price"])
-    else:
-        current_price = float(hist["Close"].iloc[-1])
-    result["current_price"] = round(current_price, 2)
-    result["price_asof"] = live.get("as_of")
-    result["price_source"] = live.get("source", "daily close")
-
-    # TA snapshot from today's bar
-    df_ind_now = engine.compute_indicators(hist)
-    ta_now = _monitor._ta_snapshot(df_ind_now)
-    ta_now["close"] = current_price      # override with live price
-    result["ta"] = ta_now
-
-    # Days elapsed & remaining
-    days_elapsed = (dt.date.today() - signal_date).days
-    result["days_elapsed"] = days_elapsed
-    result["days_remaining"] = max(0, result["expected_days"] - days_elapsed)
-
-    # Peak price since signal
-    peak_bar = hist.loc[hist.index >= pd.Timestamp(signal_date)]
-    if not peak_bar.empty:
-        result["peak_price_since_signal"] = round(float(peak_bar["High"].max()), 2)
-        result["peak_return_pct"] = round(
-            (peak_bar["High"].max() / signal_price - 1) * 100, 2)
-    else:
-        result["peak_price_since_signal"] = current_price
-        result["peak_return_pct"] = (current_price / signal_price - 1) * 100
-
-    # Current & expected returns
-    result["current_return_pct"] = round(
-        (current_price / signal_price - 1) * 100, 2)
-    target_pct = (target_price / signal_price - 1) * 100
-    elapsed_frac = min(1.0, max(0.0, days_elapsed / max(1, result["expected_days"])))
-    result["expected_return_pct_by_now"] = round(target_pct * elapsed_frac, 2)
-    result["deviation_pct"] = round(
-        result["current_return_pct"] - result["expected_return_pct_by_now"], 2)
-
-    # News
-    news = {"score": 0.0, "n_articles": 0, "top_headline": None}
-    if use_news and HAVE_NEWS:
-        try: news = _news_score(ty)
-        except Exception: pass
-    result["news"] = news
-
-    # Verdict
-    v = _verdict(signal_price=signal_price, target_price=target_price,
-                  current_price=current_price, stop_price=result["stop_price"],
-                  expected_days=result["expected_days"],
-                  days_elapsed=days_elapsed, ta_now=ta_now)
-    result.update(v)
-
-    return result
+    prog.empty()
+    return pd.DataFrame(out_rows)
 
 
-# ======================================================================================
-#  UI
-# ======================================================================================
-VERDICT_STYLE = {
-    # Technical verdicts
-    "TARGET_HIT":     ("✅", "#16a34a", "success"),
-    "AHEAD_OF_PACE":  ("🚀", "#0891b2", "info"),
-    "ON_TRACK":       ("🟢", "#16a34a", "success"),
-    "BEHIND_PACE":    ("⚠️", "#f97316", "warning"),
-    "REVERSED":       ("🔻", "#dc2626", "error"),
-    "STOP_HIT":       ("🛑", "#dc2626", "error"),
-    "EXPIRED":        ("⏰", "#64748b", "info"),
-    # News-only verdicts
-    "NEWS_CONFIRMED": ("✅", "#16a34a", "success"),
-    "NEWS_STALLED":   ("🟡", "#f97316", "warning"),
-    "NEWS_FAILED":    ("🔴", "#dc2626", "error"),
-    "NEWS_NEUTRAL":   ("ℹ️", "#64748b", "info"),
-    # Generic
-    "NO_DATA":        ("⚪", "#64748b", "info"),
-}
+def _news_row_no_data(r, obs_run_date, note="yfinance history unavailable"):
+    return {
+        "observation_date":       obs_run_date,
+        "ticker":                 str(r["ticker"]).upper(),
+        "signal_date":            _safe_date(r["observation_date"]),
+        "working_days_elapsed":   None,
+        "buy_at_open_price":      None,
+        "buy_at_open_date":       None,
+        "signal_price":           None,
+        "current_price":          None,
+        "current_pnl_pct":        None,
+        "peak_pnl_pct":           None,
+        "news_score":             r.get("news_score"),
+        "news_top_headline":      r.get("news_top_headline"),
+        "signal_reject_reason":   r.get("signal_reject_reason"),
+        "reject_category":        r.get("reject_category"),
+        "verdict":                "NO_DATA",
+        "note":                   note,
+    }
 
 
-def body():
-    """Render logic; safe inside trading_suite.py (no set_page_config)."""
-    with st.sidebar:
-        st.markdown("## 🔮 Wishlist Tracker")
-        st.caption("Track scanner predictions vs actual market behaviour.")
+# ============================================================================
+#  ANALYSIS 3 — TOP_MOVERS
+# ============================================================================
+def analyze_top_movers(movers_df: pd.DataFrame,
+                       sig_df: pd.DataFrame,
+                       news_df: pd.DataFrame,
+                       obs_run_date: dt.date) -> pd.DataFrame:
+    """For each user-entered top mover:
+      * compute % change ON the observation date (Close/Open − 1)
+      * check if the ticker was in Sheet 1 that day (recognized as signal)
+      * check if the ticker was in Sheet 2 that day (positive news)
+      * if in NEITHER, derive a best-effort "why missed" reason:
+          - insufficient history (<250 trading sessions of price data)
+          - no signal fired (base filter didn't cross)
+    """
+    if movers_df.empty:
+        return pd.DataFrame()
 
-        st.divider()
-        st.markdown("**⚙️ Data**")
-        use_news = st.checkbox("📰 Use news sentiment",
-                                value=HAVE_NEWS, disabled=not HAVE_NEWS,
-                                help="Adds a `news_score` column to each observation.")
+    out_rows = []
+    prog = st.progress(0.0)
+    total = len(movers_df)
+    for i, (_, r) in enumerate(movers_df.iterrows()):
+        prog.progress((i + 1) / total)
+        ticker   = str(r["ticker"]).upper()
+        obs_date = _safe_date(r["observation_date"])
+        user_pct = float(r["pct_change"]) if pd.notna(r.get("pct_change")) else np.nan
+        if obs_date is None:
+            continue
 
-        st.divider()
-        st.markdown("**📁 Files**")
-        with st.expander("Wishlist path"):
-            st.code(WISHLIST_CSV, language="text")
-        with st.expander("Observation log path"):
-            st.code(OBS_LOG_CSV, language="text")
-            st.caption("Append-only log — one row per (stock × day) each time you run.")
-        if st.button("🔄 Refresh (re-fetch prices)", type="primary",
-                     use_container_width=True):
-            _fetch_full_history.clear()
-            _monitor._fetch_live_price.clear()
-            st.rerun()
+        ty = _to_yahoo(ticker)
+        hist = _fetch_history(ty, obs_date - dt.timedelta(days=5),
+                              obs_run_date + dt.timedelta(days=2))
 
-        st.divider()
-        with st.expander("📖 Verdict legend"):
-            for status, (ico, _, _) in VERDICT_STYLE.items():
-                st.markdown(f"- {ico} **{status}**")
+        # Day-of % change (Close vs Open) — falls back to user-entered value
+        pct_day = np.nan
+        curr_price = np.nan
+        if not hist.empty:
+            on_day = hist[hist.index.date == obs_date]
+            if not on_day.empty:
+                _o = float(on_day["Open"].iloc[0])
+                _c = float(on_day["Close"].iloc[0])
+                pct_day = (_c / _o - 1) * 100 if _o else np.nan
+            curr_price = float(hist["Close"].iloc[-1])
+        pct_final = pct_day if pd.notna(pct_day) else user_pct
 
-    st.title("🔮 Wishlist Tracker — did the prediction pan out?")
-    st.caption("Each stock is a hypothesis. Every run appends an observation "
-                "to `wishlist_observations.csv` so you build a track record "
-                "of the scanner's accuracy over time.")
+        # Cross-reference with Sheets 1 & 2 for the same obs date
+        in_sig, sig_status = _lookup_ticker(sig_df, ticker, obs_date, "status")
+        in_news, news_score_val = _lookup_ticker(news_df, ticker, obs_date, "news_score")
 
-    wl, errors = load_wishlist(WISHLIST_CSV)
-    for e in errors:
-        (st.caption if e.startswith("ℹ️") else st.warning)(e)
-
-    if wl.empty:
-        st.info("Wishlist is empty. Edit **wishlist.csv** and click Refresh.")
-        with st.expander("Show wishlist.csv template"):
-            try:
-                with open(WISHLIST_CSV, "r", encoding="utf-8") as f:
-                    st.code(f.read(), language="csv")
-            except Exception as ex:
-                st.error(f"Can't read template: {ex}")
-        return
-
-    # Sector map + universe buckets (for category auto-derive)
-    sector_map = {}
-    universe_buckets = {}
-    if HAVE_UNIVERSE:
+        # ---- v3 (Aug-2026): fetch a live news snapshot to explain the RISE ----
+        # User rule 4.iii.i: "reason behind the raise". We look up news for the
+        # observation date via the same news_sentiment engine the scanner uses.
+        # This works even if the ticker was not in Sheets 1/2.
+        rise_reason = ""
         try:
-            bundle = _ul_load()
-            sector_map = bundle.get("sector_map", {})
-            universe_buckets = bundle.get("buckets", {})
+            from news_sentiment import fetch_news_score as _ns
+            _n = _ns(ty, as_of_date=obs_date)
+            if _n.get("top_headline"):
+                rise_reason = (f"[news {_n.get('score', 0):+.2f} · "
+                               f"{_n.get('n_articles', 0)} articles] "
+                               f"{_n['top_headline'][:120]}")
         except Exception:
-            sector_map = {}
-            universe_buckets = {}
+            rise_reason = ""
 
-    # Benchmark history (for regime_at_signal auto-derive)
-    with st.spinner("📡 Fetching benchmark for regime auto-derive..."):
-        bench_history = _fetch_bench_history()
-
-    # ============================================================
-    # ANALYZE EACH ITEM
-    # ============================================================
-    st.markdown(f"Analyzing **{len(wl)}** wishlist item(s) …")
-    prog = st.progress(0.0); status = st.empty()
-    results = []
-    for k, (_, row) in enumerate(wl.iterrows(), 1):
-        status.markdown(f"🔍 Analyzing **{row['ticker']}** ({k}/{len(wl)})…")
-        r = analyze_wishlist_item(row, sector_map,
-                                    universe_buckets=universe_buckets,
-                                    bench_history=bench_history,
-                                    use_news=use_news)
-        results.append(r)
-        prog.progress(k / len(wl))
-        time.sleep(0.05)
-    status.empty(); prog.empty()
-
-    # ============================================================
-    # APPEND TO OBSERVATION LOG (idempotent per day)
-    # ============================================================
-    today = dt.date.today()
-    obs_df = _load_observation_log()
-    # De-dupe today's entries for these tickers so we can safely re-write
-    for r in results:
-        obs_df = _dedupe_today(obs_df, r["ticker"], today)
-    _rewrite_observation_log(obs_df)
-    for r in results:
-        if r.get("status") == "NO_DATA": continue
-        ta = r.get("ta", {}) or {}
-        obs_row = {
-            "observation_date": today.isoformat(),
-            "ticker": r["ticker"],
-            # NEW metadata — enables per-category / per-strategy / per-regime analytics
-            "category":         r.get("category", ""),
-            "sector":           r.get("sector", ""),
-            "strategy":         r.get("strategy", ""),
-            "regime_at_signal": r.get("regime_at_signal", ""),
-            "trade_type":       r.get("trade_type", ""),
-            "priority":         r.get("priority", ""),
-            # time & price
-            "signal_date":  r["signal_date"].isoformat() if r.get("signal_date") else "",
-            "days_elapsed": r["days_elapsed"],
-            "expected_days": r["expected_days"],
-            "days_remaining": r["days_remaining"],
-            "signal_price": r["signal_price"],
-            "current_price": r["current_price"],
-            "peak_price_since_signal": r["peak_price_since_signal"],
-            "current_return_pct": r["current_return_pct"],
-            "peak_return_pct": r["peak_return_pct"],
-            "expected_return_pct_by_now": r["expected_return_pct_by_now"],
-            "deviation_pct": r["deviation_pct"],
-            # verdict + supporting
-            "verdict": r["status"],
-            "on_track_pct": r.get("on_track_pct", 0),
-            "rsi14": round(float(ta.get("rsi14", 0)), 1) if ta.get("rsi14") else "",
-            "macd_hist": round(float(ta.get("macd_hist", 0)), 3) if ta.get("macd_hist") else "",
-            "adx14": round(float(ta.get("adx14", 0)), 1) if ta.get("adx14") else "",
-            "news_score": r.get("news", {}).get("score", 0),
-            "note": r.get("note", ""),
-        }
-        _append_observation(obs_row)
-    st.caption(f"✏️ Appended {len(results)} observation(s) to "
-                f"`wishlist_observations.csv` for **{today.isoformat()}**.")
-
-    # ============================================================
-    # SUMMARY CARDS
-    # ============================================================
-    st.divider()
-    st.markdown("### 📊 Wishlist Summary")
-
-    counts = {s: 0 for s in VERDICT_STYLE}
-    for r in results:
-        counts[r.get("status", "NO_DATA")] += 1
-
-    # Split TA vs news-only for cleaner display
-    st.markdown("**📈 Technical predictions**")
-    cs = st.columns(7)
-    order = ["TARGET_HIT", "AHEAD_OF_PACE", "ON_TRACK", "BEHIND_PACE",
-             "REVERSED", "STOP_HIT", "EXPIRED"]
-    for i, s in enumerate(order):
-        ico = VERDICT_STYLE[s][0]
-        cs[i].metric(f"{ico} {s.replace('_', ' ').title()}", counts.get(s, 0))
-
-    # News-only summary row (only shown if any news-only rows exist)
-    news_verdicts = ["NEWS_CONFIRMED", "NEWS_STALLED", "NEWS_FAILED", "NEWS_NEUTRAL"]
-    n_news_total = sum(counts.get(s, 0) for s in news_verdicts)
-    if n_news_total > 0:
-        st.markdown("**📰 News-only predictions**")
-        nc = st.columns(4)
-        for i, s in enumerate(news_verdicts):
-            ico = VERDICT_STYLE[s][0]
-            nc[i].metric(f"{ico} {s.replace('_', ' ').title()}", counts.get(s, 0))
-
-    # Overall on-track %
-    active = [r for r in results if r.get("status") not in
-              ("TARGET_HIT", "STOP_HIT", "EXPIRED", "NO_DATA")]
-    active_ok = [r for r in active if r.get("status") in
-                 ("ON_TRACK", "AHEAD_OF_PACE")]
-    on_track_pct = int(100 * len(active_ok) / len(active)) if active else 0
-
-    hit_rate_pct = int(100 * counts["TARGET_HIT"] /
-                       max(1, counts["TARGET_HIT"] + counts["STOP_HIT"] +
-                           counts["EXPIRED"])) if any(
-                               counts[s] for s in ("TARGET_HIT", "STOP_HIT", "EXPIRED")) else None
-
-    scc = st.columns(3)
-    scc[0].metric("🎯 On-track (of active)", f"{on_track_pct}%")
-    scc[1].metric("✅ Final hit rate",
-                   f"{hit_rate_pct}%" if hit_rate_pct is not None else "n/a",
-                   help="Of closed predictions (target/stop/expired), % that hit target.")
-    scc[2].metric("📊 Total observations logged",
-                   len(_load_observation_log()))
-
-    # ------------- Category / regime / strategy breakdown -------------
-    st.markdown("### 🧮 Breakdown by segment")
-    br1, br2, br3 = st.columns(3)
-
-    def _bucket_summary(rows, field: str, empty_label: str = "unknown"):
-        """Return a small dataframe of counts by field value."""
-        vals = {}
-        for r in rows:
-            v = r.get(field) or empty_label
-            vals.setdefault(v, {"count": 0, "on_track": 0, "hits": 0, "stops": 0})
-            vals[v]["count"] += 1
-            if r.get("status") in ("ON_TRACK", "AHEAD_OF_PACE"): vals[v]["on_track"] += 1
-            if r.get("status") == "TARGET_HIT": vals[v]["hits"] += 1
-            if r.get("status") == "STOP_HIT":   vals[v]["stops"] += 1
-        return pd.DataFrame(
-            [{field: k, "count": d["count"],
-              "on_track": d["on_track"], "target_hits": d["hits"],
-              "stops": d["stops"]}
-             for k, d in vals.items()])
-
-    with br1:
-        st.caption("**By category (market cap)**")
-        cat_df = _bucket_summary(results, "category")
-        if not cat_df.empty:
-            st.dataframe(cat_df, hide_index=True, use_container_width=True)
-    with br2:
-        st.caption("**By regime at signal**")
-        reg_df = _bucket_summary(results, "regime_at_signal")
-        if not reg_df.empty:
-            st.dataframe(reg_df, hide_index=True, use_container_width=True)
-    with br3:
-        st.caption("**By strategy**")
-        strat_df = _bucket_summary(results, "strategy")
-        if not strat_df.empty:
-            st.dataframe(strat_df, hide_index=True, use_container_width=True)
-    st.caption("Over 3-6 months of daily runs, these tables show WHICH segments the "
-                "scanner is genuinely accurate on — informs future universe selection.")
-
-    st.divider()
-
-    # ============================================================
-    # 📊 QUICK VIEW — ALL STOCKS AT A GLANCE
-    # (see everything without expanding cards)
-    # ============================================================
-    st.divider()
-    st.markdown("### 📊 Quick view — all stocks at a glance")
-    st.caption("Every wishlist stock's key stats in one table + a visual return chart. "
-                "Scan quickly to spot winners, losers, and stalled predictions. "
-                "Expand any card below for full detail.")
-
-    # Build a comprehensive at-a-glance dataframe
-    _order = {"TARGET_HIT": 0, "AHEAD_OF_PACE": 1, "ON_TRACK": 2,
-              "NEWS_CONFIRMED": 3, "BEHIND_PACE": 4, "NEWS_STALLED": 5,
-              "REVERSED": 6, "NEWS_FAILED": 7, "STOP_HIT": 8,
-              "EXPIRED": 9, "NEWS_NEUTRAL": 10, "NO_DATA": 11}
-    qv_rows = []
-    for r in results:
-        v_ico = VERDICT_STYLE.get(r.get("status", "NO_DATA"), ("•",))[0]
-        qv_rows.append({
-            "Stock":     r["ticker"],
-            "Type":      "📰 news" if r.get("is_news_only") else "📈 TA",
-            "Category":  r.get("category", "?") or "?",
-            "Sector":    (r.get("sector", "-") or "-")[:24],
-            "Verdict":   f"{v_ico} {r.get('status','?')}",
-            "_ord":      _order.get(r.get("status", "NO_DATA"), 99),
-            "Signal ₹":  r.get("signal_price"),
-            "Now ₹":     r.get("current_price"),
-            "Return %":  r.get("current_return_pct", 0) or 0,
-            "Peak %":    r.get("peak_return_pct", 0) or 0,
-            "Deviation %": r.get("deviation_pct", 0) or 0,
-            "Target ₹":  r.get("target_price"),
-            "Stop ₹":    r.get("stop_price"),
-            "Days":      (f"{r.get('days_elapsed','?')}/"
-                          f"{r.get('expected_days','?')}"),
-            "News (sig→now)": (f"{r.get('news_score_at_signal', 0) or 0:+.2f}→"
-                                f"{(r.get('news') or {}).get('score', 0) or 0:+.2f}"),
-            "Note":      (r.get("note", "") or "")[:80],
-        })
-    qv_df = pd.DataFrame(qv_rows).sort_values("_ord").drop(columns=["_ord"]).reset_index(drop=True)
-
-    # Filter controls
-    fc1, fc2, fc3 = st.columns([2, 2, 4])
-    with fc1:
-        type_filter = st.multiselect("Type", ["📈 TA", "📰 news"], default=[],
-                                        placeholder="both", label_visibility="collapsed")
-    with fc2:
-        verdict_filter = st.multiselect(
-            "Verdicts",
-            sorted({v["Verdict"] for v in qv_rows}),
-            default=[], placeholder="all verdicts", label_visibility="collapsed")
-    with fc3:
-        stock_search = st.text_input("Search stock", placeholder="🔍 filter by ticker",
-                                        label_visibility="collapsed")
-
-    view_df = qv_df.copy()
-    if type_filter:    view_df = view_df[view_df["Type"].isin(type_filter)]
-    if verdict_filter: view_df = view_df[view_df["Verdict"].isin(verdict_filter)]
-    if stock_search:   view_df = view_df[view_df["Stock"].str.contains(stock_search.upper(), na=False)]
-
-    if view_df.empty:
-        st.info("No stocks match the filter.")
-    else:
-        st.dataframe(
-            view_df, hide_index=True, use_container_width=True,
-            height=min(60 + 35*len(view_df), 600),
-            column_config={
-                "Stock":       st.column_config.TextColumn("Stock", width="small"),
-                "Type":        st.column_config.TextColumn("Type", width="small"),
-                "Category":    st.column_config.TextColumn("Cat", width="small"),
-                "Sector":      st.column_config.TextColumn("Sector", width="medium"),
-                "Verdict":     st.column_config.TextColumn("Verdict", width="medium"),
-                "Signal ₹":    st.column_config.NumberColumn("Signal ₹", format="₹%.2f", width="small"),
-                "Now ₹":       st.column_config.NumberColumn("Now ₹",    format="₹%.2f", width="small"),
-                "Return %":    st.column_config.NumberColumn("Return %",  format="%+.1f%%", width="small"),
-                "Peak %":      st.column_config.NumberColumn("Peak %",    format="%+.1f%%", width="small"),
-                "Deviation %": st.column_config.NumberColumn("Dev pp",    format="%+.1f", width="small"),
-                "Target ₹":    st.column_config.NumberColumn("Target ₹",  format="₹%.2f", width="small"),
-                "Stop ₹":      st.column_config.NumberColumn("Stop ₹",    format="₹%.2f", width="small"),
-                "Days":        st.column_config.TextColumn("Days", width="small"),
-                "News (sig→now)": st.column_config.TextColumn("News", width="small"),
-                "Note":        st.column_config.TextColumn("Note", width="large"),
-            })
-
-        st.download_button("⬇️ Download quick view CSV",
-                            view_df.to_csv(index=False).encode(),
-                            file_name=f"wishlist_quick_view_{dt.date.today()}.csv",
-                            mime="text/csv")
-
-    # -------- Visual return chart (bar chart of current return %, sorted) --------
-    if not view_df.empty:
-        st.markdown("**📊 Current return % — all stocks (sorted best → worst)**")
-        chart_df = view_df[["Stock", "Return %"]].copy().set_index("Stock")
-        chart_df = chart_df.sort_values("Return %", ascending=False)
-        st.bar_chart(chart_df, height=max(300, min(20 * len(chart_df), 700)))
-        st.caption("Green bars = gains since signal · Red bars = losses. "
-                    "Longer bars = larger moves in either direction.")
-
-    st.divider()
-
-    # ============================================================
-    # PER-STOCK CARDS (drill-down)
-    # ============================================================
-    st.markdown("### 🔍 Per-stock verdicts (expand for full detail)")
-
-    for r in results:
-        _render_wishlist_card(r)
-
-    # ============================================================
-    # OBSERVATION LOG DOWNLOAD + PROMOTE HELPERS
-    # ============================================================
-    st.divider()
-    st.markdown("### 📜 Observation log (append-only)")
-    obs_all = _load_observation_log()
-    if not obs_all.empty:
-        st.caption(f"{len(obs_all)} total observations across "
-                    f"{obs_all['ticker'].nunique()} tickers, "
-                    f"{obs_all['observation_date'].nunique()} distinct days.")
-        st.dataframe(obs_all.tail(200), use_container_width=True, hide_index=True,
-                      height=min(60 + 32*min(len(obs_all), 20), 500))
-        st.download_button("⬇️ Download full observation log",
-                            obs_all.to_csv(index=False).encode(),
-                            file_name="wishlist_observations.csv",
-                            mime="text/csv")
-    else:
-        st.info("Observation log is empty — first run adds today's entries.")
-
-
-def _render_wishlist_card(r):
-    """Detail card per wishlist stock, tabbed."""
-    if r.get("status") == "NO_DATA":
-        with st.expander(f"⚪ {r['ticker']} — NO DATA"):
-            st.warning(r.get("note", "No data available"))
-        return
-
-    ico, colour, _ = VERDICT_STYLE.get(r["status"], ("•", "#374151", "info"))
-    label = r["label"]
-    ret = r.get("current_return_pct", 0)
-    dev = r.get("deviation_pct", 0)
-    cat = r.get("category") or "?"
-    reg = r.get("regime_at_signal") or "?"
-    regime_emoji = {"RISK-ON": "🟢", "NEUTRAL": "🟡", "RISK-OFF": "🔴", "UNKNOWN": "⚪"}.get(reg, "⚪")
-    header = (f"{ico} **{r['ticker']}** · 📦 {cat} · "
-              f"🏭 {r.get('sector','-') or '-'} · "
-              f"{regime_emoji} regime {reg} · "
-              f"**{label}** · return {ret:+.1f}% "
-              f"(dev {dev:+.1f}pp) · "
-              f"{r['days_elapsed']}/{r['expected_days']}d")
-    with st.expander(header):
-        # Provenance
-        src_bits = []
-        if r.get("price_source"):
-            asof = r.get("price_asof")
-            asof_str = (asof.strftime("%Y-%m-%d %H:%M") if hasattr(asof, "strftime")
-                        else str(asof) if asof else "n/a")
-            src_bits.append(f"💰 {r['price_source']} ({asof_str})")
-        if r.get("stop_source"):        src_bits.append(f"🛑 {r['stop_source']}")
-        if r.get("expected_days_source"): src_bits.append(
-            f"⏱️ expected_days: {r['expected_days_source']}")
-        if r.get("sector_source"):      src_bits.append(f"🏭 sector: {r['sector_source']}")
-        if src_bits: st.caption("Data → " + "  ·  ".join(src_bits))
-
-        # Safe format helpers — guard against None on news-only rows
-        def _fp(v, prefix="₹", fmt=".2f"):
-            if v is None or pd.isna(v): return "—"
-            return f"{prefix}{v:{fmt}}"
-        def _fpct(v, fmt="+.1f"):
-            if v is None or pd.isna(v): return "—"
-            return f"{v:{fmt}}%"
-
-        # Tabs (news-only rows skip the Progress tab which needs target/stop)
-        if r.get("is_news_only"):
-            tab_ov, tab_ne, tab_hist = st.tabs([
-                "📊 Overview", "📰 News detail", "📜 History",
-            ])
-            tab_prog = tab_ta = None
+        # Reason bucket combining recognition state + rise explanation
+        if in_sig:
+            reason = f"✅ Detected as signal (status: {sig_status or 'unknown'})."
+            if rise_reason:
+                reason += f"  Likely catalyst: {rise_reason}"
+        elif in_news:
+            reason = (f"📰 Detected via positive news (news_score {news_score_val}). "
+                      f"Algorithm saw the catalyst but didn't fire a technical signal.")
+            if rise_reason:
+                reason += f"  Headline: {rise_reason}"
         else:
-            tab_ov, tab_prog, tab_ta, tab_hist = st.tabs([
-                "📊 Overview", "📈 Progress", "🧮 Technical", "📜 History",
-            ])
-            tab_ne = None
+            reason = _guess_missed_reason(hist, obs_date)
+            if rise_reason:
+                reason += f"  Likely catalyst: {rise_reason}"
 
-        # -------------------- OVERVIEW TAB --------------------
-        with tab_ov:
-            cA, cB, cC, cD = st.columns(4)
-            cA.metric("Signal price", _fp(r.get("signal_price")),
-                       f"{r.get('days_elapsed','?')}d ago")
-            cB.metric("Now", _fp(r.get("current_price")),
-                       _fpct(r.get("current_return_pct")))
-            cC.metric("Target", _fp(r.get("target_price")))
-            cD.metric("Stop",   _fp(r.get("stop_price")))
+        out_rows.append({
+            "observation_date":     obs_date,
+            "ticker":               ticker,
+            "pct_change_that_day":  round(pct_final, 2) if pd.notna(pct_final) else None,
+            "current_price":        round(curr_price, 2) if pd.notna(curr_price) else None,
+            "in_signaled_sheet":    "Y" if in_sig else "N",
+            "signaled_status":      sig_status,
+            "in_news_sheet":        "Y" if in_news else "N",
+            "news_score_that_day":  news_score_val,
+            "reason_recognized_or_missed": reason,
+            "user_notes":           r.get("notes"),
+        })
+    prog.empty()
+    return pd.DataFrame(out_rows)
 
-            # Verdict banner
-            note = r.get("note", "")
-            status_class = r.get("status", "")
-            if status_class in ("TARGET_HIT", "AHEAD_OF_PACE", "ON_TRACK",
-                                  "NEWS_CONFIRMED"):
-                st.success(f"{ico} {label} — {note}")
-            elif status_class in ("BEHIND_PACE", "NEWS_STALLED"):
-                st.warning(f"{ico} {label} — {note}")
-            elif status_class in ("NEWS_NEUTRAL",):
-                st.info(f"{ico} {label} — {note}")
-            else:
-                st.error(f"{ico} {label} — {note}")
 
-            # Peak-since-signal callout (only if we have valid price data)
-            peak = r.get("peak_price_since_signal")
-            cur = r.get("current_price")
-            if peak and cur and peak > cur * 1.005:
-                pk_ret = r.get("peak_return_pct", 0)
-                st.info(f"🏔️ Peak since signal: **{_fp(peak)}** ({pk_ret:+.1f}%). "
-                         f"Currently {_fp(cur)} — pulled back "
-                         f"{100*(cur/peak-1):+.1f}% from peak.")
+def _lookup_ticker(df: pd.DataFrame, ticker: str, obs_date: dt.date, field: str):
+    """Check if a (ticker, obs_date) pair exists in df; return (exists, field_value)."""
+    if df.empty:
+        return False, None
+    mask = ((df["ticker"].astype(str).str.upper() == ticker.upper())
+            & (pd.to_datetime(df["observation_date"], errors="coerce").dt.date == obs_date))
+    hit = df[mask]
+    if hit.empty:
+        return False, None
+    return True, hit.iloc[0].get(field) if field in hit.columns else None
 
-            # News score line (both TA and news-only rows have news info)
-            news_at_sig = r.get("news_score_at_signal", 0) or 0
-            news_now = (r.get("news") or {}).get("score", 0) or 0
-            if news_at_sig or news_now:
-                delta = news_now - news_at_sig
-                arrow = "↗" if delta > 0.05 else "↘" if delta < -0.05 else "→"
-                st.markdown(f"**📰 News:** at signal `{news_at_sig:+.2f}` "
-                             f"{arrow} now `{news_now:+.2f}` "
-                             f"(delta {delta:+.2f})")
 
-            # Notes
-            if r.get("notes"):
-                st.caption(f"📝 Your notes: {r['notes']}")
+def _guess_missed_reason(hist: pd.DataFrame, obs_date: dt.date) -> str:
+    """Best-effort explanation for why a top mover was NOT captured.
+    Uses only stock's OWN historical bars — no scanner re-run required."""
+    if hist.empty:
+        return ("❌ Not detected. yfinance had no history for this ticker — "
+                "likely a recent listing or an NSE symbol Yahoo can't resolve. "
+                "Engine requires ≥250 sessions before it can compute the "
+                "200-DMA that every strategy conditions on.")
+    prior_bars = hist[hist.index.date <= obs_date]
+    n_bars = len(prior_bars)
+    if n_bars < 250:
+        return (f"❌ Not detected. Only {n_bars} trading sessions of history "
+                f"available on {obs_date} — engine's MIN_DAYS floor is 250 "
+                f"(needed for stable 200-DMA / 252-day-high indicators). "
+                f"Recent listing / thin coverage.")
+    # If we have enough history, the miss is more subtle — trend / vol / OBV
+    if n_bars >= 200:
+        recent = prior_bars.tail(200)
+        close = recent["Close"]
+        sma200 = close.rolling(200).mean().iloc[-1]
+        last = close.iloc[-1]
+        if pd.notna(sma200):
+            pct = (last / sma200 - 1) * 100
+            if pct < 0:
+                return (f"❌ Not detected. On {obs_date} the stock was "
+                        f"{pct:+.1f}% vs its 200-DMA (BELOW the long trend). "
+                        f"PASS_combined defaults reject signals below the "
+                        f"200-DMA unless the reversal branch qualifies — this "
+                        f"day's move was likely a counter-trend pop that "
+                        f"didn't meet the reversal preconditions.")
+    return ("❌ Not detected. Sufficient price history exists, but the base "
+            "technical filter (uptrend + OBV rising / breakout branch / "
+            "reversal-with-confirmation) didn't fire on the observation "
+            "date. Common causes: gap-up entry (require_confirmation blocked "
+            "it), regime hard-block, or extension penalty pushed rank below "
+            "the fill window.")
 
-            # Promote-to-positions helper (only for TA rows with real target/stop)
-            if not r.get("is_news_only") and r.get("target_price") and r.get("stop_price"):
-                with st.expander("🛒 Ready to buy? Promote to positions.csv"):
-                    st.markdown(
-                        f"Copy this row into `positions.csv` to start monitoring "
-                        f"this position for real:\n\n"
-                        f"```csv\n"
-                        f"{r['ticker']},{dt.date.today().strftime('%d-%m-%Y')},"
-                        f"{r['current_price']:.2f},<qty>,{r['stop_price']:.2f},"
-                        f"{r['target_price']:.2f},"
-                        f"{r['signal_date'].strftime('%d-%m-%Y')},"
-                        f"{r.get('sector','')},{r.get('notes','')}"
-                        f"\n```\n"
-                        f"Or open `positions.csv` and add manually. "
-                        f"Then delete this row from `wishlist.csv`."
-                    )
 
-        # -------------------- PROGRESS TAB (TA rows only) --------------------
-        if tab_prog is not None:
-            with tab_prog:
-                target_price = r.get("target_price")
-                signal_price = r.get("signal_price")
-                current_price = r.get("current_price")
-                stop_price = r.get("stop_price")
-                if not (target_price and signal_price and current_price):
-                    st.info("Insufficient price data to project progress.")
-                else:
-                    total_move = target_price - signal_price
-                    actual_move = current_price - signal_price
-                    progress_pct = 100 * actual_move / max(total_move, 0.01)
-                    progress_clamped = max(0.0, min(1.0, actual_move / max(total_move, 0.01)))
-                    st.markdown(f"**Progress to target: {progress_pct:.0f}%** "
-                                f"({_fp(signal_price)} → {_fp(target_price)})")
-                    st.progress(progress_clamped)
+# ============================================================================
+#  RENDERING
+# ============================================================================
+def body():
+    """Streamlit body — auto-called by trading_suite.py."""
+    st.title("🔮 Wishlist Tracker v2")
+    st.caption("Reads `wishlist.xlsx` (3 sheets auto-populated by the daily scanner + your top-mover entries) "
+               "and produces per-sheet analysis. All timings in working days (Mon–Fri).")
 
-                    exp_days = r.get("expected_days") or 15
-                    days_el = r.get("days_elapsed") or 0
-                    time_pct = min(100, 100 * days_el / max(1, exp_days))
-                    st.markdown(f"**Time elapsed: {time_pct:.0f}%** "
-                                f"({days_el}d of {exp_days}d expected)")
-                    st.progress(min(1.0, time_pct / 100))
+    initialize_workbook()   # self-heal on first run
 
-                    colP1, colP2, colP3 = st.columns(3)
-                    colP1.metric("Expected return by now",
-                                  _fpct(r.get("expected_return_pct_by_now")))
-                    colP2.metric("Actual return", _fpct(r.get("current_return_pct")))
-                    dev = r.get("deviation_pct", 0)
-                    dev_color = "normal" if dev >= 0 else "inverse"
-                    colP3.metric("Deviation", f"{dev:+.1f}pp",
-                                  "AHEAD" if dev > 0 else
-                                  ("ON PACE" if abs(dev) < 1 else "BEHIND"),
-                                  delta_color=dev_color)
+    with st.sidebar:
+        st.header("Wishlist v2 — settings")
+        obs_run_date = st.date_input(
+            "Analysis 'as of' date",
+            value=dt.date.today(),
+            max_value=dt.date.today(),
+            help="Fixes the timestamp used for elapsed / remaining calculations. "
+                 "Set to today for a live view; set to an older date to reproduce a "
+                 "previous run's numbers.",
+        )
+        run_btn = st.button("▶️ Run analysis on all 3 sheets", type="primary",
+                            use_container_width=True)
+        st.caption(f"📁 Workbook: `{WISHLIST_XLSX}`")
+        summary = store.workbook_summary()
+        st.markdown(
+            f"- Sheet 1 · **signaled_today**: `{summary.get(SHEET_SIGNALED, 0)}` rows\n"
+            f"- Sheet 2 · **positive_news**: `{summary.get(SHEET_NEWS, 0)}` rows\n"
+            f"- Sheet 3 · **top_movers**: `{summary.get(SHEET_MOVERS, 0)}` rows"
+        )
+        st.divider()
+        st.markdown("### Sheet 3 — add a top mover")
+        with st.form("add_mover_form", clear_on_submit=True):
+            mv_date = st.date_input("Observation date", value=dt.date.today(),
+                                     max_value=dt.date.today())
+            mv_ticker = st.text_input("Ticker (bare NSE symbol)", "")
+            mv_pct    = st.number_input("% change that day (optional)",
+                                         value=0.0, step=0.1, format="%.2f")
+            mv_notes  = st.text_area("Notes (optional)", "", height=60)
+            submitted = st.form_submit_button("➕ Add row to Sheet 3")
+            if submitted and mv_ticker.strip():
+                sheets = store.read_all_sheets()
+                movers = sheets[SHEET_MOVERS]
+                # v3 (Aug-2026): preserve entry time so obs_date carries hh:mm:ss.
+                # If user picked today, stamp NOW; historical entry uses midnight.
+                _obs_ts_manual = (dt.datetime.now()
+                                  if mv_date == dt.date.today()
+                                  else dt.datetime.combine(mv_date, dt.time.min))
+                new_row = pd.DataFrame([{
+                    "observation_date": _obs_ts_manual,
+                    "ticker":           mv_ticker.strip().upper(),
+                    "pct_change":       mv_pct if mv_pct else None,
+                    "notes":            mv_notes.strip() or None,
+                }])
+                combined = pd.concat([movers, new_row], ignore_index=True)
+                # Dedup on the DATE portion only so multi-entries same day
+                # collapse; keep the full datetime column intact.
+                _key = pd.to_datetime(
+                    combined["observation_date"], errors="coerce").dt.date
+                combined = (combined.assign(_dedup_date=_key)
+                                     .drop_duplicates(subset=["_dedup_date", "ticker"],
+                                                      keep="last")
+                                     .drop(columns=["_dedup_date"])
+                                     .reset_index(drop=True))
+                sheets[SHEET_MOVERS] = combined
+                store._write_all_sheets(sheets)
+                st.success(f"Added {mv_ticker.strip().upper()} on {mv_date}.")
 
-                    st.markdown("**📐 Scenarios (from current price)**")
-                    scen_rows = [
-                        {"Scenario": f"🎯 Hits target ({_fp(target_price)})",
-                         "Move needed": f"{100*(target_price/current_price-1):+.1f}%",
-                         "Return from signal": f"{100*(target_price/signal_price-1):+.1f}%"},
-                    ]
-                    if stop_price:
-                        scen_rows.append({
-                            "Scenario": f"🛑 Hits stop ({_fp(stop_price)})",
-                            "Move needed": f"{100*(stop_price/current_price-1):+.1f}%",
-                            "Return from signal": f"{100*(stop_price/signal_price-1):+.1f}%",
-                        })
-                    st.dataframe(pd.DataFrame(scen_rows), hide_index=True,
-                                  use_container_width=True)
+    sheets = store.read_all_sheets()
+    sig_df    = sheets[SHEET_SIGNALED]
+    news_df   = sheets[SHEET_NEWS]
+    movers_df = sheets[SHEET_MOVERS]
 
-        # -------------------- NEWS DETAIL TAB (news-only rows) --------------------
-        if tab_ne is not None:
-            with tab_ne:
-                news_at_sig = r.get("news_score_at_signal", 0) or 0
-                news_now = (r.get("news") or {}).get("score", 0) or 0
-                n_articles = (r.get("news") or {}).get("n_articles", 0)
-                delta = news_now - news_at_sig
-                nc = st.columns(3)
-                nc[0].metric("📰 News score at signal", f"{news_at_sig:+.2f}")
-                nc[1].metric("📰 News score now", f"{news_now:+.2f}",
-                              f"{delta:+.2f}",
-                              delta_color=("normal" if delta > 0 else "inverse"))
-                nc[2].metric("Articles now", n_articles)
+    tabs = st.tabs([
+        f"1 · Signaled today ({len(sig_df)})",
+        f"2 · Positive news ({len(news_df)})",
+        f"3 · Top movers ({len(movers_df)})",
+    ])
 
-                # Price drift since signal
-                cur = r.get("current_price"); sig = r.get("signal_price")
-                if cur and sig:
-                    drift = 100 * (cur/sig - 1)
-                    st.markdown(f"**Price drift since signal:** "
-                                 f"{_fp(sig)} → {_fp(cur)}  =  **{drift:+.2f}%**")
+    if run_btn:
+        # v3 (Aug-2026): compose full datetime for observation_date so
+        # the persisted timestamp includes hour:min:sec. If user asked for
+        # a live "as-of today" analysis, capture NOW; historical replays
+        # use midnight of the picked date.
+        if obs_run_date == dt.date.today():
+            obs_ts = dt.datetime.now()
+        else:
+            obs_ts = dt.datetime.combine(obs_run_date, dt.time.min)
+        st.caption(f"⏱ Analysis timestamp: **{obs_ts.strftime('%Y-%m-%d %H:%M:%S')}**")
+        analyses = {}
+        with tabs[0]:
+            st.subheader("Analysis · Sheet 1 — signaled_today")
+            with st.spinner("Fetching prices for signalled rows..."):
+                a1 = analyze_signaled(sig_df, obs_ts)
+            analyses["signaled_analysis"] = a1
+            _render_signaled_analysis(a1, sig_df)
+        with tabs[1]:
+            st.subheader("Analysis · Sheet 2 — positive_news")
+            with st.spinner("Fetching prices for positive-news rows..."):
+                a2 = analyze_positive_news(news_df, obs_ts)
+            analyses["positive_news_analysis"] = a2
+            _render_news_analysis(a2)
+        with tabs[2]:
+            st.subheader("Analysis · Sheet 3 — top_movers")
+            with st.spinner("Fetching prices for top-mover rows..."):
+                a3 = analyze_top_movers(movers_df, sig_df, news_df, obs_ts)
+            analyses["top_movers_analysis"] = a3
+            _render_movers_analysis(a3)
 
-                st.markdown(f"**Original notes:** {r.get('notes','—')}")
+        # Persist all three analyses in one workbook write
+        try:
+            store.write_observations(analyses)
+            st.success(f"✅ Analysis persisted → `{OBS_XLSX}` "
+                       f"(3 sheets · Sheet 1: {len(analyses['signaled_analysis'])} · "
+                       f"Sheet 2: {len(analyses['positive_news_analysis'])} · "
+                       f"Sheet 3: {len(analyses['top_movers_analysis'])} rows)")
+        except store.WorkbookLockedError as _e:
+            st.error(
+                f"⚠️ Could not save `{OBS_XLSX}` — it's open in Excel or held "
+                f"by another process. The analysis shown above is complete "
+                f"and correct in memory; just close the workbook and re-run "
+                f"to persist. ({_e})"
+            )
+    else:
+        with tabs[0]:
+            st.info("Click **Run analysis** to compute Sheet 1 metrics.")
+            if not sig_df.empty:
+                st.dataframe(sig_df, use_container_width=True, hide_index=True,
+                             height=min(400, 60 + 32 * len(sig_df)))
+        with tabs[1]:
+            st.info("Click **Run analysis** to compute Sheet 2 metrics.")
+            if not news_df.empty:
+                st.dataframe(news_df, use_container_width=True, hide_index=True,
+                             height=min(400, 60 + 32 * len(news_df)))
+        with tabs[2]:
+            st.info("Click **Run analysis** to compute Sheet 3 metrics.")
+            if not movers_df.empty:
+                st.dataframe(movers_df, use_container_width=True, hide_index=True,
+                             height=min(400, 60 + 32 * len(movers_df)))
 
-                # Interpretation
-                if abs(news_at_sig) >= 0.15:
-                    if abs(delta) > 0.2:
-                        st.warning("🔄 **News sentiment has shifted materially** since signal — "
-                                    "re-evaluate before acting.")
-                    if r.get("status") == "NEWS_CONFIRMED":
-                        st.success("✅ Market followed the news direction. Signal was predictive.")
-                    elif r.get("status") == "NEWS_FAILED":
-                        st.error("❌ Market moved AGAINST the news. Consider news scorer may over-read this stock's headlines.")
-                    else:
-                        st.info("🟡 Market hasn't reacted to the news yet. Watch for delayed response over next 3-5 sessions.")
 
-        # -------------------- TECHNICAL TAB (TA rows only) --------------------
-        if tab_ta is not None:
-            with tab_ta:
-                ta = r.get("ta") or {}
-                if ta:
-                    cols = st.columns(6)
-                    def _mv(col, label, key, fmt="{:.1f}"):
-                        v = ta.get(key)
-                        if v is None or (isinstance(v, float) and not np.isfinite(v)):
-                            col.metric(label, "—")
-                        else:
-                            col.metric(label, fmt.format(float(v)))
-                    _mv(cols[0], "RSI(14)",    "rsi14")
-                    _mv(cols[1], "%vs 20DMA",  "pct_vs_sma20", "{:+.1f}%")
-                    _mv(cols[2], "%vs 50DMA",  "pct_vs_sma50", "{:+.1f}%")
-                    _mv(cols[3], "%vs 200DMA", "pct_vs_sma200","{:+.1f}%")
-                    _mv(cols[4], "ATR%",       "atr_pct",      "{:.1f}%")
-                    _mv(cols[5], "ADX(14)",    "adx14")
-                    st.caption("TA state at last close. Compare to the state that "
-                                "was expected when the signal fired.")
-                news = r.get("news") or {}
-                if news.get("n_articles", 0) > 0:
-                    st.markdown(f"**📰 News score:** {news['score']:+.2f} "
-                                 f"({news['n_articles']} articles)")
-                    if news.get("top_headline"):
-                        st.caption(f"Top: \"{news['top_headline'][:200]}\"")
+def _render_signaled_analysis(a: pd.DataFrame, raw: pd.DataFrame):
+    if a.empty:
+        st.info("No signalled rows to analyse yet — run the Daily Scanner first.")
+        return
+    st.dataframe(a, use_container_width=True, hide_index=True,
+                 height=min(500, 60 + 32 * len(a)))
 
-        with tab_hist:
-            # Historical observations for THIS ticker only
-            obs_all = _load_observation_log()
-            if obs_all.empty:
-                st.info("No observations logged yet.")
-            else:
-                mine = obs_all[obs_all["ticker"] == r["ticker"]].copy()
-                if mine.empty:
-                    st.info("No prior observations for this ticker.")
-                else:
-                    mine["observation_date"] = pd.to_datetime(mine["observation_date"])
-                    mine = mine.sort_values("observation_date", ascending=False)
-                    st.markdown(f"**{len(mine)} observation(s) logged for {r['ticker']}**")
+    # ---- Aggregate #1 — Fill rate for Limit entries ----
+    lim_rows = a[a["was_limit_hit"].isin(["Yes", "No", "Pending"])]
+    st.markdown("### Aggregate insights")
+    cA, cB, cC = st.columns(3)
+    if not lim_rows.empty:
+        fill_yes = int((lim_rows["was_limit_hit"] == "Yes").sum())
+        fill_no  = int((lim_rows["was_limit_hit"] == "No").sum())
+        pending  = int((lim_rows["was_limit_hit"] == "Pending").sum())
+        cA.metric("Limit-fill rate",
+                  f"{100*fill_yes/max(1,(fill_yes+fill_no)):.0f}%",
+                  f"{fill_yes} filled · {fill_no} missed · {pending} pending")
+    verdict_counts = a["verdict"].value_counts().to_dict()
+    cB.metric("Winners (target/on-track/ahead)",
+              str(verdict_counts.get("TARGET_HIT", 0) + verdict_counts.get("ON_TRACK", 0) + verdict_counts.get("AHEAD_OF_PACE", 0)))
+    cC.metric("Losers (stop/reversed/expired)",
+              str(verdict_counts.get("STOP_HIT", 0) + verdict_counts.get("REVERSED", 0) + verdict_counts.get("EXPIRED", 0)))
 
-                    show_cols = ["observation_date", "days_elapsed",
-                                 "current_price", "current_return_pct",
-                                 "expected_return_pct_by_now", "deviation_pct",
-                                 "verdict", "on_track_pct", "note"]
-                    show_cols = [c for c in show_cols if c in mine.columns]
-                    st.dataframe(mine[show_cols], hide_index=True,
-                                  use_container_width=True,
-                                  height=min(50 + 32*len(mine), 400))
+    # ---- Aggregate #2 — Is rank predictive? ----
+    st.markdown("#### Does rank_score predict realised PnL?")
+    ranked = a.dropna(subset=["rank_score", "current_pnl_pct"])
+    if len(ranked) >= 6:
+        corr = ranked[["rank_score", "current_pnl_pct"]].corr().iloc[0, 1]
+        # Split by rank quantile — top-third vs bottom-third
+        top = ranked.nlargest(max(3, len(ranked)//3), "rank_score")["current_pnl_pct"]
+        bot = ranked.nsmallest(max(3, len(ranked)//3), "rank_score")["current_pnl_pct"]
+        cX, cY, cZ = st.columns(3)
+        cX.metric("Correlation (rank ↔ PnL)", f"{corr:+.2f}",
+                  "positive = rank predicts winners")
+        cY.metric("Top-third avg PnL",  f"{top.mean():+.2f}%", f"n = {len(top)}")
+        cZ.metric("Bottom-third avg PnL", f"{bot.mean():+.2f}%", f"n = {len(bot)}")
+        if corr > 0.15:
+            st.success("Ranking IS working — higher rank stocks have higher realised PnL.")
+        elif corr < -0.15:
+            st.error("Ranking is INVERTED — the score is currently mis-ordering candidates.")
+        else:
+            st.warning("Ranking is essentially UNCORRELATED with PnL at this sample size — "
+                       "may just be small-N noise.")
+    else:
+        st.caption(f"Need ≥ 6 rows with rank + PnL; currently {len(ranked)}.")
 
-                    # Little price/return sparkline
-                    if len(mine) > 1:
-                        chart_df = mine.sort_values("observation_date").set_index("observation_date")
-                        st.markdown("**Return trend over observations:**")
-                        st.line_chart(chart_df[["current_return_pct",
-                                                  "expected_return_pct_by_now"]],
-                                       height=200)
+    # ---- Aggregate #3 — Target-on-time rate ----
+    st.markdown("#### Are targets reached on the algorithm's stated timeline?")
+    with_plan = a.dropna(subset=["expected_days_to_target"])
+    if not with_plan.empty:
+        target_hits = with_plan[with_plan["verdict"] == "TARGET_HIT"]
+        on_schedule = target_hits[target_hits["working_days_elapsed"] <= target_hits["expected_days_to_target"]]
+        st.write(f"**{len(target_hits)}** targets hit; **{len(on_schedule)}** on or ahead of schedule "
+                 f"({100*len(on_schedule)/max(1,len(target_hits)):.0f}% on-time hit-rate).")
+
+
+def _render_news_analysis(a: pd.DataFrame):
+    if a.empty:
+        st.info("No positive-news rows to analyse yet.")
+        return
+    st.dataframe(a, use_container_width=True, hide_index=True,
+                 height=min(500, 60 + 32 * len(a)))
+    c1, c2, c3 = st.columns(3)
+    if "current_pnl_pct" in a.columns:
+        winners = int((a["current_pnl_pct"] >= 3).sum())
+        losers  = int((a["current_pnl_pct"] <= -3).sum())
+        avg_ret = a["current_pnl_pct"].mean()
+        c1.metric("News-thesis winners (≥ +3%)", str(winners))
+        c2.metric("News-thesis losers  (≤ -3%)", str(losers))
+        c3.metric("Mean PnL since assumed entry", f"{avg_ret:+.2f}%" if pd.notna(avg_ret) else "—")
+
+
+def _render_movers_analysis(a: pd.DataFrame):
+    if a.empty:
+        st.info("No top movers logged yet. Use the sidebar form to add rows.")
+        return
+    st.dataframe(a, use_container_width=True, hide_index=True,
+                 height=min(500, 60 + 32 * len(a)))
+    c1, c2, c3 = st.columns(3)
+    recognized = int((a["in_signaled_sheet"] == "Y").sum()) + int((a["in_news_sheet"] == "Y").sum())
+    total = len(a)
+    c1.metric("Top movers RECOGNIZED", f"{recognized}/{total}",
+              f"{100*recognized/max(1,total):.0f}% coverage")
+    signalled = int((a["in_signaled_sheet"] == "Y").sum())
+    news_only = int((a["in_news_sheet"] == "Y").sum())
+    c2.metric("via Signal sheet", str(signalled))
+    c3.metric("via News sheet",   str(news_only))
 
 
 def main():
-    st.set_page_config(page_title="Wishlist Tracker", layout="wide")
+    st.set_page_config(page_title="Wishlist Tracker v2", layout="wide")
     body()
 
 

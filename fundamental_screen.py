@@ -60,6 +60,128 @@ except Exception:
     HAVE_SCREENER = False
 
 
+# ==============================================================================
+#  DISK-PERSISTENT FUNDAMENTALS CACHE  (Aug-2026 — user bug: cache lost on restart)
+# ------------------------------------------------------------------------------
+# Streamlit's @st.cache_data with persist="disk" ONLY writes to disk when a
+# Streamlit runtime is active — in raw Python it silently falls back to RAM,
+# and even in Streamlit there are edge cases with `datetime` args and pickle
+# on Windows. We back it up with an EXPLICIT JSON disk cache mirroring the
+# pattern proven in governance_fetcher.py.
+#
+# Cache key = (source, ticker, cache_bucket) where cache_bucket rotates every
+# Saturday. Entries older than 7 days OR from a different Saturday bucket are
+# treated as stale. Structure:
+#   {
+#     "fund::HAL.NS::2026-08-22": {"ts": epoch, "data": {...}},
+#     "screener::HAL::2026-08-22": {"ts": epoch, "data": {...}},
+#     ...
+#   }
+# ==============================================================================
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_FUND_DISK_CACHE_PATH = os.path.join(_HERE, ".fundamentals_cache.json")
+_FUND_DISK_TTL_SEC   = 7 * 24 * 60 * 60      # 7 days
+_FUND_DISK_CACHE     = None                  # lazy-loaded singleton
+
+def _fund_disk_load() -> dict:
+    """One-shot load of the disk cache into a module-level dict."""
+    global _FUND_DISK_CACHE
+    if _FUND_DISK_CACHE is not None:
+        return _FUND_DISK_CACHE
+    if os.path.exists(_FUND_DISK_CACHE_PATH):
+        try:
+            import json as _json
+            with open(_FUND_DISK_CACHE_PATH, "r", encoding="utf-8") as f:
+                _FUND_DISK_CACHE = _json.load(f) or {}
+        except Exception:
+            _FUND_DISK_CACHE = {}
+    else:
+        _FUND_DISK_CACHE = {}
+    return _FUND_DISK_CACHE
+
+def _fund_disk_get(key: str, cache_bucket: str):
+    """Return cached data dict or None if missing / stale / wrong-bucket.
+
+    v5 (Aug-2026 — negative-cache fix): honors an optional per-entry
+    `retry_after` epoch used for negative caching. When present and NOT yet
+    reached, we serve the (negative) cached value; when reached, we treat the
+    entry as stale so the caller re-fetches. This prevents rate-limit failures
+    from being retried on every scan while still allowing periodic recovery."""
+    entry = _fund_disk_load().get(key)
+    if not entry: return None
+    if entry.get("cache_bucket") != cache_bucket: return None
+    if (time.time() - float(entry.get("ts", 0))) > _FUND_DISK_TTL_SEC: return None
+    ra = entry.get("retry_after")
+    if ra and time.time() >= float(ra):
+        return None    # negative-cache TTL elapsed — force re-fetch
+    return entry.get("data")
+
+def _fund_disk_put(key: str, cache_bucket: str, data: dict,
+                   negative_ttl_sec: float = None) -> None:
+    """Write one entry and persist to disk. Atomic via .tmp rename.
+
+    v5 (Aug-2026): pass `negative_ttl_sec` (e.g. 12*3600) to cache a failed
+    fetch with a shorter horizon so we don't hammer the network on every
+    restart, but do retry after the window. Without it (default), the entry
+    lives until the weekly Saturday bucket rotates."""
+    if data is None: return
+    cache = _fund_disk_load()
+    entry = {"ts": time.time(), "cache_bucket": cache_bucket, "data": data}
+    if negative_ttl_sec:
+        entry["retry_after"] = time.time() + float(negative_ttl_sec)
+    cache[key] = entry
+    try:
+        import json as _json
+        tmp = _FUND_DISK_CACHE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json.dump(cache, f)
+        os.replace(tmp, _FUND_DISK_CACHE_PATH)
+    except Exception:
+        pass    # non-fatal — RAM cache still works this session
+
+
+def cache_coverage(tickers_yahoo: list, include_trend: bool = True) -> dict:
+    """Preflight: how many of these tickers already have a fresh cache entry?
+
+    v5 (Aug-2026): powers the "X/Y already cached" hint the scanner shows
+    BEFORE it starts the fundamentals loop so the user can see at a glance
+    whether the coming loop is going to hit the network or just walk cache
+    hits. O(len(tickers)) dict lookups — no I/O beyond the one-shot cache
+    load done by _fund_disk_load().
+
+    Returns
+    -------
+    {
+        "total":       N,
+        "fresh":       # of tickers with valid `fund::` cache entry,
+        "missing":     # of tickers that will hit the network,
+        "bucket":      current weekly cache bucket string,
+    }
+    """
+    bucket = _weekly_cache_bucket()
+    fresh = 0
+    for ty in tickers_yahoo:
+        key = f"fund::{ty.upper()}::{bool(include_trend)}::{bucket}"
+        if _fund_disk_get(key, bucket) is not None:
+            fresh += 1
+    return {
+        "total":   len(tickers_yahoo),
+        "fresh":   fresh,
+        "missing": len(tickers_yahoo) - fresh,
+        "bucket":  bucket,
+    }
+
+def clear_fund_disk_cache() -> None:
+    """Wipe the entire disk cache. Use only for testing / manual override."""
+    global _FUND_DISK_CACHE
+    _FUND_DISK_CACHE = {}
+    try:
+        if os.path.exists(_FUND_DISK_CACHE_PATH):
+            os.remove(_FUND_DISK_CACHE_PATH)
+    except Exception:
+        pass
+
+
 # ======================================================================================
 #  1. CONFIGURATION — thresholds for the NO-TRADE gate
 # ======================================================================================
@@ -384,27 +506,33 @@ def _weekly_cache_bucket() -> str:
 
 
 def clear_fundamentals_cache() -> None:
-    """Force the next fundamentals fetch to hit the network, bypassing both
-    the Streamlit in-memory cache AND the weekly cache bucket. Use when
-    quarterly results have just been announced and you want fresh numbers
-    immediately — don't wait until Saturday's automatic refresh.
+    """Force the next fundamentals fetch to hit the network, bypassing the
+    weekly cache bucket. Use when quarterly results have just been announced
+    and you want fresh numbers immediately — don't wait until Saturday's
+    automatic refresh.
 
     Called by the scanner sidebar's "🔄 Force refresh fundamentals" button.
-    Safe to call from any context; silently no-ops if the caches don't
+    Safe to call from any context; silently no-ops if the cache doesn't
     exist yet (fresh Streamlit session).
+
+    v5 (Aug-2026): the Streamlit @st.cache_data wrappers were removed
+    (persist=disk+ttl was incompatible and printed a warning at every start).
+    JSON disk cache is now the sole cache — clear that.
     """
     try:
-        _fetch_fundamentals_impl.clear()
-    except Exception:
-        pass
-    try:
-        _fetch_screener_fundamentals_impl.clear()
+        clear_fund_disk_cache()
     except Exception:
         pass
 
 
-# 7-day TTL + weekly cache bucket → guaranteed weekly refresh anchored to Saturday.
-@st.cache_data(ttl=60 * 60 * 24 * 7, show_spinner=False)
+# v5 (Aug-2026): DROPPED @st.cache_data(persist="disk", ttl=...) — Streamlit
+# refuses to honour TTL together with disk persistence and prints a warning at
+# every startup ("The cached function ... has a TTL that will be ignored").
+# Our JSON disk cache (_fund_disk_get/put) is the sole authority now: it
+# survives process restarts, respects the weekly Saturday bucket, and adds
+# per-entry retry_after semantics for negative caching. The impl below is
+# only reached on a genuine cache miss, so wrapping it in a second RAM cache
+# would be redundant.
 def _fetch_screener_fundamentals_impl(ticker_bare: str, cache_bucket: str) -> dict:
     """Cached implementation — `cache_bucket` is a versioning string (see
     _weekly_cache_bucket) that rotates every Saturday and participates in the
@@ -460,8 +588,23 @@ def _fetch_screener_fundamentals_impl(ticker_bare: str, cache_bucket: str) -> di
 def fetch_screener_fundamentals(ticker_bare: str) -> dict:
     """Public wrapper for Screener.in fundamentals fetch. Backwards-compatible
     signature — internally injects the weekly cache bucket so callers get
-    weekly-refresh semantics for free."""
-    return _fetch_screener_fundamentals_impl(ticker_bare, _weekly_cache_bucket())
+    weekly-refresh semantics for free.
+
+    v5 (Aug-2026): JSON disk cache is the sole persistence layer. If the
+    impl returns an EMPTY dict (Screener 5xx / HTML < 5KB / curl_cffi
+    missing), we cache it with a 12h retry_after so we don't hammer the
+    scrape on every restart, but tomorrow's run does retry."""
+    bucket = _weekly_cache_bucket()
+    key = f"screener::{ticker_bare.upper()}::{bucket}"
+    cached = _fund_disk_get(key, bucket)
+    if cached is not None:
+        return cached
+    data = _fetch_screener_fundamentals_impl(ticker_bare, bucket)
+    if data:                                     # non-empty: full weekly TTL
+        _fund_disk_put(key, bucket, data)
+    else:                                        # empty: short retry window
+        _fund_disk_put(key, bucket, data, negative_ttl_sec=12 * 3600)
+    return data
 
 
 # ======================================================================================
@@ -671,9 +814,9 @@ def _metrics_from_bs_ann(t, info: dict, ticker_bare: str = "") -> dict:
             "data_stale": data_stale}
 
 
-# 7-day TTL + weekly cache bucket → refresh key rotates every Saturday.
-# See _weekly_cache_bucket() above for why fundamentals don't need daily reruns.
-@st.cache_data(ttl=60 * 60 * 24 * 7, show_spinner=False)
+# v5 (Aug-2026): DROPPED @st.cache_data(persist="disk", ttl=...) — see
+# _fetch_screener_fundamentals_impl above for the same rationale (Streamlit
+# ignores TTL when persist is on, and our JSON disk cache is the authority).
 def _fetch_fundamentals_impl(ticker_yahoo: str, include_trend: bool,
                               cache_bucket: str) -> dict:
     """Cached implementation — `cache_bucket` is a versioning string (see
@@ -925,9 +1068,28 @@ def fetch_fundamentals(ticker_yahoo: str, include_trend: bool = True) -> dict:
     None of the ACTIVE parameters change intraday. Even Valuation (PE/PB/EV)
     which technically drift with price only shift a few % across a week, well
     inside the lenient absolute caps used by the NO-TRADE gate.
+
+    v4 (Aug-2026): JSON disk cache in front of the Streamlit RAM cache so
+    fetches survive process restarts. Order: disk → RAM → network. Governed
+    by the same 7-day TTL and weekly Saturday cache bucket. Disk lives at
+    `.fundamentals_cache.json` next to this file.
     """
-    return _fetch_fundamentals_impl(ticker_yahoo, include_trend,
-                                     _weekly_cache_bucket())
+    bucket = _weekly_cache_bucket()
+    key = f"fund::{ticker_yahoo.upper()}::{bool(include_trend)}::{bucket}"
+    cached = _fund_disk_get(key, bucket)
+    if cached is not None:
+        return cached
+    data = _fetch_fundamentals_impl(ticker_yahoo, include_trend, bucket)
+    # v5 (Aug-2026): cache BOTH success AND failure so we don't hammer the
+    # network on every restart. Failures get a 12-hour retry_after so a
+    # rate-limit blip recovers on the next day's run instead of forcing a
+    # re-fetch on every Streamlit start within this weekly bucket.
+    if isinstance(data, dict) and "_error" not in data:
+        _fund_disk_put(key, bucket, data)                     # full weekly TTL
+    else:
+        _fund_disk_put(key, bucket, data,                     # short retry window
+                       negative_ttl_sec=12 * 3600)
+    return data
 
 
 # ======================================================================================

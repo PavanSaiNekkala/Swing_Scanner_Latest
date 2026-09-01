@@ -83,7 +83,17 @@ from fundamental_screen import (
     DEFAULT_FUNDA_CONFIG,
     clear_fundamentals_cache as fs_clear_cache,
     _weekly_cache_bucket as fs_weekly_bucket,
+    cache_coverage as fs_cache_coverage,        # v5 — preflight cache report
 )
+
+# --- Wishlist v2 auto-append store (Aug-2026) ---
+# The scanner writes signalled + positive-news rows into wishlist.xlsx after
+# every run so the Wishlist Tracker doesn't need any manual CSV maintenance.
+try:
+    import wishlist_store as _wl_store
+    HAVE_WL_STORE = True
+except Exception:
+    HAVE_WL_STORE = False
 
 # --- News & Event risk (Aug-2026) ---
 try:
@@ -146,7 +156,9 @@ def fetch_sector_map() -> dict:
     return _ul_load().get("sector_map", {})
 
 
-def apply_sector_caps(cand: pd.DataFrame, max_per_sector: int) -> tuple:
+def apply_sector_caps(cand: pd.DataFrame, max_per_sector: int,
+                       reserve_largecap_slot: bool = False,
+                       top_n_strict_cap: tuple = None) -> tuple:
     """Keep at most `max_per_sector` names per sector, preferring the highest-ranked.
     Assumes `cand` is already sorted best-first.
 
@@ -155,16 +167,72 @@ def apply_sector_caps(cand: pd.DataFrame, max_per_sector: int) -> tuple:
     NSE was unreachable — you'd end up with 30 UNKNOWN-sector names in the
     shortlist thinking you had 3-per-sector diversification. Capping UNKNOWN
     keeps the shortlist honest even when sector data is missing.
+
+    Aug-2026 (user request): NEW `reserve_largecap_slot` param. When True and a
+    sector has BOTH LargeCap and non-LargeCap signals, the highest-ranked
+    LargeCap in that sector CLAIMS one of the max_per_sector slots FIRST —
+    even if other-cap peers rank higher. This prevents the shortlist from
+    tilting to SmallCap+MidCap in sectors like Financial Services and
+    Automobile where a solid LargeCap opportunity would otherwise get
+    sector-capped by higher-ranked-but-lower-cap-quality peers. Trade-off:
+    kicks out ONE potentially-better mid/small in that sector, in exchange
+    for cap diversification. My quant recommendation: keep ON — better
+    portfolio construction beats squeezing marginal alpha from one more
+    small-cap slot.
+
+    v4 (Aug-2026 evidence-driven): NEW `top_n_strict_cap` param — tuple
+    (top_n, per_sector_strict). Enforces a STRICTER cap on the TOP-N slice:
+    e.g. (5, 1) means "in the first 5 KEPT picks, allow at most 1 per sector."
+    The remaining slots below top-N still respect `max_per_sector`. Directly
+    addresses the weekly forward-validation finding that Aug 21's top-5 were
+    ALL Capital Goods / Financials — one factor bet, not five diversified
+    picks. Default None = disabled (backwards compatible).
     """
     if max_per_sector <= 0 or cand.empty:
         return cand, {}
     kept_idx, counts, dropped = [], {}, {}
+    # v4 top-N strict cap state
+    if top_n_strict_cap:
+        top_n_limit, top_n_per_sec = int(top_n_strict_cap[0]), int(top_n_strict_cap[1])
+    else:
+        top_n_limit, top_n_per_sec = 0, 0
+    top_n_counts = {}     # sector → count within top-N so far
+
+    # Phase 1 — if reserve_largecap_slot: pre-claim 1 slot in each sector for the
+    # top-ranked LargeCap signal, before the main loop fills remaining slots.
+    if reserve_largecap_slot and "category" in cand.columns:
+        for sec, sub in cand.groupby("sector", sort=False):
+            lc = sub[sub["category"] == "LargeCap"]
+            if not lc.empty:
+                top_lc_idx = lc.index[0]      # already sorted best-first
+                kept_idx.append(top_lc_idx)
+                counts[sec] = 1
+                # If this LargeCap sits within the top-N band, count it too
+                if top_n_limit > 0 and top_lc_idx < top_n_limit:
+                    top_n_counts[sec] = top_n_counts.get(sec, 0) + 1
+
+    # Phase 2 — fill remaining slots per sector with the top remaining candidates
+    already_kept = set(kept_idx)
     for i, row in cand.iterrows():
+        if i in already_kept:
+            continue
         sec = row.get("sector", "UNKNOWN") or "UNKNOWN"
+        # ---- v4: top-N strict cap check FIRST ----
+        # Position in the emerging KEPT list = len(kept_idx) so far
+        pos_in_kept = len(kept_idx)
+        if (top_n_limit > 0 and pos_in_kept < top_n_limit
+                and top_n_counts.get(sec, 0) >= top_n_per_sec):
+            # This stock would be a top-N pick but its sector is already at the strict cap.
+            # DEFER — do not accept into the strict top-N band; will be considered again
+            # once top-N band is filled (natural progression) or dropped if no room.
+            dropped[sec] = dropped.get(sec, 0) + 1
+            continue
         c = counts.get(sec, 0)
         if c < max_per_sector:
             counts[sec] = c + 1
             kept_idx.append(i)
+            if top_n_limit > 0 and pos_in_kept < top_n_limit:
+                top_n_counts[sec] = top_n_counts.get(sec, 0) + 1
         else:
             dropped[sec] = dropped.get(sec, 0) + 1
     return cand.loc[kept_idx], dropped
@@ -532,6 +600,79 @@ def _compute_stage2_score(df: pd.DataFrame) -> tuple:
     return score, reasons, flags
 
 
+# =============================================================================
+# ANTI-CROWDING SCORE   (Aug-2026 — evidence-driven addition)
+# -----------------------------------------------------------------------------
+# The weekly forward-validation experiment (Aug 19-25 2026 on Nifty 500)
+# proved that TOP-5 by rank_score AVERAGES −0.50% over 5 trading days while
+# MID-5 averages +2.06% and BOT-5 averages +0.05% — the ranking is systematically
+# picking the most-crowded / most-extended stocks, which are exactly the ones
+# mean-reversion pulls back.
+#
+# This scorer produces a 0-100 measure where HIGHER = MORE CROWDED / EXTENDED.
+# The scanner multiplies rank_score by (1 - crowding/100 × 0.30), so a fully
+# crowded stock loses 30% of its rank, a fresh breakout loses 0. Four
+# continuous components (each 0-25 pts) — every one uses only trailing data:
+#   1. Recent-move extension    — (5d Close change / ATR14) — how many ATRs run
+#   2. RSI zone                 — linear 50→85 mapping to 0→25 (overbought pressure)
+#   3. Position in 20d range    — (Close − 20d_low) / (20d_high − 20d_low)
+#   4. Distance from 20-DMA     — (pct_vs_sma20 continuous, 0→10% mapping to 0→25)
+# =============================================================================
+def _compute_anti_crowding_score(df: pd.DataFrame) -> tuple:
+    """Returns (crowding_score_0_to_100, human_readable_reasons_list).
+    Higher = more crowded / extended → BAD for entry (mean-reversion risk)."""
+    if df is None or df.empty or len(df) < 20:
+        return 0.0, ["insufficient history for crowding read"]
+    last = df.iloc[-1]
+    close_now  = float(last["Close"])
+    atr14      = float(last.get("atr14", np.nan))
+    rsi14      = float(last.get("rsi14", np.nan))
+    pct_20     = float(last.get("pct_vs_sma20", np.nan))
+
+    reasons = []
+    components = []
+
+    # (1) 5-day price extension normalised by ATR.
+    #     e.g. +3 ATRs of move in 5 days = fully extended (25 pts).
+    if "Close" in df.columns and len(df) >= 6 and np.isfinite(atr14) and atr14 > 0:
+        c5_ago = float(df["Close"].iloc[-6])
+        atrs_moved = (close_now - c5_ago) / atr14
+        # Positive move only — extended UPward is the problem for long entries
+        atrs_moved = max(0.0, atrs_moved)
+        comp = min(25.0, atrs_moved / 3.0 * 25.0)   # 3 ATRs → 25 pts
+        components.append(comp)
+        reasons.append(f"5d move = {atrs_moved:.1f} ATRs ({comp:.0f} pts)")
+
+    # (2) RSI zone — linear 50→85 → 0→25 pts.
+    if np.isfinite(rsi14):
+        rsi_pen = min(25.0, max(0.0, (rsi14 - 50.0) / 35.0 * 25.0))
+        components.append(rsi_pen)
+        reasons.append(f"RSI {rsi14:.0f} ({rsi_pen:.0f} pts)")
+
+    # (3) Position within 20-day range — riding the top of range = penalised.
+    if "High" in df.columns and "Low" in df.columns and len(df) >= 20:
+        h20 = float(df["High"].tail(20).max())
+        l20 = float(df["Low"].tail(20).min())
+        if h20 > l20:
+            pos = (close_now - l20) / (h20 - l20)
+            pos = max(0.0, min(1.0, pos))
+            comp = pos * 25.0
+            components.append(comp)
+            reasons.append(f"pos in 20d range = {pos*100:.0f}% ({comp:.0f} pts)")
+
+    # (4) Distance from 20-DMA (continuous). 0→10% maps to 0→25.
+    if np.isfinite(pct_20):
+        d20_pen = min(25.0, max(0.0, pct_20 / 10.0 * 25.0))
+        components.append(d20_pen)
+        reasons.append(f"{pct_20:+.1f}% vs 20-DMA ({d20_pen:.0f} pts)")
+
+    if not components:
+        return 0.0, ["no crowding features available"]
+    # Average the components rather than sum, so missing data doesn't rescale.
+    score = round(sum(components) / len(components) * 4.0, 1)   # rescale to 0-100 with 4 components
+    return min(100.0, score), reasons
+
+
 def scan_one(ticker, start, end, strategy, p, bt_kwargs, idx_ret_window=0.0,
              sector_map=None, category_map=None,
              require_confirmation: bool = False,
@@ -616,7 +757,77 @@ def scan_one(ticker, start, end, strategy, p, bt_kwargs, idx_ret_window=0.0,
     winr_seq     = stats.get("seq_win_%", 0.0)
     exp_day_seq  = stats.get("seq_exp_per_day_%", 0.0)
     size_factor  = n_seq / (n_seq + 30.0)          # sample-size damping on SEQUENTIAL count
-    confidence = round(max(exp_day_seq, 0) * (winr_seq / 100.0) * size_factor * 100, 2)
+    # Base confidence — unchanged for backward-compat / audit
+    confidence_base = round(max(exp_day_seq, 0) * (winr_seq / 100.0) * size_factor * 100, 2)
+
+    # =====================================================================
+    # CONFIDENCE ENHANCEMENTS (Aug-2026 — user request)
+    # ---------------------------------------------------------------------
+    # Three bounded multipliers layered on top of confidence_base, each
+    # addresses a specific weakness the user identified:
+    #
+    #   1. HIT_BOOST (±25%) — win_rate alone rewards ANY positive trade
+    #      (small trail exits, time-wins). For a +15%-swing strategy we
+    #      also want stocks where the +15% thesis actually MATERIALIZED,
+    #      i.e. `outcome == TARGET`. Stocks with 70% win but 30% hit_rate
+    #      are earning small money on ~40% of trades that never touch the
+    #      objective. Those trades reflect a weaker "the pattern truly
+    #      works" signal than 71% win / 43% hit (ENDURANCE). Boost:
+    #        hit_rate = 10%   → 0.90x
+    #        hit_rate = 30%   → 1.00x  (average for +15% swings)
+    #        hit_rate = 50%   → 1.10x
+    #        hit_rate = 60%+  → 1.25x  (capped — signal quality is exceptional)
+    #
+    #   2. SAMPLE_BOOST (up to +15%) — the base size_factor already dampens
+    #      thin histories but caps out; add a tiered bonus for very-high-N
+    #      strategies where the edge is statistically bulletproof.
+    #        n_seq ≥ 100 → 1.05x
+    #        n_seq ≥ 200 → 1.10x
+    #        n_seq ≥ 500 → 1.15x
+    #
+    #   3. ATR_NORM (±15%, mean-1.0) — cap-neutrality. Small caps naturally
+    #      have higher exp_day just because their ATR is bigger; that's
+    #      volatility, not edge. Divide by the stock's own ATR (relative to
+    #      a 3.5% pivot) so 2-vol-large-caps and 7-vol-small-caps compete
+    #      on the SAME risk-adjusted scale. Bounded so it can't dominate.
+    #        atr_pct = 2.0 → 1.15x  (low-vol advantage capped)
+    #        atr_pct = 3.5 → 1.00x  (neutral pivot)
+    #        atr_pct = 7.0 → 0.85x  (high-vol dampener)
+    #
+    # All three are multiplicative and bounded → no single dimension can
+    # dominate, ranking stays sensible across the cap spectrum.
+    # =====================================================================
+    hit_rate = float(stats.get("hit_rate_%", 0.0))
+    _hit_delta = (hit_rate - 30.0) / 40.0           # -0.75 to +1.75 typical
+    hit_boost = 1.0 + max(-0.25, min(0.25, _hit_delta * 0.30))
+
+    if   n_seq >= 500: sample_boost = 1.15
+    elif n_seq >= 200: sample_boost = 1.10
+    elif n_seq >= 100: sample_boost = 1.05
+    else:              sample_boost = 1.00
+
+    _atr_safe = max(1.5, min(9.0, float(last.get("atr_pct", 3.5))
+                    if pd.notna(last.get("atr_pct", np.nan)) else 3.5))
+    atr_norm = max(0.85, min(1.15, 3.5 / _atr_safe))
+
+    confidence = round(confidence_base * hit_boost * sample_boost * atr_norm, 2)
+
+    # -------------------------------------------------------------------
+    # INFORMATIONAL: confidence_R (R-multiple based, TRULY cap-neutral)
+    # -------------------------------------------------------------------
+    # Alternate quality measure that ranks purely by RISK-ADJUSTED return.
+    # A 5% return on a 3% stop = same R-multiple as 10% return on 6% stop,
+    # regardless of cap tier. Exposed as a column so users can sort/verify
+    # the cap-neutral view alongside the standard rank_score. Does NOT
+    # change ranking or trade decisions — informational only.
+    # Formula: R × win% × size_factor × 100
+    # -------------------------------------------------------------------
+    exp_R_seq = stats.get("seq_expectancy_R", 0.0)
+    if exp_R_seq is None or (isinstance(exp_R_seq, float) and not np.isfinite(exp_R_seq)):
+        exp_R_seq = 0.0
+    confidence_R = round(
+        max(0.0, float(exp_R_seq)) * (winr_seq / 100.0) * size_factor * 100, 2
+    )
 
     # --- RELATIVE STRENGTH: stock's return minus the index's over the RS window ---
     c_ser = df["Close"]
@@ -688,6 +899,22 @@ def scan_one(ticker, start, end, strategy, p, bt_kwargs, idx_ret_window=0.0,
     rank_score = round(rank_score * stage2_boost, 2)
     stage2_reason_str = " · ".join(r for r in stage2_reasons if r.startswith("✓"))
 
+    # =====================================================================
+    # ANTI-CROWDING PENALTY  (Aug-2026 — evidence-driven addition)
+    # ---------------------------------------------------------------------
+    # Weekly forward-validation (Aug 19-25 2026, Nifty 500) proved TOP-5
+    # by rank averages −0.50% while MID-5 averages +2.06% and BOT-5 +0.05%.
+    # The rank_score compounds momentum-favoring multipliers so the top
+    # picks are the most crowded / most extended / most reversal-prone.
+    # This penalty demotes crowded names by up to 30% so the ranking
+    # discriminates FRESH breakouts from EXTENDED trades. Score 100 = full
+    # penalty (-30%), score 0 = no penalty.
+    # =====================================================================
+    crowding_score, crowding_reasons = _compute_anti_crowding_score(df)
+    anti_crowd_mult = 1.0 - (crowding_score / 100.0) * 0.30
+    rank_score_pre_crowd = rank_score
+    rank_score = round(rank_score * anti_crowd_mult, 2)
+
     # --- point 1: concrete stop-loss for a trade entered ~ at the last close ---
     entry_ref = float(last["Close"])
     atr_now = float(last["atr14"]) if np.isfinite(last["atr14"]) else 0.0
@@ -698,9 +925,27 @@ def scan_one(ticker, start, end, strategy, p, bt_kwargs, idx_ret_window=0.0,
     # --- LIMIT ENTRY: the price to actually place the order at (don't chase the open) ---
     entry_mode = bt_kwargs.get("entry_mode", "Market open")
     limit_pct = bt_kwargs.get("limit_pct", 0.0)
+    max_chase_pct_ui = bt_kwargs.get("max_chase_pct", 1.5)
     if entry_mode == "Limit":
         limit_price = round(entry_ref * (1 - limit_pct / 100.0), 2)
         plan_entry = limit_price                # stop/target computed off the price you'd pay
+    elif entry_mode == "Adaptive":
+        # v4: signal-day strength decides Limit vs Market_capped for THIS bar.
+        _green   = df.iloc[-1]["Close"] > df.iloc[-1]["Open"]
+        _vol20   = df["Volume"].rolling(20).mean().iloc[-1] if "Volume" in df.columns else np.nan
+        _vol_ok  = pd.notna(_vol20) and _vol20 > 0 and df.iloc[-1]["Volume"] > 1.2 * _vol20
+        _higher  = (len(df) >= 2 and df.iloc[-1]["Close"] > df.iloc[-2]["Close"])
+        _strong  = bool(_green and _vol_ok and _higher)
+        if _strong:
+            # Strong day → market next-open; plan_entry = signal close as a proxy
+            # (actual entry price known only after tomorrow's open) with an explicit
+            # note in the UI that Adaptive will chase up to `max_chase_pct`.
+            limit_price = np.nan
+            plan_entry  = entry_ref
+        else:
+            # Weak day → Limit rule
+            limit_price = round(entry_ref * (1 - limit_pct / 100.0), 2)
+            plan_entry  = limit_price
     else:
         limit_price = np.nan
         plan_entry = entry_ref
@@ -734,6 +979,18 @@ def scan_one(ticker, start, end, strategy, p, bt_kwargs, idx_ret_window=0.0,
         "stage2_boost":         round(stage2_boost, 3),   # 0.85..1.15
         "stage2_reason":        stage2_reason_str[:200],  # ✓ passing checks summary
         "rank_score_pre_stage2": rank_score_pre_stage2,   # for A/B audit
+        # ---- Anti-crowding audit (Aug-2026 evidence-driven fix) ----
+        "crowding_score":         crowding_score,                     # 0..100 — HIGHER = more crowded
+        "anti_crowding_mult":     round(anti_crowd_mult, 3),          # 0.70..1.00
+        "crowding_reason":        " · ".join(crowding_reasons)[:200],
+        "rank_score_pre_crowd":   rank_score_pre_crowd,               # for A/B audit
+        # ---- Confidence-enhancement audit (Aug-2026) ----
+        "confidence_base":  confidence_base,              # pre-boost confidence for A/B
+        "hit_rate_%":       round(hit_rate, 1),           # % of trades that hit +15% target
+        "hit_boost":        round(hit_boost, 3),          # 0.75..1.25 based on hit_rate
+        "sample_boost":     round(sample_boost, 3),       # 1.00..1.15 based on n_seq
+        "atr_norm":         round(atr_norm, 3),           # 0.85..1.15 cap-neutrality
+        "confidence_R":     confidence_R,                 # informational, cap-neutral R-based
         "bt_from": raw.index[0].date(), "bt_to": raw.index[-1].date(), "years": round(yrs, 1),
         "hist_trades": n, "win_%": winr, "expectancy_%": exp,
         "avg_win_%": stats.get("avg_win_%", 0.0), "avg_loss_%": stats.get("avg_loss_%", 0.0),
@@ -1043,18 +1300,44 @@ def body():
         cA, cB = st.columns(2)
         min_hold = cA.number_input("Min hold (d)", 1, 60, 1)
         max_hold = cB.number_input("Max hold (d)", 1, 120, 30)
-        entry_choice = st.radio("Entry style",
-                                ["Limit near signal close (recommended)", "Market at next open"], index=0,
-                                help="Market buys whatever the open gives — a gap-up means a worse fill. "
-                                     "Limit places a resting buy and skips the trade if price never returns.")
-        if entry_choice.startswith("Limit"):
+        # v4 (Aug-2026 EVIDENCE-DRIVEN): Adaptive is the new default.
+        # Weekly forward-test proved 26/27 missed limits were on WINNERS that
+        # gapped UP > 0.5% (the current limit width). Adaptive keeps Limit
+        # semantics for weak signal-days AND switches to market-at-open (with
+        # a max_chase guard) for strong signal-days — the ones that gap up.
+        entry_choice = st.radio(
+            "Entry style",
+            ["🚀 Adaptive (recommended)",
+             "Limit near signal close",
+             "Market at next open"],
+            index=0,
+            help="**Adaptive** (default): if signal day closed strong (green candle "
+                 "+ volume > 1.2× 20-day avg + close > previous close), buy at market "
+                 "next open with a max-chase guard (skip if gap > `max_chase_pct`); "
+                 "otherwise use Limit rule. Directly addresses the missed-limit-on-"
+                 "winners pattern (26/27 misses in Aug 2026 test).\n\n"
+                 "**Limit**: resting buy at `signal_close × (1 - limit_pct%)`. Skips "
+                 "trades that never touch the limit — misses gap-up winners.\n\n"
+                 "**Market**: takes whatever the open gives — no guard on gap-ups.")
+        if entry_choice.startswith("🚀"):
+            entry_mode = "Adaptive"
+            limit_pct = st.slider("Limit below signal close (%) — used on weak days", 0.0, 5.0, 0.5, 0.1)
+            fill_days = st.number_input("Limit order valid for (sessions)", 1, 5, 1)
+            max_chase_pct = st.slider(
+                "Max gap-chase % on STRONG days (Adaptive only)",
+                0.5, 5.0, 1.5, 0.1,
+                help="If the strong-day open gaps up MORE than this vs signal close, "
+                     "skip the trade (risk-budget guard). Default 1.5%.")
+        elif entry_choice.startswith("Limit"):
             entry_mode = "Limit"
             limit_pct = st.slider("Limit below signal close (%)", 0.0, 5.0, 0.5, 0.1,
                                   help="0 = order at the signal close. Higher = wait for a deeper "
                                        "pullback: better fills, but more signals never fill.")
             fill_days = st.number_input("Order valid for (sessions)", 1, 5, 1)
+            max_chase_pct = 1.5   # unused in Limit mode but engine expects the kwarg
         else:
             entry_mode, limit_pct, fill_days = "Market open", 0.0, 1
+            max_chase_pct = 1.5   # unused in Market mode
         exit_mode = st.radio("Exit style", ["Trailing", "Fixed target"], index=1,
                              help="Trailing lets winners run past the target.")
         trail_mult = st.slider("Trailing x ATR", 0.5, 5.0, 2.0, 0.5) if exit_mode == "Trailing" else 2.0
@@ -1101,14 +1384,27 @@ def body():
         st.header("4b - Exit stack  🆕 A + B + C")
         st.caption("Stops good winners turning into small winners. Any layer fires "
                    "→ trade exits. **Refined defaults from v1 backtest analysis.**")
+        # v5 (Aug-2026 EVIDENCE-DRIVEN): NOW DEFAULT ON with a data-calibrated
+        # ladder. 42-day Nifty-500 walk-forward proved 31% of stops peaked
+        # > +5% before reversing (mean 8pp give-back). The new ladder locks
+        # early (+5% peak → +2% floor) and delivers +1.5-2 pp per pick on
+        # average per simulation.
         use_ratchet = st.checkbox(
-            "🔒 A · Ratcheting profit lock  (softer v2 ladder)",
-            value=False,
-            help="Peak crosses 15/25/40/60/85/120 % → floor moves to 5/12/25/40/60/85 %. "
-                 "Softer than v1: first rung armed at +15% peak (was +10%), so ordinary "
-                 "10-12% pushes without follow-through don't get cut at breakeven. "
-                 "**Default OFF** — router chooses Fixed vs Trailing; layers add complexity "
-                 "we'd rather A/B-test in explicitly."
+            "🔒 A · Ratcheting profit lock  (data-calibrated v5 ladder — ON by default)",
+            value=True,
+            help="Locks profit as the trade advances so a winner can't reverse into "
+                 "a stop. v5.1 ladder (A/B-tested against 42-day walk-forward):\n"
+                 "  peak +8%  → lock +3%\n"
+                 "  peak +12% → lock +7%\n"
+                 "  peak +18% → lock +13%\n"
+                 "  peak +25% → lock +19%\n"
+                 "  peak +35% → lock +27%\n"
+                 "  peak +50% → lock +38%\n"
+                 "  peak +75% → lock +58%\n"
+                 "  peak +100% → lock +78%\n\n"
+                 "First rung armed at +8% (v5 tried +5% but that truncated real winners "
+                 "before their trend could develop). Late rungs preserve ≥ 75% of any "
+                 "big run. Direct fix for the 'peak high, net low' problem."
         )
         use_shrink = st.checkbox(
             "📉 B · Shrinking trail multiplier",
@@ -1330,6 +1626,36 @@ def body():
                                    help="Caps how many stocks from one industry can enter the "
                                         "shortlist (highest-ranked kept). 0 = no cap. Prevents "
                                         "one sector's bad day from sinking the whole book.")
+        # v3 (Aug-2026 — user request): cap-tier reservation inside the sector cap
+        reserve_lc_slot = st.checkbox(
+            "🏛️ Reserve 1 sector slot for top LargeCap (recommended)",
+            value=True,
+            disabled=(max_per_sector <= 0),
+            help="When ON: in each sector, the highest-ranked LargeCap "
+                 "signal CLAIMS one of the max-per-sector slots first, "
+                 "before higher-ranked mid/small-caps fill the rest. "
+                 "Prevents 'Financial Services already has 3 SmallCap+MidCap "
+                 "→ HDFCBANK gets cut'. Trade-off: drops ONE marginally "
+                 "higher-ranked non-LargeCap per sector in exchange for "
+                 "cap diversification. Quant recommendation: keep ON — "
+                 "portfolio construction beats grinding one more small-cap slot."
+        )
+        # v4 (Aug-2026 EVIDENCE-DRIVEN): strict top-N per-sector cap
+        st.markdown("**🆕 Top-N strict cap** — evidence-driven addition")
+        top_n_strict_size = st.slider(
+            "Enforce max 1/sector across the FIRST N picks", 0, 15, 5, 1,
+            disabled=(max_per_sector <= 0),
+            help="Weekly Nifty-500 forward-test (Aug 19-25 2026) proved days "
+                 "when top-5 were all in one theme (Capital Goods / Financials) "
+                 "averaged −4.5% while diversified mid-tier averaged +0.2%. "
+                 "This cap enforces 1-per-sector strictly for the top N picks so "
+                 "you get 5 uncorrelated bets, not 5 correlated legs of one bet. "
+                 "0 = disabled. Recommended: **5**.")
+        top_n_per_sector = st.slider(
+            "Max per sector within top-N", 1, 3, 1, 1,
+            disabled=(top_n_strict_size <= 0),
+            help="Usually 1. Set to 2 if you accept a mild sector tilt "
+                 "in the top slice to catch more edge from a hot sector.")
 
         with st.expander("Advanced filter thresholds"):
             p = {
@@ -1364,6 +1690,10 @@ def body():
         return
 
     if run:
+        # Wishlist v2 — clear the "already appended" flag so this fresh run's
+        # tagged shortlist gets persisted once render_results tags statuses.
+        st.session_state.pop("_wl_appended_scan_id", None)
+        st.session_state.pop("_wl_last_append", None)
         bt_kwargs = dict(target_pct=target_pct, max_hold=int(max_hold),
                          min_hold=int(min_hold),          # M7 FIX — was silently ignored
                          stop_method="ATR",
@@ -1372,6 +1702,7 @@ def body():
                          exit_mode=("Trailing" if exit_mode == "Trailing" else "Fixed target"),
                          trail_mult=trail_mult, max_stop_pct=max_stop_pct, max_atr_pct=max_atr_pct,
                          entry_mode=entry_mode, limit_pct=limit_pct, fill_days=int(fill_days),
+                         max_chase_pct=float(max_chase_pct),   # v4: Adaptive gap-chase guard
                          lock_pct=lock_pct, cut_day=(int(cut_day) if cut_day else None),
                          cut_threshold=cut_threshold, partial_frac=0.0, partial_atr=3.0,
                          stop_anchor=stop_anchor, trail_anchor=trail_anchor,
@@ -1482,15 +1813,47 @@ def body():
                     "min_sma200_slope_%":     slope_min,
                     "min_avg_turnover_cr":    turn_min,
                 }
-            st.info(f"🧾 Running fundamentals no-trade screen "
-                    f"(weekly cached — refresh key {fs_weekly_bucket()}; "
-                    f"reruns until next Saturday are instant)...")
             tickers_yahoo = [to_yahoo(s) for s in tickers[:max_n]]
+
+            # v5 (Aug-2026): PREFLIGHT cache coverage — one dict-lookup per
+            # ticker, no network. Shows the user up-front how many are
+            # already fresh from the weekly cache vs need a real fetch.
+            # Without this, the progress bar churning through 500 cache hits
+            # was indistinguishable from a fresh 500-stock network fetch.
+            _cov = fs_cache_coverage(tickers_yahoo,
+                                     include_trend=bool(funda_trend
+                                                        if not momentum_preset
+                                                        else False))
+            if _cov["missing"] == 0:
+                st.success(
+                    f"🗂️ Fundamentals cache: **all {_cov['total']} stocks "
+                    f"fresh** (bucket {_cov['bucket']}). "
+                    f"No network fetches needed — this pass will be near-instant."
+                )
+            elif _cov["fresh"] > 0:
+                st.info(
+                    f"🧾 Fundamentals cache: **{_cov['fresh']}/{_cov['total']} "
+                    f"already fresh** (bucket {_cov['bucket']}); "
+                    f"fetching **{_cov['missing']}** new/stale from Screener+yfinance..."
+                )
+            else:
+                st.info(
+                    f"🧾 Fundamentals cache: nothing cached yet for this bucket "
+                    f"({_cov['bucket']}). Fetching all {_cov['total']} stocks — "
+                    f"reruns until next Saturday will be instant."
+                )
             f_prog = st.progress(0.0); f_stat = st.empty()
 
+            # v5 (Aug-2026): throttle progress updates to ~5 per second (or on
+            # the last item). Rewriting the Streamlit UI element for every
+            # ticker was making 500 cache hits look like a 25-second fetch.
+            _throttle = {"last": 0.0}
             def _fund_cb(k, n, sym):
-                f_stat.write(f"Fund-check {sym.replace('.NS','')}  ({k+1}/{n})")
-                f_prog.progress((k + 1) / n)
+                _now = time.monotonic()
+                if k == n - 1 or (_now - _throttle["last"]) >= 0.2:
+                    f_stat.write(f"Fund-check {sym.replace('.NS','')}  ({k+1}/{n})")
+                    f_prog.progress((k + 1) / n)
+                    _throttle["last"] = _now
 
             funda_results, _sec_medians = fs_screen_universe(
                 tickers_yahoo, sector_map, funda_cfg, _fund_cb
@@ -1678,6 +2041,7 @@ def body():
                         r["news_score"]      = float(n.get("score", 0.0))
                         r["news_n"]          = int(n.get("n_articles", 0))
                         r["news_top"]        = n.get("top_headline")
+                        r["news_top_date"]   = n.get("top_date")     # v3 (Aug-2026): user asked to surface this
                         r["news_top_score"]  = float(n.get("top_impact", 0.0))
                         # Latest-by-date headline (may differ from `news_top`,
                         # which is largest-|score|). Users want both.
@@ -1690,7 +2054,7 @@ def body():
                         r["rank_score"] = round(r["rank_score"] * (1.0 + tilt), 2)
                     else:
                         r["news_score"] = 0.0; r["news_n"] = 0
-                        r["news_top"] = None; r["news_top_score"] = 0.0
+                        r["news_top"] = None; r["news_top_date"] = None; r["news_top_score"] = 0.0
                         r["news_latest"] = None; r["news_latest_date"] = None
                         r["news_latest_score"] = 0.0
                         r["news_matched"] = ""
@@ -1710,6 +2074,7 @@ def body():
             r.setdefault("news_score", 0.0)
             r.setdefault("news_n", 0)
             r.setdefault("news_top", None)
+            r.setdefault("news_top_date", None)              # v3 (Aug-2026)
             r.setdefault("news_top_score", 0.0)
             r.setdefault("news_latest", None)
             r.setdefault("news_latest_date", None)
@@ -1730,6 +2095,9 @@ def body():
             "regime": regime, "bench_name": bench_name or "index n/a", "use_gate": use_gate,
             "segments": segments, "breadth": breadth, "gate": gate,
             "max_per_sector": max_per_sector,
+            "reserve_lc_slot": reserve_lc_slot,
+            "top_n_strict_size": int(top_n_strict_size),
+            "top_n_per_sector":  int(top_n_per_sector),
             "entry_mode": entry_mode, "limit_pct": limit_pct, "fill_days": fill_days,
             "funda_results": funda_results,
             "funda_rejects_df": funda_rejects_df,
@@ -2085,7 +2453,16 @@ def render_results():
         st.markdown(
             "**Full rank formula:**\n\n"
             "`rank_score = confidence × RS_tilt × freshness × extension_pen × stage2_boost × news_tilt`\n\n"
-            "**confidence = max(expectancy, 0) × win-rate × sample-size-damping × 10** — the historical edge.\n\n"
+            "**confidence = confidence_base × hit_boost × sample_boost × atr_norm** where:\n\n"
+            "• **confidence_base** = max(expectancy, 0) × win-rate × sample-size-damping × 10 — the historical edge.\n"
+            "• **hit_boost (±25%)** 🆕 — rewards stocks where trades actually reached the +15% target, not just any positive close. "
+            "Win rate alone counts small trail/time wins; hit-rate says the pattern truly worked. hit_rate=30% is neutral, "
+            "hit_rate=60%+ caps at +25%, hit_rate=10% dampens −10%.\n"
+            "• **sample_boost (up to +15%)** 🆕 — tiered bonus for statistically bulletproof histories: n_seq≥100 → 1.05×, "
+            "≥200 → 1.10×, ≥500 → 1.15×.\n"
+            "• **atr_norm (±15%)** 🆕 — cap-neutrality dampener. Small caps naturally have higher exp-per-day just from "
+            "volatility, which inflates raw confidence. Divide by the stock's own ATR (3.5% pivot) so a 2%-ATR large-cap "
+            "and a 7%-ATR small-cap compete on the SAME risk-adjusted scale. Bounded so it can't dominate.\n\n"
             "**relative strength (RS%)** = the stock's return minus the index's over ~3 months. "
             "RS > 0 means it's *beating the market*. The blend nudges market-beating stocks up and "
             "laggards down (bounded ±50%), so on weak days the leaders rise to the top.\n\n"
@@ -2117,41 +2494,146 @@ def render_results():
     if ok.empty:
         st.warning("No stocks scanned successfully. Re-run (Yahoo can be patchy).")
     else:
-        # ======= TABLE 1: TONIGHT'S INVESTMENT ANALYSIS (action) =======
+        # ======= TABLE 1: TONIGHT'S INVESTMENT ANALYSIS (v6: color-graded, all-signals view) =======
+        # v6 (Aug-2026 — user request): SHOW ALL SIGNALLING STOCKS with color
+        # grading + a Status column so the user sees at a glance WHY each stock
+        # landed where it did. Previously the regime gate and sector cap silently
+        # removed rows — user had to cross-check against the Backtest Track Record
+        # to notice a signal was dropped, which raised the "why is that signal
+        # missing?" question. Now every signal appears with:
+        #   ✅ KEPT           — passed every gate, actionable trade
+        #   🟡 RS LAGGARD     — regime NEUTRAL/OFF + RS ≤ 0 (soft-filtered)
+        #   🟠 SECTOR CAPPED  — displaced by higher-ranked peers in same sector
+        #   🚫 EVENT BLOCKED  — imminent corporate event, hard block, do NOT trade
+        # The `_status_reason` column carries the full plain-English explanation
+        # for each row, so hovering / clicking / widening the Why column reveals
+        # the exact rule that fired.
         st.subheader("🎯 Tonight's Investment Analysis  —  what to do if you buy tomorrow")
-        cand = ok[ok["signals_today"]].copy()
 
-        # NEWS/EVENT hard-block — remove stocks with a scheduled event in the
-        # blocking window. Split them into `event_blocked_df` for display below.
+        cand_all = ok[ok["signals_today"]].copy()
+
+        # =========================================================
+        # SUSTAINED-RANK BOOST  (Aug-2026 EVIDENCE-DRIVEN — Fix 6)
+        # Read wishlist history; boost rank_score for tickers the
+        # scanner has repeatedly identified over recent trading days.
+        # 42-day walk-forward proved 4+ day recurring picks deliver
+        # 76% win rate vs 29% for single-day picks. This applies BEFORE
+        # any ranking / tagging so downstream sort uses the boosted score.
+        # =========================================================
+        if HAVE_WL_STORE and not cand_all.empty:
+            try:
+                _rec_counts = _wl_store.recent_top_pick_counts(days_lookback=10)
+                # For each ticker in cand_all, look up count; +1 for today's
+                # own signal so a stock in top-5 for the 4th consecutive day
+                # gets counted as n=4 (not 3).
+                def _sust_mult(_t):
+                    _n = _rec_counts.get(str(_t).upper(), 0) + 1
+                    return _wl_store.sustained_rank_multiplier(_n)
+                cand_all["sustained_mult"] = cand_all["ticker"].apply(_sust_mult)
+                cand_all["rank_score_pre_sustained"] = cand_all["rank_score"]
+                cand_all["rank_score"] = (cand_all["rank_score"]
+                                          * cand_all["sustained_mult"]).round(2)
+                cand_all["sustained_days"] = cand_all["ticker"].apply(
+                    lambda t: int(_rec_counts.get(str(t).upper(), 0)) + 1)
+            except Exception as _e:
+                st.caption(f"ℹ️ Sustained-rank boost skipped: {type(_e).__name__}: {str(_e)[:80]}")
+                cand_all["sustained_mult"] = 1.00
+                cand_all["sustained_days"] = 1
+
+        # ---- Precompute status tagging BEFORE any filtering ----
+        # Default = KEPT; downgrades applied in order of severity below.
+        cand_all["_status"]        = "KEPT"
+        cand_all["_status_reason"] = "✅ Passed every gate — actionable trade for tomorrow's open."
+
+        # 1) EVENT BLOCKED — hardest gate (do NOT trade)
         event_blocked_df = pd.DataFrame()
-        if "event_blocked" in cand.columns and cand["event_blocked"].any():
-            event_blocked_df = cand[cand["event_blocked"]].copy()
-            cand = cand[~cand["event_blocked"]].copy()
+        if "event_blocked" in cand_all.columns and cand_all["event_blocked"].any():
+            _mask_ev = cand_all["event_blocked"] == True
+            for _i in cand_all[_mask_ev].index:
+                _t  = cand_all.at[_i, "event_type"] or "event"
+                _d  = cand_all.at[_i, "event_days_until"]
+                _dtxt = f"{int(_d)} sessions" if pd.notna(_d) else "the blocking window"
+                _sub = (cand_all.at[_i, "event_subject"] or "")[:80]
+                cand_all.at[_i, "_status"] = "EVENT_BLOCKED"
+                cand_all.at[_i, "_status_reason"] = (
+                    f"🚫 HARD BLOCK — {_t} scheduled in {_dtxt}. "
+                    f"Corporate events (results / board / dividend / split / AGM) "
+                    f"routinely produce 5–20% overnight gaps that invalidate the "
+                    f"stop-loss thesis. Skip until the event tape settles. "
+                    + (f"Announcement: “{_sub}”" if _sub else "")
+                )
+            event_blocked_df = cand_all[_mask_ev].copy()
 
-        # apply composite gate: on RISK-OFF and NEUTRAL, keep only market-beating (positive RS) names
+        # 2) RS LAGGARD — v5 (Aug-2026 evidence-driven): threshold tightened.
+        # 42-day walk-forward showed RS_LAGGARD picks averaged +5.25% (n=22)
+        # while KEPT averaged +2.33% — the old threshold (rel_strength ≤ 0)
+        # was DOWNGRADING WINNERS. Now only STRONG laggards (rel_strength
+        # ≤ -10%) get tagged; mild negative RS is left as KEPT.
         gate_note = ""
-        if use_gate and rstat in ("RISK-OFF", "NEUTRAL") and not cand.empty:
-            before = len(cand)
-            cand = cand[cand["rel_strength"] > 0]
-            gate_note = (f"{rstat} gate: removed {before - len(cand)} laggard(s), "
-                         f"kept {len(cand)} name(s) beating the market.")
-        cand = cand.sort_values("rank_score", ascending=False).reset_index(drop=True)
+        RS_LAGGARD_STRICT_PCT = -10.0
+        if use_gate and rstat in ("RISK-OFF", "NEUTRAL"):
+            _mask_lag = ((cand_all["_status"] == "KEPT")
+                         & (cand_all["rel_strength"] <= RS_LAGGARD_STRICT_PCT))
+            for _i in cand_all[_mask_lag].index:
+                _rs = float(cand_all.at[_i, "rel_strength"])
+                cand_all.at[_i, "_status"] = "RS_LAGGARD"
+                cand_all.at[_i, "_status_reason"] = (
+                    f"🟡 REGIME LAGGARD — Market regime is {rstat} and this stock's "
+                    f"3-month relative strength is {_rs:+.1f}% (strongly underperforming, "
+                    f"below −10% threshold). Dip-buys of DEEP laggards in weak tapes "
+                    f"stop out more often than they run. Recommend: skip unless you "
+                    f"have a specific stock-level catalyst that overrides the tape."
+                )
+            n_lag = int(_mask_lag.sum())
+            if n_lag:
+                gate_note = (f"{rstat} gate: flagged {n_lag} laggard(s) with "
+                             f"RS ≤ 0 (kept visible with amber grading).")
 
-        # --- SECTOR-EXPOSURE CAP: keep at most N per industry (best-ranked survive) ---
+        # 3) Sort by rank so the sector cap sees the best-ranked names first
+        cand_all = cand_all.sort_values("rank_score", ascending=False).reset_index(drop=True)
+
+        # 4) SECTOR CAP — apply only to KEPT rows; tag the losers as SECTOR_CAPPED
         max_per_sector = S.get("max_per_sector", 3)
-        pre_cap = cand.copy()
         sector_note, dropped = "", {}
-        if max_per_sector > 0 and not cand.empty:
-            cand, dropped = apply_sector_caps(cand, max_per_sector)
-            cand = cand.reset_index(drop=True)
-            if dropped:
-                det = ", ".join(f"{s} (−{n})" for s, n in sorted(dropped.items(), key=lambda x: -x[1]))
-                sector_note = (f"Sector cap ({max_per_sector}/sector): trimmed "
-                               f"{sum(dropped.values())} correlated name(s) → {det}")
+        if max_per_sector > 0 and not cand_all.empty:
+            reserve_lc         = S.get("reserve_lc_slot", True)
+            _top_n_size        = int(S.get("top_n_strict_size", 0))
+            _top_n_per_sec     = int(S.get("top_n_per_sector",  1))
+            _top_n_cap_tuple   = ((_top_n_size, _top_n_per_sec)
+                                  if _top_n_size > 0 else None)
+            _kept_mask   = cand_all["_status"] == "KEPT"
+            _kept_df     = cand_all[_kept_mask].copy()
+            if not _kept_df.empty:
+                _kept_after, dropped = apply_sector_caps(
+                    _kept_df, max_per_sector,
+                    reserve_largecap_slot=reserve_lc,
+                    top_n_strict_cap=_top_n_cap_tuple)
+                _displaced_idx = set(_kept_df.index) - set(_kept_after.index)
+                for _i in _displaced_idx:
+                    _sec = cand_all.at[_i, "sector"] or "UNKNOWN"
+                    cand_all.at[_i, "_status"] = "SECTOR_CAPPED"
+                    cand_all.at[_i, "_status_reason"] = (
+                        f"🟠 SECTOR CAPPED — sector “{_sec}” already has "
+                        f"{max_per_sector} higher-ranked names in the shortlist. "
+                        f"Diversification cap displaced this signal to prevent one "
+                        f"sector from dominating tomorrow's book. Signal is real; "
+                        f"consider it only if you're deliberately swapping it in "
+                        f"for one of the top-{max_per_sector} in the same sector."
+                    )
+                if dropped:
+                    det = ", ".join(f"{s} (−{n})" for s, n in sorted(dropped.items(), key=lambda x: -x[1]))
+                    sector_note = (f"Sector cap ({max_per_sector}/sector): "
+                                   f"displaced {sum(dropped.values())} correlated "
+                                   f"name(s) → {det}")
 
-        if cand.empty:
-            st.info("No qualifying candidate after the regime gate. On a risk-off day with no "
-                    "market-beating setups, standing aside is the correct output — check tomorrow.")
+        # cand_all is what we DISPLAY. `cand` = the KEPT-only slice, used
+        # downstream for concentration caption and legacy CSV export.
+        cand = cand_all[cand_all["_status"] == "KEPT"].copy().reset_index(drop=True)
+        pre_cap = cand_all[cand_all["_status"].isin(["KEPT", "SECTOR_CAPPED"])].copy()
+
+        if cand_all.empty:
+            st.info("No signalling stocks tonight. Standing aside is the correct output — "
+                    "check tomorrow.")
         else:
             if gate_note:
                 st.caption("🔴 " + gate_note)
@@ -2165,6 +2647,25 @@ def render_results():
                                f"{top_pre.iloc[0]} of {len(pre_cap)} names "
                                f"({100*top_pre.iloc[0]/len(pre_cap):.0f}%). "
                                f"After cap: {len(cand)} names across {cand['sector'].nunique()} sector(s).")
+
+            # v6 — color-grading legend + summary counts of each tier
+            _cnt = cand_all["_status"].value_counts()
+            _legend_bits = []
+            if _cnt.get("KEPT", 0):
+                _legend_bits.append(f"✅ **{_cnt.get('KEPT',0)} Kept**")
+            if _cnt.get("RS_LAGGARD", 0):
+                _legend_bits.append(f"🟡 **{_cnt.get('RS_LAGGARD',0)} RS Laggard**")
+            if _cnt.get("SECTOR_CAPPED", 0):
+                _legend_bits.append(f"🟠 **{_cnt.get('SECTOR_CAPPED',0)} Sector Capped**")
+            if _cnt.get("EVENT_BLOCKED", 0):
+                _legend_bits.append(f"🚫 **{_cnt.get('EVENT_BLOCKED',0)} Event Blocked**")
+            if _legend_bits:
+                st.caption(
+                    "🎨 **Color legend** — " + "  ·  ".join(_legend_bits)
+                    + "  ·  Row colour = status. **Full reason in the ‘Why’ column** "
+                    "(widen the column or click a row to read the full explanation)."
+                )
+
             # Always show the news column whenever news data exists on the
             # DataFrame at all. `news_score` is populated with 0.0 defaults
             # for every row after the news pass (see the setdefault loop
@@ -2172,23 +2673,61 @@ def render_results():
             # the news module importable — the column will no longer vanish
             # on a quiet-news day, and the user can see at-a-glance that
             # the news pass ran and simply found nothing material.
-            has_news = "news_score" in cand.columns
+            has_news = "news_score" in cand_all.columns
             # Change #6 audit column — only show when at least one candidate has a penalty
-            has_penalty = ("ranking_penalty_reason" in cand.columns) and \
-                          cand["ranking_penalty_reason"].astype(str).str.len().gt(0).any()
-            base_cols = ["ticker", "category", "sector", "regime_today", "rank_score",
+            has_penalty = ("ranking_penalty_reason" in cand_all.columns) and \
+                          cand_all["ranking_penalty_reason"].astype(str).str.len().gt(0).any()
+
+            # v6 — Status label + Why column at the front. Everything else unchanged.
+            STATUS_LABEL = {
+                "KEPT":          "✅ KEPT",
+                "RS_LAGGARD":    "🟡 RS Laggard",
+                "SECTOR_CAPPED": "🟠 Sector Cap",
+                "EVENT_BLOCKED": "🚫 Event Block",
+            }
+            STATUS_ROW_STYLE = {
+                "KEPT":          "background-color: rgba( 22, 163,  74, 0.10)",   # light green
+                "RS_LAGGARD":    "background-color: rgba(234, 179,   8, 0.14)",   # light amber
+                "SECTOR_CAPPED": "background-color: rgba(249, 115,  22, 0.14)",   # light orange
+                "EVENT_BLOCKED": "background-color: rgba(220,  38,  38, 0.18)",   # light red
+            }
+            cand_all["_status_label"] = cand_all["_status"].map(STATUS_LABEL).fillna(cand_all["_status"])
+
+            # v4 (Aug-2026 evidence-driven): expose Crowding score + multiplier
+            # so users can spot when a "top-rank" pick is actually just a
+            # heavily-crowded trade (the ones that averaged −0.50% in the
+            # weekly forward-test). Higher Crowd = more crowded = worse.
+            has_crowd = ("crowding_score" in cand_all.columns
+                         and cand_all["crowding_score"].notna().any())
+            # v5 (Aug-2026 evidence-driven): expose sustained-rank recurrence.
+            # 4+ day recurring stocks delivered 76% win rate — high signal.
+            has_sust = ("sustained_days" in cand_all.columns
+                        and cand_all["sustained_days"].notna().any())
+            base_cols = ["_status_label", "_status_reason",
+                         "ticker", "category", "sector", "regime_today", "rank_score",
                          "stage2_score", "confidence", "rel_strength"]
+            if has_sust:
+                base_cols += ["sustained_days", "sustained_mult"]
+            if has_crowd:
+                base_cols += ["crowding_score", "anti_crowding_mult"]
             if has_news:
                 base_cols += ["news_score"]
             if has_penalty:
                 base_cols += ["ranking_penalty_reason"]
             base_cols += ["entry_ref", "plan_entry", "target_price", "stop_price", "stop_%",
                           "exp_days_to_target", "last_atr_pct", "stage2_reason", "remark"]
-            inv = cand[base_cols].copy()
+            inv = cand_all[base_cols].copy()
             _em = S.get("entry_mode", "Market open")
-            _entry_label = "BUY limit ₹" if _em == "Limit" else "Entry (open)"
-            new_cols = ["Stock", "Cap", "Sector", "Signal", "Rank",
+            _entry_label = ("BUY limit ₹" if _em == "Limit"
+                            else ("Entry (Adaptive)" if _em == "Adaptive"
+                                  else "Entry (open)"))
+            new_cols = ["Status", "Why",
+                        "Stock", "Cap", "Sector", "Signal", "Rank",
                         "Stage-2", "Conf(/day)", "RS%"]
+            if has_sust:
+                new_cols += ["Days-in-top", "Sust×"]
+            if has_crowd:
+                new_cols += ["Crowd", "AntiCrowd×"]
             if has_news:
                 new_cols += ["News"]
             if has_penalty:
@@ -2196,6 +2735,19 @@ def render_results():
             new_cols += ["Last close", _entry_label, "Objective ₹", "Stop ₹", "Stop %",
                          "Exp. days→objective", "ATR%", "Why Stage-2", "Remark"]
             inv.columns = new_cols
+
+            # v6 — apply row background color from _status via pandas Styler.
+            # Streamlit's st.dataframe renders Styler.apply() but NOT cell tooltips
+            # (set_tooltips), so we surface the reason as a visible "Why" column
+            # (widen it or click a row to read the full text below the table).
+            _status_arr = cand_all["_status"].values
+            def _color_by_status(df):
+                out = pd.DataFrame("", index=df.index, columns=df.columns)
+                for _r in range(len(df)):
+                    out.iloc[_r, :] = STATUS_ROW_STYLE.get(_status_arr[_r], "")
+                return out
+            styler = inv.style.apply(_color_by_status, axis=None)
+
             if S.get("entry_mode") == "Limit":
                 st.caption(f"📥 **Place a BUY LIMIT at the 'BUY limit ₹' price** "
                            f"({S.get('limit_pct',0)}% below the signal close), valid "
@@ -2205,18 +2757,286 @@ def render_results():
                 st.caption("⚠️ Market-at-open: you accept whatever the open gives, including gap-ups. "
                            "Switch to Limit entry to avoid chasing.")
             st.caption("Ranked by blended score (confidence × relative-strength). RS% > 0 = beating the "
-                       "market. Click a row for the chart. Stop ₹ respects your max-loss cap.")
-            sel = st.dataframe(inv, use_container_width=True, height=340, hide_index=True,
+                       "market. Click a row for the chart + full status explanation.")
+
+            # v6 — column_config gives the Status/Why columns clear widths + header tooltips
+            _col_cfg = {
+                "Status": st.column_config.TextColumn(
+                    "Status", width="small",
+                    help=("Color legend: ✅ KEPT = passed every gate · "
+                          "🟡 RS Laggard = market NEUTRAL/OFF and RS ≤ 0 · "
+                          "🟠 Sector Cap = displaced by higher-ranked peers · "
+                          "🚫 Event Block = imminent corporate event, do NOT trade"),
+                ),
+                "Why": st.column_config.TextColumn(
+                    "Why", width="medium",
+                    help="Plain-English reason for the status. Click a row to see full text below the table.",
+                ),
+            }
+            sel = st.dataframe(styler, use_container_width=True, height=340, hide_index=True,
                                on_select="rerun", selection_mode="single-row",
+                               column_config=_col_cfg,
                                key="inv_table")
             st.download_button("⬇️ Download tonight's analysis", inv.to_csv(index=False).encode(),
                                file_name=f"investment_analysis_{dt.date.today()}.csv", mime="text/csv")
 
+            # =================================================================
+            # BY CAP TIER — top-N per LargeCap / MidCap / SmallCap  (Aug-2026)
+            # -----------------------------------------------------------------
+            # Rationale (user request): the raw rank_score naturally favours
+            # SmallCap (higher exp/day from volatility). Even with atr_norm
+            # correction and the LargeCap-reserved sector slot, LargeCaps
+            # rank lower absolutely and can be under-represented. This view
+            # ensures NO cap tier is invisible — top-5 per tier from the
+            # SAME signalling universe, before any sector cap trimming.
+            # -----------------------------------------------------------------
+            all_sig = ok[ok["signals_today"]].copy() if "signals_today" in ok.columns else pd.DataFrame()
+            if not all_sig.empty and "category" in all_sig.columns:
+                with st.expander(
+                    f"🏛️ By Cap Tier — best signals per cap  ({len(all_sig)} total signals)",
+                    expanded=False
+                ):
+                    st.caption(
+                        "Top-5 signalling stocks in each SEBI cap tier, ranked WITHIN their tier. "
+                        "Useful when the main table gets tilted by cap-agnostic ranking or by "
+                        "sector caps saturating one cap. **Cap-neutral read**: the LargeCap top "
+                        "here is your safest anchor for portfolio construction even if it doesn't "
+                        "sit in the top 10 of the main table."
+                    )
+                    tier_cols = ["ticker", "sector", "regime_today", "rank_score",
+                                 "stage2_score", "confidence", "rel_strength",
+                                 "entry_ref", "plan_entry", "target_price", "stop_price",
+                                 "exp_days_to_target"]
+                    tier_cols = [c for c in tier_cols if c in all_sig.columns]
+                    tier_rename = {
+                        "ticker":"Stock","sector":"Sector","regime_today":"Signal",
+                        "rank_score":"Rank","stage2_score":"Stage-2",
+                        "confidence":"Conf(/day)","rel_strength":"RS%",
+                        "entry_ref":"Last close","plan_entry":"BUY ₹",
+                        "target_price":"Target ₹","stop_price":"Stop ₹",
+                        "exp_days_to_target":"Exp d→objective",
+                    }
+                    for tier in ["LargeCap", "MidCap", "SmallCap"]:
+                        sub = all_sig[all_sig["category"] == tier]
+                        n_tier = len(sub)
+                        if n_tier == 0:
+                            st.markdown(f"**{tier}** — no signals fired today")
+                            continue
+                        top = sub.sort_values("rank_score", ascending=False).head(5)
+                        view = top[tier_cols].copy().rename(columns=tier_rename)
+                        st.markdown(f"**{tier}** — top {len(view)} of {n_tier} signal(s)")
+                        st.dataframe(view, use_container_width=True, hide_index=True,
+                                     key=f"cap_tier_{tier}", height=min(220, 55 + 32 * len(view)))
+                    st.download_button(
+                        "⬇️ Download all signals grouped by cap",
+                        all_sig.sort_values(["category", "rank_score"], ascending=[True, False])[
+                            [c for c in tier_cols if c in all_sig.columns] + ["category"]
+                        ].to_csv(index=False).encode(),
+                        file_name=f"signals_by_cap_{dt.date.today()}.csv", mime="text/csv"
+                    )
+
+            # =================================================================
+            # WISHLIST v2 AUTO-APPEND  (Aug-2026)  — Sheets 1 + 2
+            # -----------------------------------------------------------------
+            # After the shortlist is tagged with `_status` + `_status_reason`,
+            # persist tonight's signalling stocks to `wishlist.xlsx#signaled_today`
+            # and positive-news-but-not-signalling stocks to `#positive_news`.
+            # Gated by session_state so a browser refresh / row-click rerun
+            # doesn't duplicate the append.
+            # =================================================================
+            if HAVE_WL_STORE:
+                _scan_key = f"scan-{dt.date.today().isoformat()}-{len(ok)}"
+                if st.session_state.get("_wl_appended_scan_id") != _scan_key:
+                    # v3 (Aug-2026): store the FULL timestamp so the workbook
+                    # shows "2026-08-26 09:15:00" not just "2026-08-26". Dedup
+                    # inside the store still keys on the DATE portion so
+                    # multiple scans in one day still collapse to the freshest.
+                    obs_date = dt.datetime.now()
+                    _regime_final = (S.get("gate", {}).get("final")
+                                     or S.get("regime", {}).get("status", "UNKNOWN"))
+                    _entry_mode = S.get("entry_mode", "Market open")
+                    _limit_pct  = float(S.get("limit_pct", 0.0) or 0.0)
+                    _strategy   = S.get("strategy", "PASS_combined")
+
+                    # ---- Sheet 1: signaled_today (every row of cand_all) ----
+                    sig_rows = []
+                    for _, _r in cand_all.iterrows():
+                        sig_rows.append({
+                            "observation_date":       obs_date,
+                            "signal_date":            obs_date,
+                            "ticker":                 _r.get("ticker"),
+                            "category":               _r.get("category"),
+                            "sector":                 _r.get("sector"),
+                            "strategy":               _strategy,
+                            "regime_at_signal":       _regime_final,
+                            "trade_type":             _r.get("regime_today"),
+                            "status":                 _r.get("_status"),
+                            "why":                    _r.get("_status_reason"),
+                            "signal_price":           _r.get("entry_ref"),
+                            "buy_limit":              (_r.get("plan_entry")
+                                                       if _entry_mode == "Limit"
+                                                       else None),
+                            "target_price":           _r.get("target_price"),
+                            "stop_price":             _r.get("stop_price"),
+                            "stop_pct":               _r.get("stop_%"),
+                            "expected_days_to_target":_r.get("exp_days_to_target"),
+                            "rank_score":             _r.get("rank_score"),
+                            "stage2_score":           _r.get("stage2_score"),
+                            "confidence":             _r.get("confidence"),
+                            "rel_strength":           _r.get("rel_strength"),
+                            "news_score":             _r.get("news_score"),
+                            "news_top_headline":      _r.get("news_top"),
+                            "rank_penalty":           _r.get("ranking_penalty_reason"),
+                            # v4 (Aug-2026) — anti-crowding audit trail
+                            "crowding_score":         _r.get("crowding_score"),
+                            "anti_crowding_mult":     _r.get("anti_crowding_mult"),
+                            "crowding_reason":        _r.get("crowding_reason"),
+                            "atr_pct":                _r.get("last_atr_pct"),
+                            "hist_seq_trades":        _r.get("seq_trades"),
+                            "hist_seq_win_pct":       _r.get("seq_win_%"),
+                            "hist_seq_expectancy_pct":_r.get("seq_expectancy_%"),
+                            "hist_seq_exp_per_day_pct":_r.get("seq_exp_per_day_%"),
+                            "hist_total_return_sum_pct":_r.get("total_return_sum_%"),
+                            "hist_cagr_pct":          _r.get("cagr_%"),
+                            "hist_max_dd_pct":        _r.get("max_drawdown_%"),
+                            "entry_mode":             _entry_mode,
+                            "limit_pct":              _limit_pct,
+                        })
+
+                    # ---- Sheet 2: positive_news (ANY strictly-positive news, incl. signallers) ----
+                    # v3 fix (Aug-2026): user's expanded rule — "All +ve news
+                    # stocks should be analysed in this sheet EVEN IF the same
+                    # stock is also signalled today." A ticker can now appear
+                    # in BOTH Sheet 1 (technical plan) AND Sheet 2 (news
+                    # thesis, monitored from market-open buy). Filter:
+                    # `news_score > 0.0` AND `n_articles >= 2` — no longer
+                    # excludes signal-firing stocks.
+                    news_rows = []
+                    _all_ok = ok.copy() if "news_score" in ok.columns else pd.DataFrame()
+                    if not _all_ok.empty:
+                        _ns  = pd.to_numeric(_all_ok["news_score"], errors="coerce").fillna(0.0)
+                        _nn  = pd.to_numeric(_all_ok.get("news_n", 0), errors="coerce").fillna(0)
+                        _pos = _all_ok[(_ns > 0.0) & (_nn >= 2)]
+                        for _, _r in _pos.iterrows():
+                            # Build a simple reject-reason bucket to power Sheet-2 analysis.
+                            _reject_bits = []
+                            _r_signalled = bool(_r.get("signals_today", False))
+                            if _r_signalled:
+                                _reject_txt = "signal DID fire (positive-news row is duplicate coverage)"
+                                _reject_cat = "signalled"
+                            else:
+                                if _r.get("regime_today") == "":
+                                    _reject_bits.append("base signal did not fire")
+                                _pen = str(_r.get("ranking_penalty_reason") or "")
+                                if _pen:
+                                    _reject_bits.append(f"extension penalty: {_pen}")
+                                _reject_txt = " · ".join(_reject_bits) or "did not clear PASS_* filter"
+                                _reject_cat = ("extension" if "extension" in _reject_txt
+                                               else "no_signal")
+
+                            news_rows.append({
+                                "observation_date":       obs_date,
+                                "ticker":                 _r.get("ticker"),
+                                "category":               _r.get("category"),
+                                "sector":                 _r.get("sector"),
+                                "news_score":             _r.get("news_score"),
+                                "n_articles":             _r.get("news_n"),
+                                "news_top_headline":      _r.get("news_top"),
+                                "news_top_date":          _r.get("news_top_date"),   # v3: actual date now
+                                "news_latest_headline":   _r.get("news_latest"),
+                                "news_latest_date":       _r.get("news_latest_date"),
+                                "news_matched_terms":     _r.get("news_matched"),
+                                "signal_price":           _r.get("last_close") or _r.get("entry_ref"),
+                                "rel_strength":           _r.get("rel_strength"),
+                                "atr_pct":                _r.get("last_atr_pct"),
+                                "rank_score":             _r.get("rank_score"),
+                                "signals_today":          _r_signalled,       # v3: TRUE for dual-flagged stocks
+                                "signal_reject_reason":   _reject_txt,
+                                "reject_category":        _reject_cat,
+                            })
+
+                    # v3 (Aug-2026): use getattr fallback for WorkbookLockedError.
+                    # Streamlit's hot-reload only refreshes swing_scanner_app.py
+                    # — not the modules it imports via `import wishlist_store as _wl_store`.
+                    # If the running process cached wishlist_store BEFORE the
+                    # WorkbookLockedError class was added, the bare `except
+                    # _wl_store.WorkbookLockedError` raises AttributeError.
+                    # Defensive: probe with getattr; fall back to RuntimeError.
+                    _LockErr = getattr(_wl_store, "WorkbookLockedError", RuntimeError)
+                    try:
+                        n_sig_added  = _wl_store.append_signaled(sig_rows) if sig_rows else 0
+                        n_news_added = _wl_store.append_positive_news(news_rows) if news_rows else 0
+                        st.session_state["_wl_appended_scan_id"] = _scan_key
+                        st.session_state["_wl_last_append"] = {
+                            "obs_date":   obs_date.strftime("%Y-%m-%d %H:%M:%S"),
+                            "n_sig":      n_sig_added,
+                            "n_sig_seen": len(sig_rows),
+                            "n_news":     n_news_added,
+                            "n_news_seen": len(news_rows),
+                        }
+                    except Exception as _e:
+                        # Route to the right message depending on whether this
+                        # was a workbook-lock vs some other failure.
+                        _is_lock = (isinstance(_e, _LockErr)
+                                    or "WorkbookLocked" in type(_e).__name__
+                                    or "locked" in str(_e).lower())
+                        if _is_lock:
+                            st.warning(
+                                f"⚠️ Wishlist auto-append skipped — `wishlist.xlsx` "
+                                f"is locked by another process (Excel viewer, Windows "
+                                f"preview pane, or antivirus). Close the file and "
+                                f"re-run the scan to persist tonight's rows. ({_e})"
+                            )
+                        else:
+                            st.warning(
+                                f"⚠️ Wishlist auto-append failed: {type(_e).__name__}: "
+                                f"{str(_e)[:150]}. Scan results are unaffected; only "
+                                f"the wishlist persistence step was skipped."
+                            )
+                        st.session_state["_wl_appended_scan_id"] = _scan_key
+                        st.session_state["_wl_last_append"] = None
+
+                _last = st.session_state.get("_wl_last_append")
+                if _last:
+                    _cA, _cB = st.columns([4, 1])
+                    _cA.info(
+                        f"📝 **Wishlist auto-append** ({_last['obs_date']}): "
+                        f"**{_last['n_sig']} new** signalled rows → Sheet 1 "
+                        f"(of {_last['n_sig_seen']} seen · deduped by obs_date+ticker); "
+                        f"**{_last['n_news']} new** positive-news rows → Sheet 2 "
+                        f"(of {_last['n_news_seen']} seen). "
+                        f"Open the 🔮 Wishlist Tracker mode to run the analysis."
+                    )
+                    if _cB.button("🔁 Re-append",
+                                  help="Re-run the wishlist auto-append on the "
+                                       "CURRENT session's scan data. Useful "
+                                       "after tweaking news-threshold logic — "
+                                       "avoids a fresh scan (which takes "
+                                       "minutes on a big universe)."):
+                        st.session_state.pop("_wl_appended_scan_id", None)
+                        st.session_state.pop("_wl_last_append", None)
+                        st.rerun()
+
             # ---------- point 4: click a row -> chart ----------
+            # v6: index into cand_all (the DISPLAYED table). Also surface the
+            # full status reason as a callout so filtered-out rows explain
+            # themselves before the chart is drawn.
             picked = None
             if sel and sel.get("selection", {}).get("rows"):
-                picked = cand.iloc[sel["selection"]["rows"][0]]
+                _row_i = sel["selection"]["rows"][0]
+                if 0 <= _row_i < len(cand_all):
+                    picked = cand_all.iloc[_row_i]
             if picked is not None:
+                _stat = picked.get("_status", "KEPT")
+                _reason = picked.get("_status_reason", "")
+                if _stat == "KEPT":
+                    st.success(f"**{picked['ticker']}** — {_reason}")
+                elif _stat == "RS_LAGGARD":
+                    st.warning(f"**{picked['ticker']}** — {_reason}")
+                elif _stat == "SECTOR_CAPPED":
+                    st.warning(f"**{picked['ticker']}** — {_reason}")
+                elif _stat == "EVENT_BLOCKED":
+                    st.error(f"**{picked['ticker']}** — {_reason}")
                 render_stock_backtest(picked, S, key_prefix="inv_")
 
         # ======= TABLE 2: BACKTEST TRACK RECORD (evidence) =======
@@ -2355,16 +3175,26 @@ def render_results():
                            "These often differ — a +4 'beats estimates' from 4 days ago will be "
                            "the Top slot while a −3 'resigns' from yesterday will be the Latest. "
                            "Both feed the aggregate news score.")
-                full_view = with_news[["ticker", "sector", "signals_today",
-                                        "news_score", "news_n",
-                                        "news_top", "news_latest", "news_latest_date",
-                                        "news_matched"]].copy()
+                # v3 (Aug-2026): expose Top date alongside Top headline so
+                # user can see WHEN the dominant story was published.
+                _news_cols = ["ticker", "sector", "signals_today",
+                              "news_score", "news_n",
+                              "news_top", "news_top_date",
+                              "news_latest", "news_latest_date",
+                              "news_matched"]
+                _news_cols = [c for c in _news_cols if c in with_news.columns]
+                full_view = with_news[_news_cols].copy()
                 full_view["|news|"] = full_view["news_score"].abs()
                 full_view = full_view.sort_values("|news|", ascending=False).drop(columns=["|news|"])
-                full_view.columns = ["Stock", "Sector", "Signals today?", "News",
-                                     "# articles", "Top headline",
-                                     "Latest headline", "Latest date",
-                                     "Keywords matched"]
+                _rename = {
+                    "ticker": "Stock", "sector": "Sector",
+                    "signals_today": "Signals today?",
+                    "news_score": "News", "news_n": "# articles",
+                    "news_top": "Top headline", "news_top_date": "Top date",
+                    "news_latest": "Latest headline", "news_latest_date": "Latest date",
+                    "news_matched": "Keywords matched",
+                }
+                full_view = full_view.rename(columns=_rename)
                 st.dataframe(full_view, use_container_width=True, hide_index=True, height=350)
                 st.download_button(
                     "⬇️ Download full news audit",

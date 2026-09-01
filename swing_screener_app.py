@@ -287,15 +287,27 @@ SNAP_COLS = ["pct_vs_sma200", "pct_vs_sma20", "rsi14", "roc10", "atr_pct",
 #  Alternative wider ladders retained for A/B testing:
 #    WIDE_LADDER  = [(10,3),(20,10),(30,18),(50,33),(75,52),(100,72)]
 #    SOFTER_V2    = [(15,5),(25,12),(40,25),(60,40),(85,60),(120,85)]
+#  v5.1 (Aug-2026 EVIDENCE-DRIVEN — REFINED after A/B on 98 top-5 picks)
+#  --------------------------------------------------------------------
+#  v5 with a +5% rung was too tight: it converted 16 STOPs → TRAIL (win
+#  rate 53% → 71%) BUT truncated 10 big winners (LAURUSLABS 19.5% → 1.4%,
+#  KIRLOSENG 13% → 1.5%, FLUOROCHEM 14% → 1.5%, HEG 17% → 5.8%). Net
+#  mean dropped 0.4 pp because the winners saved > losers averted.
+#
+#  v5.1 raises the FIRST arm point from +5% to +8% so normal 3-6%
+#  pullbacks during trend development do NOT trigger. Late-rung protection
+#  stays intact — big peaks still lock in ≥ 75% of the run. This trades
+#  a smaller win-rate boost (~+8pp instead of +18pp) for a POSITIVE mean
+#  contribution rather than the −0.4pp v5 delivered.
 DEFAULT_RATCHET_LADDER = [
-    ( 10.0,   5.0),
-    ( 20.0,  15.0),
-    ( 30.0,  25.0),
-    ( 40.0,  35.0),
-    ( 50.0,  45.0),
-    ( 60.0,  55.0),
-    ( 75.0,  70.0),
-    (100.0,  95.0),
+    (  8.0,   3.0),   # peak +8%   → lock +3%   (v5.1 — later arm, was +5→+2)
+    ( 12.0,   7.0),   # peak +12%  → lock +7%   (v5.1)
+    ( 18.0,  13.0),   # peak +18%  → lock +13%  (v5.1)
+    ( 25.0,  19.0),   # peak +25%  → lock +19%  (v5.1 — LAURUSLABS/HEG-style peaks now protected)
+    ( 35.0,  27.0),   # peak +35%  → lock +27%
+    ( 50.0,  38.0),   # peak +50%  → lock +38%
+    ( 75.0,  58.0),   # peak +75%  → lock +58%
+    (100.0,  78.0),   # peak +100% → lock +78%
 ]
 
 #  SHRINK_SCHEDULE  (Layer B): (min_gain_%, atr_mult) pairs.
@@ -326,6 +338,14 @@ def run_backtest(df: pd.DataFrame, target_pct: float, max_hold: int,
                  trail_mult: float = 2.0, max_stop_pct: float = 5.0,
                  max_atr_pct: float = None, entry_mode: str = "Market open",
                  limit_pct: float = 0.0, fill_days: int = 1,
+                 # v4 (Aug-2026 EVIDENCE-DRIVEN): gap-aware adaptive entry.
+                 # When entry_mode="Adaptive": if signal day closed STRONG
+                 # (green candle + volume > 1.2× 20d-avg + close > prev close),
+                 # use market-at-open with `max_chase_pct` guard; otherwise
+                 # fall through to the standard Limit rule below. Directly
+                 # addresses the weekly test finding that 26/27 missed limits
+                 # were on WINNERS that gapped up strongly.
+                 max_chase_pct: float = 1.5,
                  lock_pct: float = None, cut_day: int = None,
                  cut_threshold: float = 0.0, partial_frac: float = 0.0,
                  partial_atr: float = 1.5, stop_anchor: str = "ATR",
@@ -391,7 +411,17 @@ def run_backtest(df: pd.DataFrame, target_pct: float, max_hold: int,
                  # win-rate 38% -> 47%. Kills same-stock cluster losses in
                  # choppy / down-trending regimes (TITAN Jan-Apr 2024, ADANIENT
                  # Oct-Nov 2024, TCS Mar-Apr 2024). Set to 0 to disable.
-                 post_stop_cooldown_days: int = 7) -> pd.DataFrame:
+                 post_stop_cooldown_days: int = 7,
+                 # ---- M5: EARLY STALE-EXIT (Aug-2026, framework Fix M5) ------
+                 # If by day `early_exit_stale_day` the peak gain has not
+                 # reached `early_exit_stale_min_peak_pct`, exit at today's
+                 # close. Frees capital tied up in stalled trades. Motivated
+                 # by 5-day forward test (Jul 1-8 2026) where 3 TIME-exit
+                 # losers (ADANIENT, JSWINFRA, AEGISVOPAK) all had 30-day
+                 # peak under 3% - a "no-development" signal visible by day 10.
+                 # 0 = disabled (default). Set 10 with 3.0 to match Fix M5.
+                 early_exit_stale_day: int = 0,
+                 early_exit_stale_min_peak_pct: float = 3.0) -> pd.DataFrame:
     o = df["Open"].values; h = df["High"].values
     l = df["Low"].values; c = df["Close"].values
     v = df["Volume"].values if "Volume" in df.columns else np.zeros(len(df))
@@ -463,27 +493,53 @@ def run_backtest(df: pd.DataFrame, target_pct: float, max_hold: int,
         if max_atr_pct is not None and np.isfinite(atrp[i]) and atrp[i] > max_atr_pct:
             continue
         # ---------------- ENTRY ----------------
-        # Market open  : buy at next day's open, whatever the gap (old behaviour).
+        # Market open  : buy at next day's open, whatever the gap.
         # Limit        : place a resting buy at signal_close * (1 - limit_pct/100).
         #                Fill only if price trades down to it within `fill_days` sessions.
         #                A gap-DOWN opening below the limit fills at the open (better price).
         #                If it never trades there, the order expires -> NO TRADE (chase avoided).
+        # Adaptive (v4) : if signal-day was STRONG (green + volume + higher close),
+        #                use market-at-open with a max_chase guard; else Limit.
+        #                Directly addresses the missed-limit-on-winners pattern.
         signal_close = c[i]
-        if entry_mode == "Market open":
+
+        # ---- v4: decide effective entry mode for THIS trade ----
+        eff_entry_mode = entry_mode
+        if entry_mode == "Adaptive":
+            # Strong signal day? (all three: green candle, above-avg vol, close > prev close)
+            _green      = c[i] > o[i]
+            _vol_ok     = (np.isfinite(vol_avg20[i]) and vol_avg20[i] > 0
+                           and v[i] > 1.2 * vol_avg20[i])
+            _higher     = i >= 1 and c[i] > c[i-1]
+            eff_entry_mode = "Market_capped" if (_green and _vol_ok and _higher) else "Limit"
+
+        if eff_entry_mode == "Market open":
             entry_idx = i + 1
             if entry_idx >= n:
                 break
             entry = o[entry_idx]
             limit_price = np.nan
-        else:
+        elif eff_entry_mode == "Market_capped":
+            # v4: market at next open, but REJECT if open gapped up beyond max_chase_pct
+            # above signal close. Guarantees a fill for strong momentum breakouts
+            # (which under Limit would have gapped past the limit and never filled),
+            # while capping worst-case chase risk on runaway gaps.
+            entry_idx = i + 1
+            if entry_idx >= n:
+                break
+            _open_next = o[entry_idx]
+            _chase_pct = (_open_next / signal_close - 1) * 100
+            if _chase_pct > max_chase_pct:
+                # Gap is too extreme even for a strong-close entry — skip.
+                # Common cause: overnight material news → gap-up beyond risk budget.
+                continue
+            entry = _open_next
+            limit_price = np.nan
+        else:                                       # standard Limit
             limit_price = signal_close * (1 - limit_pct / 100.0)
             entry_idx, entry = None, None
             for d in range(i + 1, min(i + 1 + max(int(fill_days), 1), n)):
                 # M1 FIX (Aug-2026): volume-aware fill realism.
-                # If this day traded on less than 50% of 20-day average volume,
-                # assume our limit order was NOT part of the (thin) fills that
-                # printed at the price. Skip the day. On illiquid smallcaps this
-                # rules out "phantom fills" from a single lot trading at 3:15pm.
                 vratio = (v[d] / vol_avg20[d]) if (np.isfinite(vol_avg20[d])
                                                     and vol_avg20[d] > 0) else 1.0
                 if vratio < MIN_FILL_VOL_RATIO:
@@ -644,6 +700,20 @@ def run_backtest(df: pd.DataFrame, target_pct: float, max_hold: int,
                     days_since_high += 1
                 continue
 
+            # ---- PEAK TRACKING (moved outside trailing block so Fixed target ----
+            # also tracks peak — needed for M5 stale-exit and for accurate
+            # peak_gain_% reporting. Prior code only updated peak inside the
+            # trailing branch; fixed-target trades reported peak=entry always.
+            # `new_peak_today` flag preserves the Layer B trigger that the
+            # trailing branch previously ran inside its own `if h[d] > peak`.)
+            new_peak_today = False
+            if h[d] > peak:
+                peak = h[d]
+                days_since_high = 0
+                new_peak_today = True
+            else:
+                days_since_high += 1
+
             # --- STOP first, with GAP-AWARE fill ---
             if l[d] <= stop:
                 fill = o[d] if o[d] < stop else stop      # gapped past the stop -> fill at open
@@ -715,10 +785,10 @@ def run_backtest(df: pd.DataFrame, target_pct: float, max_hold: int,
                             if floor_price > stop:
                                 stop = floor_price
 
-                if h[d] > peak:
-                    peak = h[d]
-                    # LAYER D: reset the stall-counter when a new peak is made.
-                    days_since_high = 0
+                if new_peak_today:
+                    # peak & days_since_high already updated at top of loop;
+                    # kept here so Layer B trail-shrink still fires on the
+                    # same trigger it always did (new intra-day high).
                     # ========================================================
                     # LAYER B — SHRINKING TRAIL MULTIPLIER
                     # --------------------------------------------------------
@@ -781,6 +851,21 @@ def run_backtest(df: pd.DataFrame, target_pct: float, max_hold: int,
                     new_stop = stop + gap * (decay_shrink_pct / 100.0)
                     if new_stop > stop:
                         stop = new_stop
+
+            # ================================================================
+            # M5 — EARLY STALE EXIT  (Aug-2026 framework Fix M5)
+            # ----------------------------------------------------------------
+            # By day N (typically 10), if the trade's peak-gain-so-far hasn't
+            # reached `early_exit_stale_min_peak_pct`, the pattern never
+            # developed. Exit at today's close and free the capital. Applies
+            # regardless of exit_mode so both Trailing and Fixed benefit.
+            # ================================================================
+            if (early_exit_stale_day > 0 and day_k == early_exit_stale_day
+                    and np.isfinite(c[d])):
+                peak_gain_so_far = (peak / entry - 1) * 100
+                if peak_gain_so_far < early_exit_stale_min_peak_pct:
+                    outcome, exit_price, exit_idx = "STALE_EXIT", c[d], d
+                    break
 
             # ================================================================
             # LAYER C — MOMENTUM-EXHAUSTION EXIT  (refined arm-threshold)

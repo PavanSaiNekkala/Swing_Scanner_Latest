@@ -53,16 +53,18 @@ st.set_page_config(page_title="NSE Trading Suite",
 # Lazy-import the two apps AFTER set_page_config
 # (module load doesn't call their main() since imports guard __main__)
 # ------------------------------------------------------------------
-scanner   = _load("_ts_scanner",   "swing_scanner_app.py")
-monitor   = _load("_ts_monitor",   "monitor_app.py")
-wishlist  = _load("_ts_wishlist",  "wishlist_app.py")
-validator = _load("_ts_validator", "forward_validate_app.py")
+scanner    = _load("_ts_scanner",    "swing_scanner_app.py")
+monitor    = _load("_ts_monitor",    "monitor_app.py")
+wishlist   = _load("_ts_wishlist",   "wishlist_app.py")
+validator  = _load("_ts_validator",  "forward_validate_app.py")
+framework  = _load("_ts_framework",  "decision_framework_app.py")
 
-# Sanity check — all four must expose body() (added in the split refactor)
-for name, mod in (("swing_scanner_app",    scanner),
-                   ("monitor_app",         monitor),
-                   ("wishlist_app",        wishlist),
-                   ("forward_validate_app", validator)):
+# Sanity check — all five must expose body() (added in the split refactor)
+for name, mod in (("swing_scanner_app",       scanner),
+                   ("monitor_app",            monitor),
+                   ("wishlist_app",           wishlist),
+                   ("forward_validate_app",   validator),
+                   ("decision_framework_app", framework)):
     if not hasattr(mod, "body"):
         st.error(f"{name}.py is missing the required `body()` function. "
                  f"Update the file so main() calls body() (see docstring).")
@@ -70,14 +72,16 @@ for name, mod in (("swing_scanner_app",    scanner),
 
 
 MODES = {
-    "🔍 Daily Scanner":      ("Scan the market for new setups.  "
-                               "Runs after market close on a chosen universe."),
-    "📊 Position Monitor":   ("Analyze positions you already hold.  "
-                               "Reads positions.csv and recommends hold / exit / add."),
-    "🔮 Wishlist Tracker":   ("Track scanner predictions vs actual behaviour.  "
-                               "Reads wishlist.csv, logs one observation per stock per run."),
-    "🧪 Forward Validator":  ("Walk-forward test the algorithm at any historical cutoff.  "
-                               "Compares predicted vs realized outcomes; surfaces failure clusters."),
+    "🔍 Daily Scanner":       ("Scan the market for new setups.  "
+                                "Runs after market close on a chosen universe."),
+    "🧭 Decision Framework":  ("The 8-signal evidence-driven checklist that turns the "
+                                "scanner's shortlist into a BUY / WATCHLIST / SKIP verdict."),
+    "📊 Position Monitor":    ("Analyze positions you already hold.  "
+                                "Reads positions.csv and recommends hold / exit / add."),
+    "🔮 Wishlist Tracker":    ("Track scanner predictions vs actual behaviour.  "
+                                "Reads wishlist.csv, logs one observation per stock per run."),
+    "🧪 Forward Validator":   ("Walk-forward test the algorithm at any historical cutoff.  "
+                                "Compares predicted vs realized outcomes; surfaces failure clusters."),
 }
 
 
@@ -99,6 +103,8 @@ def main():
     #  Each body() manages its own sidebar section and main area.
     if mode.startswith("🔍"):
         scanner.body()
+    elif mode.startswith("🧭"):
+        framework.body()
     elif mode.startswith("📊"):
         monitor.body()
     elif mode.startswith("🔮"):

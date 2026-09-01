@@ -488,6 +488,7 @@ class TelegramMessageFormatter:
         label: str,
         *,
         suffix: str = "",
+        prefix: str = "",
     ) -> None:
 
         value = row.get(
@@ -512,7 +513,7 @@ class TelegramMessageFormatter:
 
         lines.append(
             f"   {label}: "
-            f"{numeric:.2f}{suffix}"
+            f"{prefix}{numeric:.2f}{suffix}"
         )
 
 

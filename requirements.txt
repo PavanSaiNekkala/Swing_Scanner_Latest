@@ -65,3 +65,5 @@ typing_extensions>=4.14.1
 pyarrow>=21.0.0
 
 playwright>=1.50.0
+
+#python -m playwright install --with-deps chromium

@@ -362,6 +362,32 @@ class TelegramMessageFormatter:
                     "PF",
                 )
 
+                self._append_optional_metric(
+                    lines,
+                    row,
+                    "Target %",
+                    "Target",
+                    suffix="%",
+                )
+
+
+                self._append_optional_metric(
+                    lines,
+                    row,
+                    "Stop %",
+                    "Stop Loss",
+                    suffix="%",
+                )
+
+
+                self._append_optional_metric(
+                    lines,
+                    row,
+                    "Trail %",
+                    "Trail",
+                    suffix="%",
+                )
+
 
                 lines.append("")
 

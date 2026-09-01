@@ -338,6 +338,14 @@ class TelegramMessageFormatter:
                     suffix="%",
                 )
 
+                self._append_optional_metric(
+                    lines,
+                    row,
+                    "CMP",
+                    "CMP",
+                    prefix="₹",
+                )
+
 
                 self._append_optional_metric(
                     lines,

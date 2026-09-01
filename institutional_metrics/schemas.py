@@ -3,19 +3,24 @@ from __future__ import annotations
 
 
 # ============================================================
-# RAW SCANNER REQUIRED INPUT COLUMNS
+# RAW SCANNER INPUT COLUMNS
 # ============================================================
 
-REQUIRED_COLUMNS: tuple[str, ...] = (
+RAW_SCANNER_COLUMNS: tuple[str, ...] = (
 
+    # --------------------------------------------------------
     # Identity
+    # --------------------------------------------------------
 
     "Stock",
 
     "Signals today",
 
 
-    # Ranking / Alpha
+
+    # --------------------------------------------------------
+    # Scanner Ranking / Alpha
+    # --------------------------------------------------------
 
     "Rank",
 
@@ -25,7 +30,27 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
 
 
 
-    # Trade statistics
+    # --------------------------------------------------------
+    # Trade Management
+    # --------------------------------------------------------
+
+    "Target #",
+
+    "Target %",
+
+    "Stop #",
+
+    "Stop %",
+
+    "Trail #",
+
+    "Trail %",
+
+
+
+    # --------------------------------------------------------
+    # Trade Statistics
+    # --------------------------------------------------------
 
     "Trades",
 
@@ -35,7 +60,9 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
 
 
 
-    # Return quality
+    # --------------------------------------------------------
+    # Return Quality
+    # --------------------------------------------------------
 
     "Expectancy%",
 
@@ -44,14 +71,20 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
     "Avg loss%",
 
 
+
+    # --------------------------------------------------------
     # Efficiency
+    # --------------------------------------------------------
 
     "R:R",
 
     "Avg days",
 
 
+
+    # --------------------------------------------------------
     # Performance
+    # --------------------------------------------------------
 
     "Total return (sum)%",
 
@@ -59,7 +92,9 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
 
 
 
+    # --------------------------------------------------------
     # Risk
+    # --------------------------------------------------------
 
     "Max DD%",
 
@@ -71,13 +106,93 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
 
 
 
-    # Backtest validity
+    # --------------------------------------------------------
+    # Backtest Validity
+    # --------------------------------------------------------
 
     "BT from",
 
     "BT to",
 
     "Years",
+
+)
+
+
+
+# ============================================================
+# INSTITUTIONAL GENERATED COLUMNS
+# ============================================================
+
+INSTITUTIONAL_COLUMNS: tuple[str, ...] = (
+
+    # --------------------------------------------------------
+    # Conviction Engine
+    # --------------------------------------------------------
+
+    "Confidence",
+
+    "Rank Score",
+
+
+
+    # --------------------------------------------------------
+    # Institutional Scoring
+    # --------------------------------------------------------
+
+    "Alpha Score",
+
+    "Profitability Score",
+
+    "Risk Score",
+
+    "Robustness Score",
+
+    "Efficiency Score",
+
+    "Institutional Score",
+
+
+
+    # --------------------------------------------------------
+    # Governance
+    # --------------------------------------------------------
+
+    "Institutional Eligible",
+
+    "Governance Flags",
+
+
+
+    # --------------------------------------------------------
+    # Ranking / Decision
+    # --------------------------------------------------------
+
+    "Institutional Rank",
+
+    "Institutional Priority Score",
+
+    "Institutional Rating",
+
+    "Institutional Decision",
+
+)
+
+
+
+# ============================================================
+# BACKWARD COMPATIBILITY
+# ============================================================
+
+#
+# Existing modules may import REQUIRED_COLUMNS.
+#
+# Keep this alias until all imports are migrated.
+#
+
+REQUIRED_COLUMNS: tuple[str, ...] = (
+
+    RAW_SCANNER_COLUMNS
 
 )
 
@@ -93,7 +208,21 @@ NUMERIC_COLUMNS: tuple[str, ...] = (
 
     "Exp/DAY%",
 
+
     "RS%",
+
+
+    "Target #",
+
+    "Target %",
+
+    "Stop #",
+
+    "Stop %",
+
+    "Trail #",
+
+    "Trail %",
 
 
     "Trades",
@@ -104,6 +233,7 @@ NUMERIC_COLUMNS: tuple[str, ...] = (
 
 
     "Expectancy%",
+
 
     "Avg win%",
 

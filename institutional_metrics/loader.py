@@ -10,7 +10,7 @@ from .exceptions import (
 )
 
 from .schemas import (
-    REQUIRED_COLUMNS,
+    RAW_SCANNER_COLUMNS,
 )
 
 
@@ -192,7 +192,7 @@ class HistoryLoader:
 
             column in dataframe.columns
 
-            for column in REQUIRED_COLUMNS
+            for column in RAW_SCANNER_COLUMNS
 
         )
 
@@ -248,7 +248,7 @@ class HistoryLoader:
                 dataframe = (
 
                     dataframe[
-                        list(REQUIRED_COLUMNS)
+                        list(RAW_SCANNER_COLUMNS)
                     ]
 
                     .copy()

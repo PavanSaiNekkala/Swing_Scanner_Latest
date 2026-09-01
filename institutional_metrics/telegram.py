@@ -342,50 +342,36 @@ class TelegramMessageFormatter:
                 self._append_optional_metric(
                     lines,
                     row,
-                    "Max DD%",
-                    "Max DD",
-                    suffix="%",
-                )
-
-                self._append_optional_metric(
-                    lines,
-                    row,
-                    "CAGR / Max DD",
-                    "Return/DD",
+                    "Entry #",
+                    "Entry",
+                    prefix="₹",
                 )
 
 
                 self._append_optional_metric(
                     lines,
                     row,
-                    "Profit factor",
-                    "PF",
-                )
-
-                self._append_optional_metric(
-                    lines,
-                    row,
-                    "Target %",
+                    "Target #",
                     "Target",
-                    suffix="%",
+                    prefix="₹",
                 )
 
 
                 self._append_optional_metric(
                     lines,
                     row,
-                    "Stop %",
+                    "Stop #",
                     "Stop Loss",
-                    suffix="%",
+                    prefix="₹",
                 )
 
 
                 self._append_optional_metric(
                     lines,
                     row,
-                    "Trail %",
+                    "Trail #",
                     "Trail",
-                    suffix="%",
+                    prefix="₹",
                 )
 
 

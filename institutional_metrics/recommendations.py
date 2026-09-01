@@ -382,19 +382,30 @@ class InstitutionalRecommendationEngine:
         )
 
 
-
         return RecommendationResult(
 
             recommendations=recommendations,
-            candidate_count=candidate_count,
+
+            candidate_count=int(
+                dataframe[
+                    ELIGIBLE_COLUMN
+                ]
+                .astype(bool)
+                .sum()
+            ),
+
             selected_count=len(
                 recommendations
             ),
+
             eligible_signal_count=int(
-                recommendations[
-                    ELIGIBLE_COLUMN
-                ].sum()
+                dataframe[
+                    SIGNAL_COLUMN
+                ]
+                .astype(bool)
+                .sum()
             ),
+
         )
 
 

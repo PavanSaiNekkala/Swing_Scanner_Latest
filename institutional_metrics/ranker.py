@@ -267,28 +267,28 @@ class InstitutionalRanker:
             return "A+"
 
 
-        if score >= 80:
+        if score >= 85:
 
             return "A"
 
 
 
-        if score >= 70:
+        if score >= 80:
 
             return "B+"
 
 
-        if score >= 60:
+        if score >= 75:
 
             return "B"
 
 
-        if score >= 50:
+        if score >= 70:
 
             return "C"
 
 
-        if score >= 40:
+        if score >= 50:
 
             return "D"
 
@@ -346,19 +346,19 @@ class InstitutionalRanker:
         # ----------------------------------------------------
 
 
-        if priority_score >= 85:
+        if priority_score >= 90:
 
             return "STRONG_BUY"
 
 
 
-        if priority_score >= 75:
+        if priority_score >= 80:
 
             return "BUY"
 
 
 
-        if priority_score >= 65:
+        if priority_score >= 70:
 
             return "WATCH"
 

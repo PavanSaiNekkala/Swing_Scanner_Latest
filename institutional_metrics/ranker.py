@@ -89,15 +89,15 @@ class InstitutionalRanker:
             result[
                 "Institutional Score"
             ]
-            * 0.50
+            * 0.40
 
             +
 
             result[
                 "Rank Score"
             ]
-            * 4
-            * 0.50
+            * 3
+            * 0.60
 
         )
 

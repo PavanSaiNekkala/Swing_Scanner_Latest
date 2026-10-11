@@ -222,7 +222,7 @@ class WorkflowConfig:
 
     headless: bool = True
 
-    scan_timeout_seconds: int = 9000
+    scan_timeout_seconds: int = 36000
 
     keep_server_running: bool = False
 

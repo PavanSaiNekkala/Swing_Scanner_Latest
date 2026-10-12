@@ -4860,7 +4860,7 @@ def parse_arguments(
         "--timeout",
         dest="scan_timeout_seconds",
         type=int,
-        default=9000,
+        default=36000,
         help=(
             
             "Maximum seconds to wait for scan completion."
